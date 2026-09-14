@@ -14,12 +14,19 @@ import tempfile
 from pathlib import Path
 
 
-APP_NAME = "n8n-launcher"
-ENTRY_POINT = "src/n8n_launcher/__main__.py"
-BUNDLE_ID = "com.gabrielbasso.n8n-launcher"
-
-
-def _run(command: list[str]) -> None:
+def main() -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--onefile",
+        "--windowed",
+        "--name",
+        "n8n-launcher",
+        "--paths",
+        "src",
+        "run.py",
+    ]
     subprocess.run(command, check=True)
 
 
