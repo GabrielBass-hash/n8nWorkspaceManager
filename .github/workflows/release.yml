@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read version
+        id: read
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.read.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[test]'
+      - run: python -m pytest -m 'not integration'
+
+  build:
+    needs: [version, test]
+    if: needs.version.outputs.exists == 'false'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: dist-linux
+            asset: n8n-launcher-linux
+          - os: macos-latest
+            artifact: dist-macos
+            asset: n8n-launcher-macos
+          - os: windows-latest
+            artifact: dist-windows
+            asset: n8n-launcher-windows.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[packaging]'
+      - run: python scripts/build.py
+      - name: Rename executable
+        shell: bash
+        if: runner.os != 'Windows'
+        run: mv dist/n8n-launcher "dist/${{ matrix.asset }}"
+      - name: Rename executable (Windows)
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: Move-Item dist/n8n-launcher.exe "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Generate release notes
+        id: notes
+        run: |
+          {
+            echo "notes<<EOF"
+            prev=$(git tag --sort=-version:refname | head -n1)
+            if [ -z "$prev" ]; then
+              git log --oneline -20
+            else
+              git log --oneline "$prev..HEAD"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ needs.version.outputs.version }}" \
+            artifacts/*/* \
+            --title "n8n-launcher v${{ needs.version.outputs.version }}" \
+            --notes "${{ steps.notes.outputs.notes }}"
