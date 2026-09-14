@@ -112,6 +112,7 @@ class LauncherApp:
         self.events: queue.Queue[tuple[Callable[[], None], Exception | None]] = queue.Queue()
         self._closing = False
         self._closed = False
+        self._poll_in_flight = False
         self._rows: dict[str, tuple[tk.Frame, tk.Label]] = {}
         self._row_order: list[str] = []
         self._selected_id: str | None = None
@@ -216,7 +217,7 @@ class LauncherApp:
         self.workspace_list = tk.Frame(card, bg=SURFACE)
         self.workspace_list.pack(fill="both", expand=True, padx=8, pady=8)
         self.workspace_list.bind("<Return>", lambda _event: self.launch_selected())
-        self.workspace_list.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
+        self.workspace_list.bind("<Button-1>", self._on_empty_area_click)
 
         watermark = tk.Label(
             self.workspace_list,
@@ -231,6 +232,7 @@ class LauncherApp:
         except Exception:
             pass
         self._watermark = watermark
+        watermark.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
 
         self._status_label = tk.Label(
             self.root,
@@ -422,6 +424,15 @@ class LauncherApp:
     def _on_row_leave(self, workspace_id: str) -> None:
         self._set_row_background(workspace_id, hover=False)
 
+    def _on_empty_area_click(self, _event: tk.Event) -> None:
+        """Open the creation dialog only when the list is empty; otherwise deselect."""
+        if not self._row_order:
+            self.prompt_create_workflow()
+        else:
+            self._selected_id = None
+            self._apply_selection_styles()
+            self.set_status("")
+
     def _apply_selection_styles(self) -> None:
         for workspace_id in self._rows:
             self._set_row_background(workspace_id, hover=False)
@@ -433,7 +444,28 @@ class LauncherApp:
     def _poll_states(self) -> None:
         if self._closed:
             return
-        self._run_async(self.workspace_manager.reconcile_all)
+
+        def worker() -> None:
+            try:
+                changed = self.workspace_manager.reconcile_all()
+            except Exception as exc:
+                self._poll_in_flight = False
+                self.events.put((self.refresh, exc))
+            else:
+                self._poll_in_flight = False
+                if changed:
+                    self.events.put((self.refresh, None))
+
+        # Skip the cycle if the previous reconcile is still running (docker calls
+        # can exceed the 5s poll interval) to avoid stacking worker threads.
+        if self._poll_in_flight:
+            try:
+                self.root.after(STATE_POLL_MS, self._poll_states)
+            except Exception:
+                pass
+            return
+        self._poll_in_flight = True
+        threading.Thread(target=worker, name="n8n-launcher-poll", daemon=True).start()
         try:
             self.root.after(STATE_POLL_MS, self._poll_states)
         except Exception:
@@ -678,9 +710,14 @@ class LauncherApp:
         try:
             while True:
                 callback, error = self.events.get_nowait()
-                callback()
-                if error:
-                    messagebox.showerror("n8n Launcher", str(error), parent=self.root)
+                try:
+                    callback()
+                    if error:
+                        messagebox.showerror("n8n Launcher", str(error), parent=self.root)
+                # A raising callback (e.g. browser launch) must not kill the
+                # event loop silently — surface it and keep draining.
+                except Exception as exc:
+                    messagebox.showerror("n8n Launcher", str(exc), parent=self.root)
         except queue.Empty:
             pass
         try:

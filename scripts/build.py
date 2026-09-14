@@ -13,24 +13,18 @@ import sys
 import tempfile
 from pathlib import Path
 
+APP_NAME = "n8n-launcher"
+BUNDLE_ID = "io.launcher.n8n"
+# Thin root entry point used instead of src/n8n_launcher/__main__.py:
+# PyInstaller runs it correctly while the package keeps its relative imports.
+ENTRY_POINT = "run.py"
 
-def main() -> None:
-    command = [
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--onefile",
-        "--windowed",
-        "--name",
-        "n8n-launcher",
-        "--paths",
-        "src",
-        "run.py",
-    ]
+
+def _run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
-def build_onedir():
+def build_onedir() -> None:
     _run(
         [
             sys.executable,
@@ -41,12 +35,14 @@ def build_onedir():
             APP_NAME,
             "--osx-bundle-identifier",
             BUNDLE_ID,
+            "--paths",
+            "src",
             ENTRY_POINT,
         ]
     )
 
 
-def build_onefile():
+def build_onefile() -> None:
     _run(
         [
             sys.executable,
@@ -56,6 +52,8 @@ def build_onefile():
             "--windowed",
             "--name",
             APP_NAME,
+            "--paths",
+            "src",
             ENTRY_POINT,
         ]
     )

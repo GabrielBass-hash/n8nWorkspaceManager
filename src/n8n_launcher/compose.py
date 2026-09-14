@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .models import DbMode, Workspace
+from .models import DbMode, Workspace, DEFAULT_POSTGRES_IMAGE
 
 
 class ComposeError(ValueError):
@@ -70,10 +70,18 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
       DB_POSTGRESDB_USER: n8n
       DB_POSTGRESDB_PASSWORD: launcher-managed
 """
+        postgres_image = workspace.postgres_image or DEFAULT_POSTGRES_IMAGE
+        # TimescaleDB must be listed in shared_preload_libraries before the
+        # server starts; without this the CREATE EXTENSION call fails hard.
+        command_block = ""
+        if workspace.postgres_preload_timescaledb:
+            command_block = (
+                "    command: [\"postgres\", \"-c\", \"shared_preload_libraries=timescaledb\"]\n"
+            )
         service = f"""  postgres:
-    image: postgres:16
+    image: {postgres_image}
     restart: unless-stopped
-    environment:
+{command_block}    environment:
       POSTGRES_DB: n8n
       POSTGRES_USER: n8n
       POSTGRES_PASSWORD: launcher-managed

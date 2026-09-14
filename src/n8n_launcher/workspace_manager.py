@@ -195,7 +195,10 @@ class WorkspaceManager:
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         compose = compose_file(workspace.id)
-        if compose.exists():
+        # Skip `docker down` when already stopped: makes the call idempotent so
+        # the atexit stop_all() pass after a GUI close does not tear containers
+        # down a second time.
+        if compose.exists() and workspace.state is not WorkspaceState.STOPPED:
             self.docker.down(workspace, compose, remove_orphans=True)
         workspace.state = WorkspaceState.STOPPED
         self.store.save(config)

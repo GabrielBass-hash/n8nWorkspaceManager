@@ -15,6 +15,69 @@ def test_managed_compose_is_isolated(managed_workspace) -> None:
     assert "n8ndata-demo123:" in volumes
 
 
+def test_managed_compose_respects_custom_postgres_image(tmp_path) -> None:
+    workspace = Workspace(
+        id="custom1",
+        name="CustomPg",
+        workflows_dir=tmp_path,
+        port=5683,
+        db=DbConfig(mode=DbMode.MANAGED),
+        postgres_image="postgis/postgis:16",
+    )
+
+    rendered = render_compose(workspace)
+
+    assert "image: postgis/postgis:16" in rendered
+    assert "pgdata-custom1:/var/lib/postgresql/data" in rendered
+
+
+def test_managed_compose_default_image_when_none(tmp_path) -> None:
+    workspace = Workspace(
+        id="default1",
+        name="DefaultPg",
+        workflows_dir=tmp_path,
+        port=5684,
+        db=DbConfig(mode=DbMode.MANAGED),
+        postgres_image=None,
+    )
+
+    rendered = render_compose(workspace)
+
+    assert "image: postgres:16" in rendered
+    assert "shared_preload_libraries" not in rendered
+
+
+def test_managed_compose_preloads_timescaledb_only_on_request(tmp_path) -> None:
+    workspace = Workspace(
+        id="geo1",
+        name="Geo",
+        workflows_dir=tmp_path,
+        port=5685,
+        db=DbConfig(mode=DbMode.MANAGED),
+        postgres_image="imresamu/postgis:16-3.5-bundle0-bookworm",
+        postgres_preload_timescaledb=True,
+    )
+
+    rendered = render_compose(workspace)
+
+    assert "image: imresamu/postgis:16-3.5-bundle0-bookworm" in rendered
+    assert "command: [\"postgres\", \"-c\", \"shared_preload_libraries=timescaledb\"]" in rendered
+
+
+def test_managed_compose_omits_preload_command_by_default(tmp_path) -> None:
+    workspace = Workspace(
+        id="plain1",
+        name="Plain",
+        workflows_dir=tmp_path,
+        port=5686,
+        db=DbConfig(mode=DbMode.MANAGED),
+    )
+
+    rendered = render_compose(workspace)
+
+    assert "shared_preload_libraries" not in rendered
+
+
 def test_external_database_values_are_quoted_and_dollar_escaped(tmp_path) -> None:
     workspace = Workspace(
         id="external1",

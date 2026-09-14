@@ -11,6 +11,10 @@ from typing import Callable, Sequence
 from .compose import compose_project_name
 from .models import Workspace
 
+# `compose up` blocks while pulling images (several GB on first run); the fast
+# default timeout would abort a legitimate cold start.
+UP_TIMEOUT = 600.0
+
 
 class DockerError(RuntimeError):
     """Raised when Docker or Compose cannot complete an operation."""
@@ -78,8 +82,8 @@ class DockerManager:
             if result.returncode != 0:
                 raise DockerError(f"Docker pull failed for {image}: {result.stderr.strip()}")
 
-    def up(self, workspace: Workspace, compose_file: Path) -> None:
-        self._compose(workspace, compose_file, "up", "-d", "--remove-orphans")
+    def up(self, workspace: Workspace, compose_file: Path, *, timeout: float = UP_TIMEOUT) -> None:
+        self._compose(workspace, compose_file, "up", "-d", "--remove-orphans", timeout=timeout)
 
     def down(self, workspace: Workspace, compose_file: Path, remove_orphans: bool = False) -> None:
         args = ["down"]
@@ -137,6 +141,7 @@ class DockerManager:
         compose_file: Path,
         *args: str,
         check: bool = True,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             self.command,
@@ -147,7 +152,7 @@ class DockerManager:
             str(compose_file),
             *args,
         ]
-        return self._run(command, check=check)
+        return self._run(command, check=check, timeout=timeout)
 
     def _run(
         self,

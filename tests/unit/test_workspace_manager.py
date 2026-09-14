@@ -60,6 +60,20 @@ def test_create_scaffolds_pipelines_and_db_layout(tmp_path: Path) -> None:
     assert none_workspace.db.mode is DbMode.NONE
 
 
+def test_workspace_persists_postgres_image_through_config(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = launcher.create("Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED))
+
+    assert workspace.postgres_image is None
+
+    config = store.load()
+    config.workspaces[0].postgres_image = "custom/pg:16"
+    store.save(config)
+
+    restored = store.load().workspaces[0]
+    assert restored.postgres_image == "custom/pg:16"
+
+
 def test_create_without_db_requires_migrations(tmp_path: Path) -> None:
     launcher, _, _, _ = manager(tmp_path)
 
@@ -90,6 +104,22 @@ def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
 
     assert stopped.state is WorkspaceState.STOPPED
     docker.down.assert_not_called()
+
+
+def test_stop_is_idempotent_on_already_stopped(tmp_path: Path) -> None:
+    launcher, _, docker, _ = manager(tmp_path)
+    workspace = create_external(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+
+    with patch("n8n_launcher.workspace_manager.compose_file", return_value=compose):
+        launcher.start(workspace.id)
+        launcher.stop(workspace.id)
+        # Second pass = the atexit stop_all() after a GUI close.
+        stopped = launcher.stop(workspace.id)
+
+    assert stopped.state is WorkspaceState.STOPPED
+    docker.up.assert_called_once()
+    docker.down.assert_called_once()
 
 
 def test_live_state_reports_running_when_n8n_up(tmp_path: Path) -> None:

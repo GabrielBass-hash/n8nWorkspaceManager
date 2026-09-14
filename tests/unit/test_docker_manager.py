@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 import pytest
 
-from n8n_launcher.docker_manager import DockerManager, parse_compose_status
+from n8n_launcher.docker_manager import (
+    DockerManager,
+    UP_TIMEOUT,
+    parse_compose_status,
+)
 from n8n_launcher.models import DbConfig, DbMode, Workspace
 
 
@@ -44,6 +48,34 @@ def test_up_uses_isolated_compose_project(tmp_path: Path) -> None:
         "--remove-orphans",
     ]
     assert run.call_args.kwargs.get("shell") is not True
+
+
+def test_up_uses_extended_timeout_for_image_pulls(tmp_path: Path) -> None:
+    manager = DockerManager()
+
+    with patch("n8n_launcher.docker_manager.subprocess.run", return_value=completed()) as run:
+        manager.up(workspace(tmp_path), tmp_path / "compose.yml")
+
+    assert run.call_args.kwargs["timeout"] == UP_TIMEOUT
+
+
+def test_up_accepts_custom_timeout(tmp_path: Path) -> None:
+    manager = DockerManager()
+
+    with patch("n8n_launcher.docker_manager.subprocess.run", return_value=completed()) as run:
+        manager.up(workspace(tmp_path), tmp_path / "compose.yml", timeout=42.0)
+
+    assert run.call_args.kwargs["timeout"] == 42.0
+
+
+def test_fast_commands_keep_default_timeout(tmp_path: Path) -> None:
+    manager = DockerManager()
+    compose_file = tmp_path / "compose.yml"
+
+    with patch("n8n_launcher.docker_manager.subprocess.run", return_value=completed()) as run:
+        manager.down(workspace(tmp_path), compose_file)
+
+    assert run.call_args.kwargs["timeout"] == manager.timeout
 
 
 def test_failed_command_raises_docker_error(tmp_path: Path) -> None:

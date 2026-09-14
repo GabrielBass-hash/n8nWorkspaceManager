@@ -368,6 +368,17 @@ def test_async_error_surfaces_in_messagebox(app) -> None:
     assert app.mocks.messagebox.errors == ["boom"]
 
 
+def test_raising_callback_does_not_kill_event_loop(app) -> None:
+    def exploding_callback() -> None:
+        raise RuntimeError("browser failed")
+
+    app.app.events.put((exploding_callback, None))
+    app.app._drain_events()
+
+    assert app.mocks.messagebox.errors == ["browser failed"]
+    assert any(delay == 100 for delay, _ in app.app.root.after_callbacks)
+
+
 def test_launch_does_not_restart_when_running(app) -> None:
     app.app._select_row("ws-running")
     app.app.launch_selected()
@@ -600,6 +611,65 @@ def test_state_poll_runs_reconcile_and_reschedules(gui_mocks, tmp_path) -> None:
     assert any(delay == 5000 for delay, _ in root.after_callbacks)
 
 
+def _drain_queue(app) -> None:
+    while not app.events.empty():
+        app.events.get_nowait()
+
+
+def test_poll_skips_refresh_when_state_unchanged(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.reconcile_all.return_value = 0
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+    _drain_queue(launcher)
+
+    launcher._poll_states()
+
+    assert launcher.events.empty()
+    assert manager.reconcile_all.call_count == 2
+
+
+def test_poll_refreshes_only_when_state_changed(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.reconcile_all.return_value = 1
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+    _drain_queue(launcher)
+
+    launcher._poll_states()
+
+    callback, error = launcher.events.get_nowait()
+    assert error is None
+    assert launcher.events.empty()
+
+
+def test_poll_skips_overlapping_reconcile(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.reconcile_all.return_value = 0
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+    _drain_queue(launcher)
+
+    launcher._poll_in_flight = True
+    calls_before = manager.reconcile_all.call_count
+    launcher._poll_states()
+
+    assert manager.reconcile_all.call_count == calls_before
+    assert launcher.events.empty()
+
+
 def test_empty_list_has_empty_space_click_binding(gui_mocks, tmp_path) -> None:
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
@@ -648,6 +718,40 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
     assert manager.create.call_args.args == ("Click flow", folder)
     assert database.mode is DbMode.MANAGED
     assert database.password
+
+
+def test_empty_space_click_deselects_when_rows_exist(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    ws = make_workspace(tmp_path, "Existing", 5678)
+    manager.list.return_value = [ws]
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    launcher._select_row("ws-existing")
+
+    launcher.workspace_list._bindings["<Button-1>"](None)
+
+    assert launcher._selected_id is None
+    manager.create.assert_not_called()
+
+
+def test_watermark_click_triggers_creation(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    folder = tmp_path / "wf-watermark"
+    folder.mkdir()
+    gui_mocks.messagebox._yesnocancel = True
+
+    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="WM flow"), patch(
+        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
+    ):
+        launcher._watermark._bindings["<Button-1>"](None)
+    launcher._drain_events()
+
+    assert manager.create.call_args.args[0] == "WM flow"
 
 
 def test_close_wired_on_window_protocol(app) -> None:
