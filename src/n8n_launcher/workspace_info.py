@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .db_manager import has_db_layout
-from .models import DbConfig, DbMode, Workspace
+from .models import DbMode, Workspace
 
 
 def git_repo_status(workflows_dir: Path) -> bool:
@@ -19,12 +19,6 @@ def db_connected(workspace: Workspace) -> bool:
     if workspace.db.mode is DbMode.MANAGED:
         return has_db_layout(workspace.workflows_dir)
     return False
-
-
-def db_config_for_folder(workflows_dir: Path) -> DbConfig | None:
-    if has_db_layout(workflows_dir):
-        return DbConfig(mode=DbMode.MANAGED)
-    return None
 
 
 def db_label(workspace: Workspace) -> str:

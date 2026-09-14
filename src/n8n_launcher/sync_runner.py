@@ -97,6 +97,37 @@ class SyncRunner:
                 stale.unlink()
         return SyncReport(pulled=pulled)
 
+    def import_all(self) -> SyncReport:
+        """Create in n8n every workflow JSON stored in the workspace folder.
+
+        Files are n8n workflow exports (name, nodes, connections). Workflows
+        already known to n8n (by id or by name) are skipped. Returns how many
+        workflows were created.
+        """
+        existing = self.api.list_workflows()
+        existing_ids = {str(item.get("id")) for item in existing if item.get("id")}
+        existing_names = {str(item.get("name")) for item in existing if item.get("name")}
+        pushed = 0
+        skipped = 0
+        for path in sorted(self.workflows_dir.glob("*.json")):
+            if path.name in existing_ids:
+                skipped += 1
+                continue
+            try:
+                workflow = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                skipped += 1
+                continue
+            if not isinstance(workflow, dict) or "nodes" not in workflow:
+                skipped += 1
+                continue
+            if str(workflow.get("name")) in existing_names:
+                skipped += 1
+                continue
+            self.api.create_workflow(_create_payload(workflow))
+            pushed += 1
+        return SyncReport(pushed=pushed, skipped=skipped)
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -111,3 +142,30 @@ def _safe_name(value: Any) -> str:
     text = str(value or "workflow").strip()
     safe = "".join(character if character.isalnum() or character in "-_" else "_" for character in text)
     return safe or "workflow"
+
+
+def _create_payload(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Build a create-request body that the public API accepts.
+
+    The public POST /workflows endpoint validates the body against a strict
+    OpenAPI schema (``additionalProperties: false``): any property outside its
+    declared set is rejected with "must NOT have additional properties". A
+    whitelist is therefore safer than a blacklist, because export files carry
+    many read-only/server fields (``description``, ``active``,
+    ``triggerCount``, ``shared``, ...) that are not part of the create schema.
+    """
+    allowed = {
+        "name",
+        "nodes",
+        "connections",
+        "settings",
+        "staticData",
+        "pinData",
+        "nodeGroups",
+        "projectId",
+        "parentFolderId",
+    }
+    payload = {key: value for key, value in workflow.items() if key in allowed}
+    # The public create schema marks settings as required.
+    payload.setdefault("settings", {})
+    return payload

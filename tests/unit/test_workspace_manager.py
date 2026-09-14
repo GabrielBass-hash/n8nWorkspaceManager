@@ -219,6 +219,7 @@ def test_start_managed_applies_migrations(tmp_path: Path) -> None:
 
 def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
@@ -241,6 +242,7 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
 
 def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
@@ -270,6 +272,7 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
 
 def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
@@ -291,6 +294,7 @@ def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> N
 
 def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
@@ -310,6 +314,7 @@ def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> No
 def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
     for status_code, label in [(403, "forbidden"), (401, "unauthorized")]:
         forbidden = MagicMock()
+        forbidden.list_workflows.return_value = []
         forbidden.ensure_postgres_credential.side_effect = [
             N8nApiError(label, status_code=status_code),
             None,
@@ -334,6 +339,32 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
         assert booter.call_count == 1
         assert store.load().workspaces[0].api_key == "rotated-key"
         assert forbidden.ensure_postgres_credential.call_count == 2
+
+
+def test_ensure_running_imports_folder_workflows(tmp_path: Path) -> None:
+    fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    booter = MagicMock(return_value="api-key-123")
+    launcher = WorkspaceManager(
+        store, MagicMock(), owner_booter=booter, api_factory=MagicMock(return_value=fake_api)
+    )
+    workflows_dir = tmp_path / "workflows"
+    pipelines_dir = workflows_dir / "n8nPipelines"
+    pipelines_dir.mkdir(parents=True)
+    (pipelines_dir / "Meteo.json").write_text(
+        '{"id": "x", "name": "Meteo", "nodes": [], "connections": {}, "settings": {}}',
+        encoding="utf-8",
+    )
+    workspace = launcher.create("Demo", workflows_dir, db=DbConfig(DbMode.NONE))
+
+    with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "compose.yml"):
+        launcher.ensure_running(workspace.id)
+
+    fake_api.create_workflow.assert_called_once_with(
+        {"name": "Meteo", "nodes": [], "connections": {}, "settings": {}}
+    )
 
 
 def test_ensure_running_propagates_bootstrap_error(tmp_path: Path) -> None:

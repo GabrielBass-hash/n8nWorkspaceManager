@@ -21,14 +21,9 @@ from .browser import open_app
 from .config import ConfigStore
 from .docker_manager import DockerManager
 from .models import DbConfig, DbMode, Workspace, WorkspaceState
+from .n8n_setup import build_external_connection_string
 from .sync_runner import SyncRunner
-from .workspace_info import (
-    db_config_for_folder,
-    db_connected,
-    db_label,
-    git_repo_status,
-    pipelines_count,
-)
+from .workspace_info import db_connected, db_label, git_repo_status, pipelines_count
 from .workspace_manager import WorkspaceError, WorkspaceManager
 
 APP_BACKGROUND = "#0f172a"
@@ -497,44 +492,77 @@ class LauncherApp:
         if not name:
             return
         directory = filedialog.askdirectory(
-            title="Dossier du workspace (n8nPipelines + db/)", parent=self.root
+            title="Dossier du workspace (workflows JSON dans n8nPipelines/)", parent=self.root
         )
         if not directory:
             return
         workflows_dir = Path(directory)
         workflows_dir.mkdir(parents=True, exist_ok=True)
-        folder_empty = not any(workflows_dir.iterdir())
-        database = db_config_for_folder(workflows_dir)
-        if database is None and folder_empty:
-            choice = messagebox.askyesnocancel(
-                "Nouveau workflow",
-                "Ce dossier est vide. Quelle base de données pour les workflows ?\n\n"
-                "« Oui » = base locale (gérée, schéma + migrations auto)\n"
-                "« Non » = base distante (connexion string)\n"
-                "« Annuler » = aucune base (workflows sauvegardés en JSON)",
-                parent=self.root,
-            )
-            if choice is True:
-                database = self._fresh_managed_db_config()
-            elif choice is False:
-                connection_string = simpledialog.askstring(
-                    "Nouveau workflow", "Connexion string de la base distante :", parent=self.root
+        choice = messagebox.askyesnocancel(
+            "Nouveau workflow",
+            "Quelle base de données pour les workflows ?\n\n"
+            "« Oui » = base locale (gérée, schéma + migrations auto)\n"
+            "« Non » = base distante (accès à une base existante)\n"
+            "« Annuler » = aucune base (workflows sauvegardés en JSON)",
+            parent=self.root,
+        )
+        if choice is True:
+            database = self._fresh_managed_db_config()
+        elif choice is False:
+            database = self._prompt_external_db_config()
+            if database is None:
+                messagebox.showinfo(
+                    "Nouveau workflow",
+                    "Création annulée : aucune connexion distante fournie.",
+                    parent=self.root,
                 )
-                if not connection_string:
-                    messagebox.showinfo(
-                        "Nouveau workflow",
-                        "Création annulée : aucune connexion distante fournie.",
-                        parent=self.root,
-                    )
-                    return
-                database = DbConfig(DbMode.EXTERNAL, connection_string=connection_string.strip())
-            else:
-                database = DbConfig(DbMode.NONE)
-        elif database is None:
+                return
+        else:
             database = DbConfig(DbMode.NONE)
         self._run_async(
             lambda: self.workspace_manager.create(name.strip(), workflows_dir, db=database),
             on_success=self._refresh_with_selection,
+        )
+
+    def _prompt_external_db_config(self) -> DbConfig | None:
+        """Gather the connection fields for an existing remote PostgreSQL database."""
+        host = simpledialog.askstring(
+            "Nouveau workflow", "Hôte de la base distante :", parent=self.root
+        )
+        if not host:
+            return None
+        port = simpledialog.askstring(
+            "Nouveau workflow",
+            "Port de la base distante (défaut 5432) :",
+            parent=self.root,
+        )
+        database = simpledialog.askstring(
+            "Nouveau workflow", "Nom de la base distante :", parent=self.root
+        )
+        if not database:
+            return None
+        username = simpledialog.askstring(
+            "Nouveau workflow", "Utilisateur de la base distante :", parent=self.root
+        )
+        if not username:
+            return None
+        password = simpledialog.askstring(
+            "Nouveau workflow",
+            "Mot de passe de la base distante :",
+            parent=self.root,
+            show="*",
+        )
+        if password is None:
+            return None
+        return DbConfig(
+            DbMode.EXTERNAL,
+            connection_string=build_external_connection_string(
+                host=host.strip(),
+                port=port or "5432",
+                database=database.strip(),
+                user=username.strip(),
+                password=password,
+            ),
         )
 
     @staticmethod

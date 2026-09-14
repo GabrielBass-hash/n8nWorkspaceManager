@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .models import DbMode, Workspace, DEFAULT_POSTGRES_IMAGE
 
@@ -104,9 +104,9 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
     environment = f"""      DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: {_yaml_quote(escape_compose_value(parsed.hostname))}
       DB_POSTGRESDB_PORT: \"{parsed.port or 5432}\"
-      DB_POSTGRESDB_DATABASE: {_yaml_quote(escape_compose_value(parsed.path.lstrip("/")))}
-      DB_POSTGRESDB_USER: {_yaml_quote(escape_compose_value(parsed.username or ""))}
-      DB_POSTGRESDB_PASSWORD: {_yaml_quote(escape_compose_value(parsed.password or ""))}
+      DB_POSTGRESDB_DATABASE: {_yaml_quote(escape_compose_value(unquote(parsed.path.lstrip("/"))))}
+      DB_POSTGRESDB_USER: {_yaml_quote(escape_compose_value(unquote(parsed.username or "")))}
+      DB_POSTGRESDB_PASSWORD: {_yaml_quote(escape_compose_value(unquote(parsed.password or "")))}
 """
     return environment, "", ""
 

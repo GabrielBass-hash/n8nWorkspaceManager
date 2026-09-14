@@ -476,19 +476,20 @@ def test_delete_unknown_workspace_is_noop(app) -> None:
     app.manager.delete.assert_not_called()
 
 
-def test_prompt_create_uses_managed_db_when_db_layout_present(app, tmp_path) -> None:
+def test_prompt_create_uses_managed_db_when_local_chosen(app, tmp_path) -> None:
     folder = tmp_path / "wf"
     (folder / "db" / "migrations").mkdir(parents=True)
     (folder / "db" / "migrations" / "001.sql").write_text("select 1;")
+    app.mocks.messagebox._yesnocancel = True
 
     with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
         "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
     ):
         app.app.prompt_create_workflow()
 
-    app.manager.create.assert_called_once_with(
-        "My flow", folder, db=DbConfig(DbMode.MANAGED)
-    )
+    database = app.manager.create.call_args.kwargs["db"]
+    assert database.mode is DbMode.MANAGED
+    assert database.password
 
 
 def test_prompt_create_uses_managed_db_by_default_on_empty_folder(app, tmp_path) -> None:
@@ -515,7 +516,7 @@ def test_prompt_create_uses_external_db_when_local_declined(app, tmp_path) -> No
 
     with patch(
         "n8n_launcher.gui.simpledialog.askstring",
-        side_effect=["My flow", "postgresql://u:p@host/db"],
+        side_effect=["My flow", "db.example", "5433", "app", "user", "p$ss"],
     ), patch(
         "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
     ):
@@ -524,7 +525,10 @@ def test_prompt_create_uses_external_db_when_local_declined(app, tmp_path) -> No
     app.manager.create.assert_called_once_with(
         "My flow",
         folder,
-        db=DbConfig(DbMode.EXTERNAL, connection_string="postgresql://u:p@host/db"),
+        db=DbConfig(
+            DbMode.EXTERNAL,
+            connection_string="postgresql://user:p%24ss@db.example:5433/app",
+        ),
     )
 
 
@@ -543,10 +547,11 @@ def test_prompt_create_uses_none_db_when_user_cancels_dialog(app, tmp_path) -> N
     )
 
 
-def test_prompt_create_none_db_when_folder_already_has_content(app, tmp_path) -> None:
+def test_prompt_create_none_db_when_user_cancels_on_non_empty_folder(app, tmp_path) -> None:
     folder = tmp_path / "wf-existing"
     folder.mkdir()
     (folder / "notes.txt").write_text("deja la")
+    app.mocks.messagebox._yesnocancel = None
 
     with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
         "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
@@ -558,18 +563,16 @@ def test_prompt_create_none_db_when_folder_already_has_content(app, tmp_path) ->
     )
 
 
-def test_prompt_create_aborts_with_info_when_dsn_empty(app, tmp_path) -> None:
+def test_prompt_create_aborts_with_info_when_external_host_empty(app, tmp_path) -> None:
     folder = tmp_path / "wf3"
     folder.mkdir()
     app.mocks.messagebox._yesnocancel = False
 
     with patch(
-        "n8n_launcher.gui.simpledialog.askstring", return_value="My flow"
-    ), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ), patch(
         "n8n_launcher.gui.simpledialog.askstring",
         side_effect=["My flow", None],
+    ), patch(
+        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
     ):
         app.app.prompt_create_workflow()
 
