@@ -59,10 +59,10 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: dist-linux
-            asset: n8n-launcher-linux
+            asset: n8n-launcher-linux-x86_64.AppImage
           - os: macos-latest
             artifact: dist-macos
-            asset: n8n-launcher-macos
+            asset: n8n-launcher-macos.dmg
           - os: windows-latest
             artifact: dist-windows
             asset: n8n-launcher-windows.exe
@@ -72,11 +72,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -e '.[packaging]'
-      - run: python scripts/build.py
-      - name: Rename executable
-        shell: bash
-        if: runner.os != 'Windows'
-        run: mv dist/n8n-launcher "dist/${{ matrix.asset }}"
+      - name: Build executable
+        run: python scripts/build.py
+      - name: Build AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/build_appimage.sh
       - name: Rename executable (Windows)
         shell: pwsh
         if: runner.os == 'Windows'
@@ -107,6 +107,12 @@ jobs:
             else
               git log --oneline "$prev..HEAD"
             fi
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo "- **macOS**: open \`n8n-launcher-macos.dmg\` and drag \`n8n-launcher.app\` into Applications. First launch: right-click the app -> Open (unsigned build)."
+            echo "- **Windows**: download \`n8n-launcher-windows.exe\` and pin it to the taskbar or Start menu."
+            echo "- **Linux**: download \`n8n-launcher-linux-x86_64.AppImage\`, make it executable (\`chmod +x\`), then double-click or add it to your app menu."
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
       - name: Create GitHub release and tag

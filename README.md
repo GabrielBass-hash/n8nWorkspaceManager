@@ -35,13 +35,35 @@ Integration tests are opt-in:
 pytest -m integration
 ```
 
-Build the desktop executable locally with:
+Build the desktop distribution locally with:
 
 ```bash
 python -m pip install -e '.[packaging]'
 python scripts/build.py
 ```
 
+On Linux, additionally build the AppImage with:
+
+```bash
+bash scripts/build_appimage.sh
+```
+
+The output depends on the platform:
+
+| Platform | Output |
+|---|---|
+| macOS | `dist/n8n-launcher-macos.dmg` (drag-and-drop installer) |
+| Linux | one-file `dist/n8n-launcher` or `dist/n8n-launcher-linux-x86_64.AppImage` |
+| Windows | `dist/n8n-launcher.exe` |
+
+## Installation
+
+- **macOS**: open the `.dmg`, drag `n8n-launcher.app` into `/Applications` (or the Dock). Because the build is not notarized, right-click the app and choose *Open* the first time you launch it.
+- **Windows**: run or pin `n8n-launcher.exe` from the taskbar / Start menu.
+- **Linux**: make the AppImage executable (`chmod +x n8n-launcher-linux-x86_64.AppImage`) and launch it — it integrates with your desktop environment's app menu.
+
+## Releases
+
+Pushing to `main` automatically runs unit tests (blocker) and builds the per-OS distribution above. If `version` in `pyproject.toml` has been bumped, a GitHub Release `v<version>` is created with all three artifacts attached.
+
 The launcher is independent of the source repository that inspired some of its API and workflow-sync boundaries. It does not reuse that repository's weather database schema, runtime state, or Docker sync service.
-# n8nWorkspaceManager
-# n8nWorkspaceManager
