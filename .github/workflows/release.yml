@@ -110,7 +110,7 @@ jobs:
             echo ""
             echo "## Installation"
             echo ""
-            echo "- **macOS**: open \`n8n-launcher-macos.dmg\` and drag \`n8n-launcher.app\` into Applications. First launch: right-click the app -> Open (unsigned build)."
+            echo "- **macOS**: open \`n8n-launcher-macos.dmg\` and drag \`n8n-launcher.app\` into Applications. First launch: right-click the app -> Open (ad-hoc signed, not notarized build)."
             echo "- **Windows**: download \`n8n-launcher-windows.exe\` and pin it to the taskbar or Start menu."
             echo "- **Linux**: download \`n8n-launcher-linux-x86_64.AppImage\`, make it executable (\`chmod +x\`), then double-click or add it to your app menu."
             echo "EOF"

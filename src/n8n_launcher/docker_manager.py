@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +13,32 @@ from typing import Callable, Sequence
 
 from .compose import compose_project_name
 from .models import Workspace
+
+MACOS_DOCKER_SEARCH_DIRS = [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/Applications/Docker.app/Contents/Resources/bin",
+]
+
+
+def resolve_docker_command() -> str:
+    """Return an absolute path to a usable ``docker`` CLI.
+
+    GUI launch services (Finder, Dock, Launchpad) start applications with a
+    minimal ``PATH`` (``/usr/bin:/bin:/usr/sbin:/sbin``), so ``docker``
+    installed via Homebrew or Docker Desktop is not discoverable by bare name.
+    Probe the standard install locations first, then fall back to ``PATH``
+    lookup and finally to the bare command so error reporting stays friendly.
+    """
+    if platform.system() == "Darwin":
+        for directory in MACOS_DOCKER_SEARCH_DIRS:
+            candidate = Path(directory) / "docker"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    resolved = shutil.which("docker")
+    return resolved or "docker"
 
 
 class DockerError(RuntimeError):
