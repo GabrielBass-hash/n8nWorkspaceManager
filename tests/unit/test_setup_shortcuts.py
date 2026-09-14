@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -66,4 +67,5 @@ def test_linux_shortcut_is_executable_desktop_entry(tmp_path: Path) -> None:
 
     assert shortcut.suffix == ".desktop"
     assert "Exec=\"/opt/n8n-launcher\"" in shortcut.read_text(encoding="utf-8")
-    assert shortcut.stat().st_mode & 0o111
+    if os.name != "nt":
+        assert shortcut.stat().st_mode & 0o111
