@@ -22,7 +22,13 @@ from .config import ConfigStore
 from .docker_manager import DockerManager
 from .models import DbConfig, DbMode, Workspace, WorkspaceState
 from .sync_runner import SyncRunner
-from .workspace_info import db_config_for_folder, db_label, git_label, pipelines_count
+from .workspace_info import (
+    db_config_for_folder,
+    db_connected,
+    db_label,
+    git_repo_status,
+    pipelines_count,
+)
 from .workspace_manager import WorkspaceError, WorkspaceManager
 
 APP_BACKGROUND = "#0f172a"
@@ -46,6 +52,12 @@ STATUS_STYLE = {
     WorkspaceState.STOPPING: ("#78350f", "#fcd34d"),
     WorkspaceState.ERROR: ("#7f1d1d", "#fca5a5"),
 }
+
+CHIP_ACTIVE = ("#064e3b", "#34d399")
+CHIP_INACTIVE = ("#7f1d1d", "#fca5a5")
+CHIP_NEUTRAL = ("#334155", "#cbd5e1")
+
+WATERMARK_COLOR = "#2b3950"
 
 STATE_LABELS = {
     WorkspaceState.STOPPED: "Arrêté",
@@ -78,6 +90,7 @@ FONT_ROWS = (FONT_BASE, 11, "bold")
 FONT_META = (FONT_BASE, 10)
 FONT_STATUS = (FONT_BASE, 9)
 FONT_PILL = (FONT_BASE, 9, "bold")
+FONT_WATERMARK = (FONT_BASE, 44)
 
 
 class LauncherApp:
@@ -102,10 +115,10 @@ class LauncherApp:
         self._rows: dict[str, tuple[tk.Frame, tk.Label]] = {}
         self._row_order: list[str] = []
         self._selected_id: str | None = None
+        self._launching: str | None = None
         self._status_label: tk.Label | None = None
         self._subtitle: tk.Label | None = None
         self._menu: tk.Menu | None = None
-        self._empty_hint: tk.Label | None = None
         self._apply_theme()
         self._configure_root()
         self._build_ui()
@@ -205,14 +218,19 @@ class LauncherApp:
         self.workspace_list.bind("<Return>", lambda _event: self.launch_selected())
         self.workspace_list.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
 
-        footer = tk.Frame(card, bg=SURFACE)
-        footer.pack(fill="x", side="bottom", pady=(0, 10))
-        ttk.Button(
-            footer,
-            text="+  Nouveau workflow",
-            command=self.prompt_create_workflow,
-            style="Accent.TButton",
-        ).pack(anchor="w", padx=14)
+        watermark = tk.Label(
+            self.workspace_list,
+            text="+",
+            bg=SURFACE,
+            fg=WATERMARK_COLOR,
+            font=FONT_WATERMARK,
+            anchor="center",
+        )
+        try:
+            watermark.place(relx=0.5, rely=0.5, anchor="center")
+        except Exception:
+            pass
+        self._watermark = watermark
 
         self._status_label = tk.Label(
             self.root,
@@ -236,7 +254,8 @@ class LauncherApp:
             row_bg = ROW_SELECTED_BG
             border = ACCENT
         else:
-            row_bg, border = SURFACE, BORDER
+            row_bg = SURFACE
+            border = BORDER
         frame = tk.Frame(
             self.workspace_list,
             bg=row_bg,
@@ -245,46 +264,16 @@ class LauncherApp:
         )
         frame.pack(fill="x", pady=3, padx=2)
 
-        content = tk.Frame(frame, bg=row_bg)
-        content.pack(side="left", fill="x", expand=True)
-
-        top = tk.Frame(content, bg=row_bg)
-        top.pack(fill="x", pady=(6, 1), padx=(10, 8))
-
         name_label = tk.Label(
-            top,
+            frame,
             text=workspace.name,
             bg=row_bg,
             fg=TEXT_PRIMARY,
             font=FONT_ROWS,
             anchor="w",
+            padx=8,
         )
         name_label.pack(side="left", fill="x", expand=True)
-
-        pill_bg, pill_fg = STATUS_STYLE.get(
-            workspace.state, STATUS_STYLE[WorkspaceState.STOPPED]
-        )
-        status_label = tk.Label(
-            top,
-            text=state_label(workspace.state),
-            bg=pill_bg,
-            fg=pill_fg,
-            font=FONT_PILL,
-            anchor="center",
-            padx=8,
-            pady=2,
-        )
-        status_label.pack(side="right", padx=(8, 0))
-
-        meta_label = tk.Label(
-            content,
-            text=self._row_meta(workspace),
-            bg=row_bg,
-            fg=TEXT_MUTED,
-            font=FONT_META,
-            anchor="w",
-        )
-        meta_label.pack(fill="x", padx=(10, 8), pady=(0, 6))
 
         delete_button = tk.Button(
             frame,
@@ -297,11 +286,41 @@ class LauncherApp:
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            padx=8,
-            pady=2,
+            padx=6,
+            pady=1,
+            cursor="hand2",
             command=lambda wid=workspace.id: self.delete_workspace(wid),
         )
-        delete_button.pack(side="right", padx=(10, 8), pady=6)
+        delete_button.pack(side="right", padx=(6, 8), pady=6)
+
+        port_chip = self._chip(
+            frame, text=f":{workspace.port}", palette=CHIP_NEUTRAL
+        )
+        port_chip.pack(side="right", padx=(6, 0))
+
+        status_palette = STATUS_STYLE.get(
+            workspace.state, STATUS_STYLE[WorkspaceState.STOPPED]
+        )
+        status_label = self._chip(
+            frame, text=state_label(workspace.state), palette=status_palette
+        )
+        status_label.pack(side="right", padx=(6, 0))
+
+        db_palette = CHIP_ACTIVE if db_connected(workspace) else CHIP_INACTIVE
+        db_chip = self._chip(frame, text=db_label(workspace), palette=db_palette)
+        db_chip.pack(side="right", padx=(6, 0))
+
+        git_palette = (
+            CHIP_ACTIVE if git_repo_status(workspace.workflows_dir) else CHIP_INACTIVE
+        )
+        git_chip = self._chip(frame, text="git", palette=git_palette)
+        git_chip.pack(side="right", padx=(6, 0))
+
+        pipelines = pipelines_count(workspace.workflows_dir)
+        pipelines_chip = self._chip(
+            frame, text=str(pipelines), palette=CHIP_NEUTRAL
+        )
+        pipelines_chip.pack(side="right", padx=(6, 0))
 
         name_label.bind(
             "<Button-1>", lambda _event, wid=workspace.id: self._select_row(wid)
@@ -330,18 +349,32 @@ class LauncherApp:
 
         frame.name_label = name_label
         frame.status_label = status_label
-        frame.meta_label = meta_label
+        frame.db_chip = db_chip
+        frame.git_chip = git_chip
+        frame.port_chip = port_chip
+        frame.pipelines_chip = pipelines_chip
         frame.delete_button = delete_button
-        frame.content = content
-        frame.top = top
         return frame, name_label
 
     @staticmethod
-    def _row_meta(workspace: Workspace) -> str:
-        pipelines = pipelines_count(workspace.workflows_dir)
-        return (
-            f":{workspace.port} · db {db_label(workspace)} · git {git_label(workspace)} "
-            f"· {pipelines} pipeline{'s' if pipelines > 1 else ''}"
+    def _chip(
+        parent,
+        text: str,
+        *,
+        palette: tuple[str, str],
+        font: tuple[str, int, str] = FONT_PILL,
+        **kwargs,
+    ) -> tk.Label:
+        bg, fg = palette
+        return tk.Label(
+            parent,
+            text=text,
+            bg=bg,
+            fg=fg,
+            font=font,
+            anchor="center",
+            padx=kwargs.pop("padx", 8),
+            pady=kwargs.pop("pady", 2),
         )
 
     def refresh(self) -> None:
@@ -359,31 +392,12 @@ class LauncherApp:
         if self._selected_id is not None and self._selected_id not in self._rows:
             self._selected_id = None
         self._apply_selection_styles()
-        self._update_empty_state(workspaces)
         if self._subtitle is not None:
             count = len(workspaces)
-            self._subtitle.config(text=f"{count} workflow{'s' if count != 1 else ''}")
-
-    def _update_empty_state(self, workspaces: list[Workspace]) -> None:
-        if self._empty_hint is not None:
-            try:
-                self._empty_hint.destroy()
-            except Exception:
-                pass
-            self._empty_hint = None
-        if workspaces:
-            return
-        hint = tk.Label(
-            self.workspace_list,
-            text="Aucun workflow — cliquez ici pour en créer un",
-            bg=SURFACE,
-            fg=TEXT_MUTED,
-            font=FONT_META,
-            anchor="center",
-        )
-        hint.pack(fill="both", expand=True, padx=8, pady=24)
-        hint.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
-        self._empty_hint = hint
+            if count == 0:
+                self._subtitle.config(text="Aucun workflow — cliquez pour en créer un")
+            else:
+                self._subtitle.config(text=f"{count} workflow{'s' if count != 1 else ''}")
 
     def _set_row_background(self, workspace_id: str, *, hover: bool = False) -> None:
         frame = self._rows.get(workspace_id, (None, None))[0]
@@ -397,17 +411,10 @@ class LauncherApp:
         else:
             background, border = SURFACE, BORDER
         frame.config(bg=background, highlightbackground=border)
-        for widget in (
-            frame.name_label,
-            frame.meta_label,
-            getattr(frame, "content", None),
-            getattr(frame, "top", None),
-        ):
-            if widget is not None:
-                try:
-                    widget.config(bg=background)
-                except Exception:
-                    pass
+        try:
+            frame.name_label.config(bg=background)
+        except Exception:
+            pass
 
     def _on_row_enter(self, workspace_id: str) -> None:
         self._set_row_background(workspace_id, hover=True)
@@ -513,9 +520,19 @@ class LauncherApp:
         workspace = self._selected_or_warn()
         if workspace is None:
             return
+        if self._launching == workspace.id:
+            return
+        self._launching = workspace.id
         url = f"http://127.0.0.1:{workspace.port}"
+
+        def action() -> None:
+            try:
+                self._ensure_running(workspace)
+            finally:
+                self._launching = None
+
         self._run_async(
-            lambda: self._ensure_running(workspace),
+            action,
             on_success=lambda: self.browser_opener(url),
         )
 

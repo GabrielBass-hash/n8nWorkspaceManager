@@ -42,6 +42,9 @@ class FakeTk:
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
 
+        def place(self, **kwargs) -> None:
+            self._place_options = dict(kwargs)
+
     class Label:
         def __init__(self, parent, **kwargs):
             self._parent = parent
@@ -57,6 +60,9 @@ class FakeTk:
 
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
+
+        def place(self, **kwargs) -> None:
+            self._place_options = dict(kwargs)
 
     class Button:
         def __init__(self, parent, **kwargs):
@@ -144,6 +150,18 @@ class SyncThread:
     def start(self) -> None:
         if self.target:
             self.target()
+
+
+class HoldingThread:
+    instances: list["HoldingThread"] = []
+
+    def __init__(self, *, target=None, **kwargs):
+        self.target = target
+        self.started = False
+        HoldingThread.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
 
 
 class FakeMessagebox:
@@ -240,8 +258,21 @@ def row_status_text(app, workspace_id: str) -> str:
     return row_status_label(app, workspace_id)._options["text"]
 
 
-def row_meta_text(app, workspace_id: str) -> str:
-    return app.app._rows[workspace_id][0].meta_label._options["text"]
+def row_chip(app, workspace_id: str, attr: str):
+    return getattr(app.app._rows[workspace_id][0], attr)
+
+
+def row_chip_text(app, workspace_id: str, attr: str) -> str:
+    return row_chip(app, workspace_id, attr)._options["text"]
+
+
+def row_chip_colors(app, workspace_id: str, attr: str) -> tuple[str, str]:
+    chip = row_chip(app, workspace_id, attr)
+    return chip._options["bg"], chip._options["fg"]
+
+
+ACTIVE_CHIP = ("#064e3b", "#34d399")
+INACTIVE_CHIP = ("#7f1d1d", "#fca5a5")
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -261,13 +292,19 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
 
     assert row_text(app, "ws-gitws") == "GitWs"
     assert row_status_text(app, "ws-gitws") == "En cours"
-    status = row_status_label(app, "ws-gitws")
-    assert status._options["bg"] == "#064e3b"
-    assert status._options["fg"].startswith("#")
-    assert row_meta_text(app, "ws-gitws") == ":5700 · db locale · git oui · 1 pipeline"
+    assert row_chip_text(app, "ws-gitws", "port_chip") == ":5700"
+    assert row_chip_text(app, "ws-gitws", "db_chip") == "locale"
+    assert row_chip_colors(app, "ws-gitws", "db_chip") == ACTIVE_CHIP
+    assert row_chip_text(app, "ws-gitws", "git_chip") == "git"
+    assert row_chip_colors(app, "ws-gitws", "git_chip") == ACTIVE_CHIP
+    assert row_chip_text(app, "ws-gitws", "pipelines_chip") == "1"
     assert row_text(app, "ws-plain") == "Plain"
     assert row_status_text(app, "ws-plain") == "Arrêté"
-    assert row_meta_text(app, "ws-plain") == ":5680 · db locale · git non · 0 pipeline"
+    assert row_chip_text(app, "ws-plain", "port_chip") == ":5680"
+    assert row_chip_text(app, "ws-plain", "db_chip") == "locale"
+    assert row_chip_colors(app, "ws-plain", "db_chip") == INACTIVE_CHIP
+    assert row_chip_colors(app, "ws-plain", "git_chip") == INACTIVE_CHIP
+    assert row_chip_text(app, "ws-plain", "pipelines_chip") == "0"
 
 
 def test_each_row_has_its_own_delete_button(app) -> None:
@@ -287,6 +324,29 @@ def test_double_click_launches_selected(app) -> None:
 
     app.manager.ensure_running.assert_called_once_with("ws-stopped")
     app.browser.assert_called_once_with("http://127.0.0.1:5680")
+
+
+def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    held = make_workspace(tmp_path, "Hold", 5690)
+    manager.list.return_value = [held]
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+
+    launcher._select_row("ws-hold")
+    HoldingThread.instances.clear()
+    with patch("n8n_launcher.gui.threading.Thread", HoldingThread):
+        launcher.launch_selected()
+        assert launcher._launching == "ws-hold"
+        launcher.launch_selected()
+
+    assert len(HoldingThread.instances) == 1
+    HoldingThread.instances[0].target()
+    assert launcher._launching is None
+    manager.ensure_running.assert_called_once_with("ws-hold")
 
 
 def test_launch_dispatches_to_manager(app) -> None:
@@ -355,12 +415,10 @@ def test_action_without_selection_warns_instead_of_crashing(app) -> None:
     app.manager.stop.assert_not_called()
 
 
-def test_footer_plus_button_is_wired(app) -> None:
-    create = next(
-        button for button in FakeTtk.Button.instances if button.text == "+  Nouveau workflow"
-    )
-    assert create.packed
-    assert callable(create.command)
+def test_watermark_plus_is_centered(app) -> None:
+    watermark = app.app._watermark
+    assert watermark._options["text"] == "+"
+    assert watermark._place_options == {"relx": 0.5, "rely": 0.5, "anchor": "center"}
 
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
@@ -552,23 +610,22 @@ def test_empty_list_has_empty_space_click_binding(gui_mocks, tmp_path) -> None:
     assert "<Button-1>" in launcher.workspace_list._bindings
 
 
-def test_empty_state_hint_is_shown_and_clickable(gui_mocks, tmp_path) -> None:
+def test_empty_list_subtitle_hints_create(gui_mocks, tmp_path) -> None:
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
 
-    hint = launcher._empty_hint
-    assert hint is not None
-    assert hint._options["text"] == "Aucun workflow — cliquez ici pour en créer un"
-    assert callable(hint._bindings.get("<Button-1>"))
+    assert launcher._subtitle._options["text"] == (
+        "Aucun workflow — cliquez pour en créer un"
+    )
 
 
 def test_empty_state_hint_disappears_when_workspaces_exist(app) -> None:
     app.app.refresh()
 
-    assert app.app._empty_hint is None
+    assert app.app._subtitle._options["text"] == "2 workflows"
 
 
 def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
@@ -679,9 +736,10 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     created_id = workspaces[0].id
     assert row_text(SimpleNamespace(app=launcher), created_id) == "Mon flow"
     assert row_status_text(SimpleNamespace(app=launcher), created_id) == "Arrêté"
-    meta = row_meta_text(SimpleNamespace(app=launcher), created_id)
-    assert f":{workspaces[0].port}" in meta
-    assert "db locale" in meta
+    assert row_chip_text(SimpleNamespace(app=launcher), created_id, "port_chip") == (
+        f":{workspaces[0].port}"
+    )
+    assert row_chip_text(SimpleNamespace(app=launcher), created_id, "db_chip") == "locale"
     assert launcher._selected_id == created_id
     assert (folder / "n8nPipelines").is_dir()
     assert (folder / "db" / "migrations").is_dir()
