@@ -44,3 +44,4 @@ python scripts/build.py
 
 The launcher is independent of the source repository that inspired some of its API and workflow-sync boundaries. It does not reuse that repository's weather database schema, runtime state, or Docker sync service.
 # n8nWorkspaceManager
+# n8nWorkspaceManager
