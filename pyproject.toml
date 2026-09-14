@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "n8n-launcher"
+version = "0.1.0"
+description = "Cross-platform desktop launcher for isolated n8n workspaces"
+requires-python = ">=3.12"
+dependencies = [
+    "bcrypt>=4.0",
+    "platformdirs>=4.0",
+    "psycopg[binary]>=3.1",
+    "PyYAML>=6.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-timeout>=2.2"]
+packaging = ["pyinstaller>=6.0"]
+
+[project.scripts]
+n8n-launcher = "n8n_launcher.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "unit: tests that do not require external services",
+    "integration: tests requiring Docker or PostgreSQL",
+]
+addopts = "-m 'not integration'"
