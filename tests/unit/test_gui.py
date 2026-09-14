@@ -223,7 +223,7 @@ def row_label(app, workspace_id: str) -> FakeTk.Label:
 def row_delete_button(app, workspace_id: str):
     frame = app.app._rows[workspace_id][0]
     for child in frame.children:
-        if isinstance(child, FakeTk.Button) and child.text == "Supprimer":
+        if isinstance(child, FakeTk.Button) and child.text == "×":
             return child
     raise AssertionError(f"no delete button in row {workspace_id}")
 
@@ -232,11 +232,25 @@ def row_text(app, workspace_id: str) -> str:
     return row_label(app, workspace_id)._options["text"]
 
 
+def row_status_label(app, workspace_id: str):
+    return app.app._rows[workspace_id][0].status_label
+
+
+def row_status_text(app, workspace_id: str) -> str:
+    return row_status_label(app, workspace_id)._options["text"]
+
+
+def row_meta_text(app, workspace_id: str) -> str:
+    return app.app._rows[workspace_id][0].meta_label._options["text"]
+
+
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
     git_dir = tmp_path / "GitWs"
     (git_dir / ".git").mkdir(parents=True)
     (git_dir / "db" / "migrations").mkdir(parents=True)
     (git_dir / "db" / "migrations" / "001.sql").write_text("select 1;")
+    (git_dir / "n8nPipelines").mkdir(parents=True)
+    (git_dir / "n8nPipelines" / "flow.json").write_text("{}")
     rich = make_workspace(tmp_path, "GitWs", 5700)
     rich.workflows_dir = git_dir
     rich.state = WorkspaceState.RUNNING
@@ -245,13 +259,15 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
 
     app.app.refresh()
 
-    assert row_text(app, "ws-gitws") == (
-        "GitWs | running | :5700 | db locale | git oui | n8nPipelines 0"
-    )
-    assert row_text(app, "ws-plain") == (
-        "Plain | stopped | :5680 | db locale | git non | n8nPipelines 0"
-    )
-    assert row_label(app, "ws-gitws")._options["fg"].startswith("#")
+    assert row_text(app, "ws-gitws") == "GitWs"
+    assert row_status_text(app, "ws-gitws") == "En cours"
+    status = row_status_label(app, "ws-gitws")
+    assert status._options["bg"] == "#064e3b"
+    assert status._options["fg"].startswith("#")
+    assert row_meta_text(app, "ws-gitws") == ":5700 · db locale · git oui · 1 pipeline"
+    assert row_text(app, "ws-plain") == "Plain"
+    assert row_status_text(app, "ws-plain") == "Arrêté"
+    assert row_meta_text(app, "ws-plain") == ":5680 · db locale · git non · 0 pipeline"
 
 
 def test_each_row_has_its_own_delete_button(app) -> None:
@@ -536,6 +552,25 @@ def test_empty_list_has_empty_space_click_binding(gui_mocks, tmp_path) -> None:
     assert "<Button-1>" in launcher.workspace_list._bindings
 
 
+def test_empty_state_hint_is_shown_and_clickable(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+
+    hint = launcher._empty_hint
+    assert hint is not None
+    assert hint._options["text"] == "Aucun workflow — cliquez ici pour en créer un"
+    assert callable(hint._bindings.get("<Button-1>"))
+
+
+def test_empty_state_hint_disappears_when_workspaces_exist(app) -> None:
+    app.app.refresh()
+
+    assert app.app._empty_hint is None
+
+
 def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
@@ -642,9 +677,11 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     assert workspaces[0].name == "Mon flow"
     assert workspaces[0].db.mode is DbMode.MANAGED
     created_id = workspaces[0].id
-    assert row_text(SimpleNamespace(app=launcher), created_id) == (
-        f"Mon flow | stopped | :{workspaces[0].port} | db locale | git non | n8nPipelines 0"
-    )
+    assert row_text(SimpleNamespace(app=launcher), created_id) == "Mon flow"
+    assert row_status_text(SimpleNamespace(app=launcher), created_id) == "Arrêté"
+    meta = row_meta_text(SimpleNamespace(app=launcher), created_id)
+    assert f":{workspaces[0].port}" in meta
+    assert "db locale" in meta
     assert launcher._selected_id == created_id
     assert (folder / "n8nPipelines").is_dir()
     assert (folder / "db" / "migrations").is_dir()

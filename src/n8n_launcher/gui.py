@@ -22,33 +22,62 @@ from .config import ConfigStore
 from .docker_manager import DockerManager
 from .models import DbConfig, DbMode, Workspace, WorkspaceState
 from .sync_runner import SyncRunner
-from .workspace_info import db_config_for_folder, format_row
+from .workspace_info import db_config_for_folder, db_label, git_label, pipelines_count
 from .workspace_manager import WorkspaceError, WorkspaceManager
 
-APP_BACKGROUND = "#f4f6fb"
-CARD_BACKGROUND = "#ffffff"
-ROW_SELECTED_BG = "#dbeafe"
-ROW_DELETE_BG = "#fee2e2"
-ROW_DELETE_FG = "#991b1b"
-TEXT_PRIMARY = "#0f172a"
-TEXT_MUTED = "#64748b"
-ACCENT = "#2563eb"
-ACCENT_ACTIVE = "#1d4ed8"
-ROW_FOREGROUND = {
-    WorkspaceState.RUNNING: "#15803d",
-    WorkspaceState.STARTING: "#b45309",
-    WorkspaceState.STOPPING: "#b45309",
-    WorkspaceState.ERROR: "#b91c1c",
-    WorkspaceState.STOPPED: "#334155",
+APP_BACKGROUND = "#0f172a"
+SURFACE = "#1e293b"
+SURFACE_HOVER = "#263449"
+BORDER = "#334155"
+ROW_SELECTED_BG = "#1e2f4f"
+ROW_DELETE_BG = "#450a0a"
+ROW_DELETE_ACTIVE = "#7f1d1d"
+ROW_DELETE_FG = "#f87171"
+TEXT_PRIMARY = "#f1f5f9"
+TEXT_MUTED = "#94a3b8"
+ACCENT = "#3b82f6"
+ACCENT_ACTIVE = "#2563eb"
+ACCENT_HOVER = "#60a5fa"
+
+STATUS_STYLE = {
+    WorkspaceState.STOPPED: ("#334155", "#cbd5e1"),
+    WorkspaceState.STARTING: ("#78350f", "#fcd34d"),
+    WorkspaceState.RUNNING: ("#064e3b", "#34d399"),
+    WorkspaceState.STOPPING: ("#78350f", "#fcd34d"),
+    WorkspaceState.ERROR: ("#7f1d1d", "#fca5a5"),
+}
+
+STATE_LABELS = {
+    WorkspaceState.STOPPED: "Arrêté",
+    WorkspaceState.STARTING: "Démarrage",
+    WorkspaceState.RUNNING: "En cours",
+    WorkspaceState.STOPPING: "Arrêt",
+    WorkspaceState.ERROR: "Erreur",
 }
 
 STATE_POLL_MS = 5000
 
-FONT_BASE = "DejaVu Sans"
+
+def state_label(state: WorkspaceState) -> str:
+    return STATE_LABELS.get(state, state.value)
+
+
+def _font_family() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return "Helvetica Neue"
+    if system == "Windows":
+        return "Segoe UI"
+    return "DejaVu Sans"
+
+
+FONT_BASE = _font_family()
 FONT_TITLE = (FONT_BASE, 15, "bold")
 FONT_SUBTITLE = (FONT_BASE, 9)
-FONT_ROWS = (FONT_BASE, 11)
+FONT_ROWS = (FONT_BASE, 11, "bold")
+FONT_META = (FONT_BASE, 10)
 FONT_STATUS = (FONT_BASE, 9)
+FONT_PILL = (FONT_BASE, 9, "bold")
 
 
 class LauncherApp:
@@ -76,6 +105,7 @@ class LauncherApp:
         self._status_label: tk.Label | None = None
         self._subtitle: tk.Label | None = None
         self._menu: tk.Menu | None = None
+        self._empty_hint: tk.Label | None = None
         self._apply_theme()
         self._configure_root()
         self._build_ui()
@@ -90,10 +120,17 @@ class LauncherApp:
         try:
             style = ttk.Style(self.root)
             style.theme_use("clam")
-            style.configure(".", font=(FONT_BASE, 10), background=APP_BACKGROUND)
+            style.configure(".", font=FONT_META, background=APP_BACKGROUND)
             style.configure("TFrame", background=APP_BACKGROUND)
-            style.configure("TButton", background="#e2e8f0", foreground=TEXT_PRIMARY, padding=(14, 8))
-            style.map("TButton", background=[("active", "#cbd5e1")])
+            style.configure(
+                "TButton",
+                background=BORDER,
+                foreground=TEXT_PRIMARY,
+                bordercolor=BORDER,
+                focuscolor=BORDER,
+                padding=(14, 8),
+            )
+            style.map("TButton", background=[("active", SURFACE_HOVER)])
             style.configure(
                 "Accent.TButton",
                 background=ACCENT,
@@ -133,7 +170,14 @@ class LauncherApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self) -> None:
-        header = ttk.Frame(self.root, padding=(18, 14, 18, 8))
+        accent_bar = tk.Frame(self.root, bg=ACCENT, height=4)
+        accent_bar.pack(fill="x")
+        try:
+            accent_bar.pack_propagate(False)
+        except Exception:
+            pass
+
+        header = ttk.Frame(self.root, padding=(18, 14, 18, 10))
         header.pack(fill="x")
         title = tk.Label(
             header,
@@ -154,21 +198,21 @@ class LauncherApp:
         )
         self._subtitle.pack(fill="x")
 
-        card = tk.Frame(self.root, bg=CARD_BACKGROUND, highlightthickness=1, highlightbackground="#dbe2f0")
-        card.pack(fill="both", expand=True, padx=18, pady=8)
-        self.workspace_list = tk.Frame(card, bg=CARD_BACKGROUND)
+        card = tk.Frame(self.root, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="both", expand=True, padx=18, pady=(8, 10))
+        self.workspace_list = tk.Frame(card, bg=SURFACE)
         self.workspace_list.pack(fill="both", expand=True, padx=8, pady=8)
         self.workspace_list.bind("<Return>", lambda _event: self.launch_selected())
         self.workspace_list.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
 
-        footer = tk.Frame(card, bg=CARD_BACKGROUND)
-        footer.pack(fill="x", side="bottom")
+        footer = tk.Frame(card, bg=SURFACE)
+        footer.pack(fill="x", side="bottom", pady=(0, 10))
         ttk.Button(
             footer,
             text="+  Nouveau workflow",
             command=self.prompt_create_workflow,
             style="Accent.TButton",
-        ).pack(anchor="w", padx=12, pady=10)
+        ).pack(anchor="w", padx=14)
 
         self._status_label = tk.Label(
             self.root,
@@ -188,40 +232,85 @@ class LauncherApp:
         self._menu.add_command(label="Supprimer", command=self._delete_selected)
 
     def _build_row(self, workspace: Workspace) -> tuple[tk.Frame, tk.Label]:
-        selected = workspace.id == self._selected_id
-        background = ROW_SELECTED_BG if selected else CARD_BACKGROUND
-        frame = tk.Frame(self.workspace_list, bg=background)
-        frame.pack(fill="x", pady=3, padx=4)
-        delete_button = tk.Button(
-            frame,
-            text="Supprimer",
-            font=FONT_STATUS,
-            bg=ROW_DELETE_BG,
-            fg=ROW_DELETE_FG,
-            activebackground="#fecaca",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            padx=10,
-            pady=4,
-            command=lambda wid=workspace.id: self.delete_workspace(wid),
+        if workspace.id == self._selected_id:
+            row_bg = ROW_SELECTED_BG
+            border = ACCENT
+        else:
+            row_bg, border = SURFACE, BORDER
+        frame = tk.Frame(
+            self.workspace_list,
+            bg=row_bg,
+            highlightthickness=1,
+            highlightbackground=border,
         )
-        delete_button.pack(side="right", padx=(8, 6), pady=4)
-        label = tk.Label(
-            frame,
-            text=format_row(workspace),
-            bg=background,
-            fg=ROW_FOREGROUND.get(workspace.state, TEXT_PRIMARY),
+        frame.pack(fill="x", pady=3, padx=2)
+
+        content = tk.Frame(frame, bg=row_bg)
+        content.pack(side="left", fill="x", expand=True)
+
+        top = tk.Frame(content, bg=row_bg)
+        top.pack(fill="x", pady=(6, 1), padx=(10, 8))
+
+        name_label = tk.Label(
+            top,
+            text=workspace.name,
+            bg=row_bg,
+            fg=TEXT_PRIMARY,
             font=FONT_ROWS,
             anchor="w",
         )
-        label.pack(side="left", fill="x", expand=True)
-        label.bind("<Button-1>", lambda _event, wid=workspace.id: self._select_row(wid))
-        label.bind(
+        name_label.pack(side="left", fill="x", expand=True)
+
+        pill_bg, pill_fg = STATUS_STYLE.get(
+            workspace.state, STATUS_STYLE[WorkspaceState.STOPPED]
+        )
+        status_label = tk.Label(
+            top,
+            text=state_label(workspace.state),
+            bg=pill_bg,
+            fg=pill_fg,
+            font=FONT_PILL,
+            anchor="center",
+            padx=8,
+            pady=2,
+        )
+        status_label.pack(side="right", padx=(8, 0))
+
+        meta_label = tk.Label(
+            content,
+            text=self._row_meta(workspace),
+            bg=row_bg,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+            anchor="w",
+        )
+        meta_label.pack(fill="x", padx=(10, 8), pady=(0, 6))
+
+        delete_button = tk.Button(
+            frame,
+            text="×",
+            font=FONT_TITLE,
+            bg=ROW_DELETE_BG,
+            fg=ROW_DELETE_FG,
+            activebackground=ROW_DELETE_ACTIVE,
+            activeforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=8,
+            pady=2,
+            command=lambda wid=workspace.id: self.delete_workspace(wid),
+        )
+        delete_button.pack(side="right", padx=(10, 8), pady=6)
+
+        name_label.bind(
+            "<Button-1>", lambda _event, wid=workspace.id: self._select_row(wid)
+        )
+        name_label.bind(
             "<Double-Button-1>",
             lambda _event, wid=workspace.id: self._handle_double(wid),
         )
-        label.bind(
+        name_label.bind(
             "<Button-3>",
             lambda event, wid=workspace.id: self._show_context_menu(event, wid),
         )
@@ -229,7 +318,31 @@ class LauncherApp:
             "<Double-Button-1>",
             lambda _event, wid=workspace.id: self._handle_double(wid),
         )
-        return frame, label
+        try:
+            frame.bind(
+                "<Enter>", lambda _event, wid=workspace.id: self._on_row_enter(wid)
+            )
+            frame.bind(
+                "<Leave>", lambda _event, wid=workspace.id: self._on_row_leave(wid)
+            )
+        except Exception:
+            pass
+
+        frame.name_label = name_label
+        frame.status_label = status_label
+        frame.meta_label = meta_label
+        frame.delete_button = delete_button
+        frame.content = content
+        frame.top = top
+        return frame, name_label
+
+    @staticmethod
+    def _row_meta(workspace: Workspace) -> str:
+        pipelines = pipelines_count(workspace.workflows_dir)
+        return (
+            f":{workspace.port} · db {db_label(workspace)} · git {git_label(workspace)} "
+            f"· {pipelines} pipeline{'s' if pipelines > 1 else ''}"
+        )
 
     def refresh(self) -> None:
         if self._closed:
@@ -246,15 +359,65 @@ class LauncherApp:
         if self._selected_id is not None and self._selected_id not in self._rows:
             self._selected_id = None
         self._apply_selection_styles()
+        self._update_empty_state(workspaces)
         if self._subtitle is not None:
             count = len(workspaces)
             self._subtitle.config(text=f"{count} workflow{'s' if count != 1 else ''}")
 
+    def _update_empty_state(self, workspaces: list[Workspace]) -> None:
+        if self._empty_hint is not None:
+            try:
+                self._empty_hint.destroy()
+            except Exception:
+                pass
+            self._empty_hint = None
+        if workspaces:
+            return
+        hint = tk.Label(
+            self.workspace_list,
+            text="Aucun workflow — cliquez ici pour en créer un",
+            bg=SURFACE,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+            anchor="center",
+        )
+        hint.pack(fill="both", expand=True, padx=8, pady=24)
+        hint.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
+        self._empty_hint = hint
+
+    def _set_row_background(self, workspace_id: str, *, hover: bool = False) -> None:
+        frame = self._rows.get(workspace_id, (None, None))[0]
+        if frame is None:
+            return
+        selected = workspace_id == self._selected_id
+        if selected:
+            background, border = ROW_SELECTED_BG, ACCENT
+        elif hover:
+            background, border = SURFACE_HOVER, BORDER
+        else:
+            background, border = SURFACE, BORDER
+        frame.config(bg=background, highlightbackground=border)
+        for widget in (
+            frame.name_label,
+            frame.meta_label,
+            getattr(frame, "content", None),
+            getattr(frame, "top", None),
+        ):
+            if widget is not None:
+                try:
+                    widget.config(bg=background)
+                except Exception:
+                    pass
+
+    def _on_row_enter(self, workspace_id: str) -> None:
+        self._set_row_background(workspace_id, hover=True)
+
+    def _on_row_leave(self, workspace_id: str) -> None:
+        self._set_row_background(workspace_id, hover=False)
+
     def _apply_selection_styles(self) -> None:
-        for workspace_id, (frame, label) in self._rows.items():
-            background = ROW_SELECTED_BG if workspace_id == self._selected_id else CARD_BACKGROUND
-            frame.config(bg=background)
-            label.config(bg=background)
+        for workspace_id in self._rows:
+            self._set_row_background(workspace_id, hover=False)
 
     def set_status(self, text: str) -> None:
         if self._status_label is not None:
@@ -276,7 +439,7 @@ class LauncherApp:
             workspace = self._selected()
         except ValueError:
             return
-        self.set_status(f"{workspace.name} · :{workspace.port} · {workspace.state.value}")
+        self.set_status(f"{workspace.name} · :{workspace.port} · {state_label(workspace.state)}")
 
     def _handle_double(self, workspace_id: str) -> None:
         self._select_row(workspace_id)
