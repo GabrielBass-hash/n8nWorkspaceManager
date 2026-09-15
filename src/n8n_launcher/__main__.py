@@ -6,7 +6,7 @@ import sys
 import tkinter as tk
 
 from .config import ConfigError, ConfigStore
-from .docker_manager import DockerManager
+from .docker_manager import DockerManager, resolve_docker_command
 from .gui import LauncherApp
 from .setup_wizard import run_interactive_first_launch
 from .workspace_manager import WorkspaceManager
@@ -41,7 +41,7 @@ def _signal_shutdown(store: ConfigStore, docker: DockerManager, *_args: object) 
 
 def main() -> None:
     store = ConfigStore()
-    docker = DockerManager()
+    docker = DockerManager(command=resolve_docker_command())
     atexit.register(stop_all, store, docker)
     try:
         signal.signal(signal.SIGTERM, lambda *_args: _signal_shutdown(store, docker, *_args))

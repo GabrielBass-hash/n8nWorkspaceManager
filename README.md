@@ -42,6 +42,14 @@ python -m pip install -e '.[packaging]'
 python scripts/build.py
 ```
 
+On macOS the onedir `.app` bundle embeds the app icon and a full `Info.plist`
+(display name, version, retina support), is ad-hoc signed, and is packaged into
+a styled drag-and-drop `.dmg` layout rendered by `dmgbuild` (no Finder or GUI
+session required, so CI produces the same result). Because the app may be
+launched from the Dock/Finder where the `PATH` is minimal, the launcher
+resolves the `docker` CLI from the standard macOS install locations instead of
+relying on the environment `PATH`.
+
 On Linux, additionally build the AppImage with:
 
 ```bash

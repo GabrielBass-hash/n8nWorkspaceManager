@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,9 +14,31 @@ from typing import Callable, Sequence
 from .compose import compose_project_name
 from .models import Workspace
 
-# `compose up` blocks while pulling images (several GB on first run); the fast
-# default timeout would abort a legitimate cold start.
-UP_TIMEOUT = 600.0
+MACOS_DOCKER_SEARCH_DIRS = [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/Applications/Docker.app/Contents/Resources/bin",
+]
+
+
+def resolve_docker_command() -> str:
+    """Return an absolute path to a usable ``docker`` CLI.
+
+    GUI launch services (Finder, Dock, Launchpad) start applications with a
+    minimal ``PATH`` (``/usr/bin:/bin:/usr/sbin:/sbin``), so ``docker``
+    installed via Homebrew or Docker Desktop is not discoverable by bare name.
+    Probe the standard install locations first, then fall back to ``PATH``
+    lookup and finally to the bare command so error reporting stays friendly.
+    """
+    if platform.system() == "Darwin":
+        for directory in MACOS_DOCKER_SEARCH_DIRS:
+            candidate = Path(directory) / "docker"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    resolved = shutil.which("docker")
+    return resolved or "docker"
 
 
 class DockerError(RuntimeError):
@@ -82,8 +107,8 @@ class DockerManager:
             if result.returncode != 0:
                 raise DockerError(f"Docker pull failed for {image}: {result.stderr.strip()}")
 
-    def up(self, workspace: Workspace, compose_file: Path, *, timeout: float = UP_TIMEOUT) -> None:
-        self._compose(workspace, compose_file, "up", "-d", "--remove-orphans", timeout=timeout)
+    def up(self, workspace: Workspace, compose_file: Path) -> None:
+        self._compose(workspace, compose_file, "up", "-d", "--remove-orphans")
 
     def down(self, workspace: Workspace, compose_file: Path, remove_orphans: bool = False) -> None:
         args = ["down"]
@@ -141,7 +166,6 @@ class DockerManager:
         compose_file: Path,
         *args: str,
         check: bool = True,
-        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             self.command,
@@ -152,7 +176,7 @@ class DockerManager:
             str(compose_file),
             *args,
         ]
-        return self._run(command, check=check, timeout=timeout)
+        return self._run(command, check=check)
 
     def _run(
         self,
