@@ -10,11 +10,15 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 import requests
+
+from . import updater
+from .paths import updates_dir
 
 from .api_client import N8nApiClient
 from .browser import open_app
@@ -121,6 +125,8 @@ class LauncherApp:
         self.refresh()
         self.root.after(100, self._drain_events)
         self._poll_states()
+        if updater.install_target() is not None:
+            self._schedule_update_check()
 
     def run(self) -> None:
         self.root.mainloop()
@@ -434,7 +440,13 @@ class LauncherApp:
 
     def set_status(self, text: str) -> None:
         if self._status_label is not None:
-            self._status_label.config(text=text)
+            # Reset any update-link styling added by _show_update_link: the bar
+            # points at the release page only while that message is displayed.
+            self._status_label.config(text=text, cursor="", fg=TEXT_MUTED)
+            try:
+                self._status_label.unbind("<Button-1>")
+            except Exception:
+                pass
 
     def _poll_states(self) -> None:
         if self._closed:
@@ -465,6 +477,139 @@ class LauncherApp:
             self.root.after(STATE_POLL_MS, self._poll_states)
         except Exception:
             pass
+
+    def _schedule_update_check(self) -> None:
+        """Schedule the launch-time update check at a short, non-blocking delay."""
+        try:
+            self.root.after(1500, self._check_updates)
+        except Exception:
+            pass
+
+    def _check_updates(self) -> None:
+        """Kick off the update check on a background thread (never blocks launch)."""
+        if self._closed:
+            return
+        threading.Thread(
+            target=self._check_updates_worker,
+            name="n8n-launcher-update",
+            daemon=True,
+        ).start()
+
+    def _check_updates_worker(self) -> None:
+        """Fetch the latest release and route it to an offer or a status link.
+
+        Any failure (offline, rate limit, malformed payload, wrong platform or
+        no newer version) is deliberately swallowed — an update check must
+        never disturb the user.
+        """
+        updater.cleanup_stale()
+        try:
+            release = updater.fetch_latest_release()
+        except Exception:
+            return
+        target = updater.install_target()
+        if target is None or not updater.release_is_newer(release, updater.current_version()):
+            return
+        asset = updater.compatible_asset(release)
+        if asset is None:
+            return
+        if os.access(target.parent, os.W_OK):
+            self.events.put((lambda: self._offer_update(release, asset), None))
+        else:
+            self.events.put((lambda: self._show_update_link(release), None))
+
+    def _show_update_link(self, release) -> None:
+        """Point the status bar at the release page when the app is not writable.
+
+        Clicking the message opens ``releases/latest`` in the browser; the
+        binding is reset by the next :meth:`set_status` call.
+        """
+        if self._closed:
+            return
+        self.set_status(f"Nouvelle version {release.tag_name} disponible — cliquer pour ouvrir")
+        if self._status_label is not None:
+            self._status_label.config(cursor="hand2", fg=ACCENT)
+            self._status_label.bind(
+                "<Button-1>", lambda _event: webbrowser.open(updater.release_page_url())
+            )
+
+    def _offer_update(self, release, asset) -> None:
+        if self._closed:
+            return
+        if not messagebox.askyesno(
+            "Mise à jour disponible",
+            f"Une nouvelle version de n8n Launcher est disponible :\n\n"
+            f"{updater.current_version()} → {release.tag_name}\n\n"
+            "Voulez-vous la télécharger et l'installer ?\n"
+            "L'application redémarrera automatiquement.",
+            parent=self.root,
+        ):
+            return
+        self.set_status(f"Téléchargement de la mise à jour {release.tag_name}…")
+        dest = updates_dir() / asset.name
+        threading.Thread(
+            target=self._download_update,
+            args=(asset, dest),
+            name="n8n-launcher-update-dl",
+            daemon=True,
+        ).start()
+
+    def _download_update(self, asset, dest) -> None:
+        """Stream the asset to ``dest`` and report a throttle progress message."""
+        last_megabyte = 0
+
+        def progress(received: int) -> None:
+            nonlocal last_megabyte
+            megabyte = received // (1024 * 1024)
+            if megabyte != last_megabyte:
+                last_megabyte = megabyte
+                self.events.put(
+                    (
+                        lambda mb=megabyte: self.set_status(
+                            f"Téléchargement de la mise à jour… {mb} Mo"
+                        ),
+                        None,
+                    )
+                )
+
+        try:
+            updater.download_asset(
+                asset.url, dest, expected_size=asset.size, progress=progress
+            )
+        except Exception as exc:
+            message = f"Téléchargement impossible : {exc}"
+            self.events.put(
+                (
+                    lambda: messagebox.showerror(
+                        "Mise à jour",
+                        message,
+                        parent=self.root,
+                    ),
+                    None,
+                )
+            )
+            return
+        self.events.put((lambda: self._confirm_install(dest), None))
+
+    def _confirm_install(self, dest) -> None:
+        if self._closed:
+            return
+        if not messagebox.askyesno(
+            "Mise à jour prête",
+            "La nouvelle version est téléchargée.\n"
+            "Redémarrer n8n Launcher maintenant pour l'appliquer ?",
+            parent=self.root,
+        ):
+            self.set_status("")
+            return
+        try:
+            target = updater.install_target()
+            script = updater.installer_script(dest, target)
+            updater.spawn_installer(script)
+        except Exception as exc:
+            messagebox.showerror("Mise à jour", str(exc), parent=self.root)
+            return
+        self._finish_close()
 
     def _select_row(self, workspace_id: str) -> None:
         self._selected_id = workspace_id
