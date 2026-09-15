@@ -60,6 +60,20 @@ def test_create_scaffolds_pipelines_and_db_layout(tmp_path: Path) -> None:
     assert none_workspace.db.mode is DbMode.NONE
 
 
+def test_workspace_persists_postgres_image_through_config(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = launcher.create("Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED))
+
+    assert workspace.postgres_image is None
+
+    config = store.load()
+    config.workspaces[0].postgres_image = "custom/pg:16"
+    store.save(config)
+
+    restored = store.load().workspaces[0]
+    assert restored.postgres_image == "custom/pg:16"
+
+
 def test_create_without_db_requires_migrations(tmp_path: Path) -> None:
     launcher, _, _, _ = manager(tmp_path)
 
@@ -90,6 +104,22 @@ def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
 
     assert stopped.state is WorkspaceState.STOPPED
     docker.down.assert_not_called()
+
+
+def test_stop_is_idempotent_on_already_stopped(tmp_path: Path) -> None:
+    launcher, _, docker, _ = manager(tmp_path)
+    workspace = create_external(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+
+    with patch("n8n_launcher.workspace_manager.compose_file", return_value=compose):
+        launcher.start(workspace.id)
+        launcher.stop(workspace.id)
+        # Second pass = the atexit stop_all() after a GUI close.
+        stopped = launcher.stop(workspace.id)
+
+    assert stopped.state is WorkspaceState.STOPPED
+    docker.up.assert_called_once()
+    docker.down.assert_called_once()
 
 
 def test_live_state_reports_running_when_n8n_up(tmp_path: Path) -> None:
@@ -189,6 +219,7 @@ def test_start_managed_applies_migrations(tmp_path: Path) -> None:
 
 def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
@@ -211,6 +242,7 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
 
 def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
@@ -240,6 +272,7 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
 
 def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
@@ -261,6 +294,7 @@ def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> N
 
 def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> None:
     fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
@@ -280,6 +314,7 @@ def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> No
 def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
     for status_code, label in [(403, "forbidden"), (401, "unauthorized")]:
         forbidden = MagicMock()
+        forbidden.list_workflows.return_value = []
         forbidden.ensure_postgres_credential.side_effect = [
             N8nApiError(label, status_code=status_code),
             None,
@@ -304,6 +339,32 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
         assert booter.call_count == 1
         assert store.load().workspaces[0].api_key == "rotated-key"
         assert forbidden.ensure_postgres_credential.call_count == 2
+
+
+def test_ensure_running_imports_folder_workflows(tmp_path: Path) -> None:
+    fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    booter = MagicMock(return_value="api-key-123")
+    launcher = WorkspaceManager(
+        store, MagicMock(), owner_booter=booter, api_factory=MagicMock(return_value=fake_api)
+    )
+    workflows_dir = tmp_path / "workflows"
+    pipelines_dir = workflows_dir / "n8nPipelines"
+    pipelines_dir.mkdir(parents=True)
+    (pipelines_dir / "Meteo.json").write_text(
+        '{"id": "x", "name": "Meteo", "nodes": [], "connections": {}, "settings": {}}',
+        encoding="utf-8",
+    )
+    workspace = launcher.create("Demo", workflows_dir, db=DbConfig(DbMode.NONE))
+
+    with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "compose.yml"):
+        launcher.ensure_running(workspace.id)
+
+    fake_api.create_workflow.assert_called_once_with(
+        {"name": "Meteo", "nodes": [], "connections": {}, "settings": {}}
+    )
 
 
 def test_ensure_running_propagates_bootstrap_error(tmp_path: Path) -> None:

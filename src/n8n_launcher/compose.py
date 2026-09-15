@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-from .models import DbMode, Workspace
+from .models import DbMode, Workspace, DEFAULT_POSTGRES_IMAGE
 
 
 class ComposeError(ValueError):
@@ -70,10 +70,18 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
       DB_POSTGRESDB_USER: n8n
       DB_POSTGRESDB_PASSWORD: launcher-managed
 """
+        postgres_image = workspace.postgres_image or DEFAULT_POSTGRES_IMAGE
+        # TimescaleDB must be listed in shared_preload_libraries before the
+        # server starts; without this the CREATE EXTENSION call fails hard.
+        command_block = ""
+        if workspace.postgres_preload_timescaledb:
+            command_block = (
+                "    command: [\"postgres\", \"-c\", \"shared_preload_libraries=timescaledb\"]\n"
+            )
         service = f"""  postgres:
-    image: postgres:16
+    image: {postgres_image}
     restart: unless-stopped
-    environment:
+{command_block}    environment:
       POSTGRES_DB: n8n
       POSTGRES_USER: n8n
       POSTGRES_PASSWORD: launcher-managed
@@ -96,9 +104,9 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
     environment = f"""      DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: {_yaml_quote(escape_compose_value(parsed.hostname))}
       DB_POSTGRESDB_PORT: \"{parsed.port or 5432}\"
-      DB_POSTGRESDB_DATABASE: {_yaml_quote(escape_compose_value(parsed.path.lstrip("/")))}
-      DB_POSTGRESDB_USER: {_yaml_quote(escape_compose_value(parsed.username or ""))}
-      DB_POSTGRESDB_PASSWORD: {_yaml_quote(escape_compose_value(parsed.password or ""))}
+      DB_POSTGRESDB_DATABASE: {_yaml_quote(escape_compose_value(unquote(parsed.path.lstrip("/"))))}
+      DB_POSTGRESDB_USER: {_yaml_quote(escape_compose_value(unquote(parsed.username or "")))}
+      DB_POSTGRESDB_PASSWORD: {_yaml_quote(escape_compose_value(unquote(parsed.password or "")))}
 """
     return environment, "", ""
 

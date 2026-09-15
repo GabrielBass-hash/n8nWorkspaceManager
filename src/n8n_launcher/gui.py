@@ -21,14 +21,9 @@ from .browser import open_app
 from .config import ConfigStore
 from .docker_manager import DockerManager
 from .models import DbConfig, DbMode, Workspace, WorkspaceState
+from .n8n_setup import build_external_connection_string
 from .sync_runner import SyncRunner
-from .workspace_info import (
-    db_config_for_folder,
-    db_connected,
-    db_label,
-    git_repo_status,
-    pipelines_count,
-)
+from .workspace_info import db_connected, db_label, git_repo_status, pipelines_count
 from .workspace_manager import WorkspaceError, WorkspaceManager
 
 APP_BACKGROUND = "#0f172a"
@@ -112,6 +107,7 @@ class LauncherApp:
         self.events: queue.Queue[tuple[Callable[[], None], Exception | None]] = queue.Queue()
         self._closing = False
         self._closed = False
+        self._poll_in_flight = False
         self._rows: dict[str, tuple[tk.Frame, tk.Label]] = {}
         self._row_order: list[str] = []
         self._selected_id: str | None = None
@@ -216,7 +212,7 @@ class LauncherApp:
         self.workspace_list = tk.Frame(card, bg=SURFACE)
         self.workspace_list.pack(fill="both", expand=True, padx=8, pady=8)
         self.workspace_list.bind("<Return>", lambda _event: self.launch_selected())
-        self.workspace_list.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
+        self.workspace_list.bind("<Button-1>", self._on_empty_area_click)
 
         watermark = tk.Label(
             self.workspace_list,
@@ -231,6 +227,7 @@ class LauncherApp:
         except Exception:
             pass
         self._watermark = watermark
+        watermark.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
 
         self._status_label = tk.Label(
             self.root,
@@ -422,6 +419,15 @@ class LauncherApp:
     def _on_row_leave(self, workspace_id: str) -> None:
         self._set_row_background(workspace_id, hover=False)
 
+    def _on_empty_area_click(self, _event: tk.Event) -> None:
+        """Open the creation dialog only when the list is empty; otherwise deselect."""
+        if not self._row_order:
+            self.prompt_create_workflow()
+        else:
+            self._selected_id = None
+            self._apply_selection_styles()
+            self.set_status("")
+
     def _apply_selection_styles(self) -> None:
         for workspace_id in self._rows:
             self._set_row_background(workspace_id, hover=False)
@@ -433,7 +439,28 @@ class LauncherApp:
     def _poll_states(self) -> None:
         if self._closed:
             return
-        self._run_async(self.workspace_manager.reconcile_all)
+
+        def worker() -> None:
+            try:
+                changed = self.workspace_manager.reconcile_all()
+            except Exception as exc:
+                self._poll_in_flight = False
+                self.events.put((self.refresh, exc))
+            else:
+                self._poll_in_flight = False
+                if changed:
+                    self.events.put((self.refresh, None))
+
+        # Skip the cycle if the previous reconcile is still running (docker calls
+        # can exceed the 5s poll interval) to avoid stacking worker threads.
+        if self._poll_in_flight:
+            try:
+                self.root.after(STATE_POLL_MS, self._poll_states)
+            except Exception:
+                pass
+            return
+        self._poll_in_flight = True
+        threading.Thread(target=worker, name="n8n-launcher-poll", daemon=True).start()
         try:
             self.root.after(STATE_POLL_MS, self._poll_states)
         except Exception:
@@ -465,44 +492,77 @@ class LauncherApp:
         if not name:
             return
         directory = filedialog.askdirectory(
-            title="Dossier du workspace (n8nPipelines + db/)", parent=self.root
+            title="Dossier du workspace (workflows JSON dans n8nPipelines/)", parent=self.root
         )
         if not directory:
             return
         workflows_dir = Path(directory)
         workflows_dir.mkdir(parents=True, exist_ok=True)
-        folder_empty = not any(workflows_dir.iterdir())
-        database = db_config_for_folder(workflows_dir)
-        if database is None and folder_empty:
-            choice = messagebox.askyesnocancel(
-                "Nouveau workflow",
-                "Ce dossier est vide. Quelle base de données pour les workflows ?\n\n"
-                "« Oui » = base locale (gérée, schéma + migrations auto)\n"
-                "« Non » = base distante (connexion string)\n"
-                "« Annuler » = aucune base (workflows sauvegardés en JSON)",
-                parent=self.root,
-            )
-            if choice is True:
-                database = self._fresh_managed_db_config()
-            elif choice is False:
-                connection_string = simpledialog.askstring(
-                    "Nouveau workflow", "Connexion string de la base distante :", parent=self.root
+        choice = messagebox.askyesnocancel(
+            "Nouveau workflow",
+            "Quelle base de données pour les workflows ?\n\n"
+            "« Oui » = base locale (gérée, schéma + migrations auto)\n"
+            "« Non » = base distante (accès à une base existante)\n"
+            "« Annuler » = aucune base (workflows sauvegardés en JSON)",
+            parent=self.root,
+        )
+        if choice is True:
+            database = self._fresh_managed_db_config()
+        elif choice is False:
+            database = self._prompt_external_db_config()
+            if database is None:
+                messagebox.showinfo(
+                    "Nouveau workflow",
+                    "Création annulée : aucune connexion distante fournie.",
+                    parent=self.root,
                 )
-                if not connection_string:
-                    messagebox.showinfo(
-                        "Nouveau workflow",
-                        "Création annulée : aucune connexion distante fournie.",
-                        parent=self.root,
-                    )
-                    return
-                database = DbConfig(DbMode.EXTERNAL, connection_string=connection_string.strip())
-            else:
-                database = DbConfig(DbMode.NONE)
-        elif database is None:
+                return
+        else:
             database = DbConfig(DbMode.NONE)
         self._run_async(
             lambda: self.workspace_manager.create(name.strip(), workflows_dir, db=database),
             on_success=self._refresh_with_selection,
+        )
+
+    def _prompt_external_db_config(self) -> DbConfig | None:
+        """Gather the connection fields for an existing remote PostgreSQL database."""
+        host = simpledialog.askstring(
+            "Nouveau workflow", "Hôte de la base distante :", parent=self.root
+        )
+        if not host:
+            return None
+        port = simpledialog.askstring(
+            "Nouveau workflow",
+            "Port de la base distante (défaut 5432) :",
+            parent=self.root,
+        )
+        database = simpledialog.askstring(
+            "Nouveau workflow", "Nom de la base distante :", parent=self.root
+        )
+        if not database:
+            return None
+        username = simpledialog.askstring(
+            "Nouveau workflow", "Utilisateur de la base distante :", parent=self.root
+        )
+        if not username:
+            return None
+        password = simpledialog.askstring(
+            "Nouveau workflow",
+            "Mot de passe de la base distante :",
+            parent=self.root,
+            show="*",
+        )
+        if password is None:
+            return None
+        return DbConfig(
+            DbMode.EXTERNAL,
+            connection_string=build_external_connection_string(
+                host=host.strip(),
+                port=port or "5432",
+                database=database.strip(),
+                user=username.strip(),
+                password=password,
+            ),
         )
 
     @staticmethod
@@ -678,9 +738,14 @@ class LauncherApp:
         try:
             while True:
                 callback, error = self.events.get_nowait()
-                callback()
-                if error:
-                    messagebox.showerror("n8n Launcher", str(error), parent=self.root)
+                try:
+                    callback()
+                    if error:
+                        messagebox.showerror("n8n Launcher", str(error), parent=self.root)
+                # A raising callback (e.g. browser launch) must not kill the
+                # event loop silently — surface it and keep draining.
+                except Exception as exc:
+                    messagebox.showerror("n8n Launcher", str(exc), parent=self.root)
         except queue.Empty:
             pass
         try:

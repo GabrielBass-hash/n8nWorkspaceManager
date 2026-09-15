@@ -23,8 +23,10 @@ from pathlib import Path
 
 APP_NAME = "n8n-launcher"
 DISPLAY_NAME = "n8n Launcher"
-ENTRY_POINT = Path("src/n8n_launcher/__main__.py")
-BUNDLE_ID = "com.gabrielbasso.n8n-launcher"
+BUNDLE_ID = "io.launcher.n8n"
+# Thin root entry point used instead of src/n8n_launcher/__main__.py:
+# PyInstaller runs it correctly while the package keeps its relative imports.
+ENTRY_POINT = "run.py"
 ICON_SOURCE = Path("assets/icon.png")
 
 DMG_WINDOW_RECT = ((60, 80), (720, 490))  # 660 x 410
@@ -127,7 +129,9 @@ def build_onedir() -> Path:
             str(build_icns()),
             "--osx-bundle-identifier",
             BUNDLE_ID,
-            str(ENTRY_POINT),
+            "--paths",
+            "src",
+            ENTRY_POINT,
         ]
     )
     return app
@@ -143,7 +147,9 @@ def build_onefile() -> None:
             "--windowed",
             "--name",
             APP_NAME,
-            str(ENTRY_POINT),
+            "--paths",
+            "src",
+            ENTRY_POINT,
         ]
     )
 

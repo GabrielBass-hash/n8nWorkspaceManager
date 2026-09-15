@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 import pytest
 
-from n8n_launcher.docker_manager import DockerManager, parse_compose_status
+from n8n_launcher.docker_manager import (
+    DockerManager,
+    parse_compose_status,
+    resolve_docker_command,
+)
 from n8n_launcher.models import DbConfig, DbMode, Workspace
 
 
@@ -44,6 +48,38 @@ def test_up_uses_isolated_compose_project(tmp_path: Path) -> None:
         "--remove-orphans",
     ]
     assert run.call_args.kwargs.get("shell") is not True
+
+
+def test_resolve_docker_command_returns_docker_on_linux() -> None:
+    with (
+        patch("n8n_launcher.docker_manager.platform.system", return_value="Linux"),
+        patch("n8n_launcher.docker_manager.shutil.which", return_value="/usr/bin/docker"),
+    ):
+        assert resolve_docker_command() == "/usr/bin/docker"
+
+
+def test_resolve_docker_command_finds_homebrew_on_macos(tmp_path) -> None:
+    docker_path = tmp_path / "docker"
+    docker_path.write_bytes(b"\x00")
+    docker_path.chmod(0o755)
+
+    with (
+        patch("n8n_launcher.docker_manager.platform.system", return_value="Darwin"),
+        patch(
+            "n8n_launcher.docker_manager.MACOS_DOCKER_SEARCH_DIRS",
+            [str(tmp_path)],
+        ),
+        patch("n8n_launcher.docker_manager.shutil.which", return_value=None),
+    ):
+        assert resolve_docker_command() == str(docker_path)
+
+
+def test_resolve_docker_command_falls_back_to_name() -> None:
+    with (
+        patch("n8n_launcher.docker_manager.platform.system", return_value="Linux"),
+        patch("n8n_launcher.docker_manager.shutil.which", return_value=None),
+    ):
+        assert resolve_docker_command() == "docker"
 
 
 def test_failed_command_raises_docker_error(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from .n8n_setup import configure_db_credential
 from .owner_setup import OwnerSetup
 from .paths import compose_file
 from .ports import suggest_port
+from .sync_runner import SyncRunner
 
 
 class WorkspaceError(RuntimeError):
@@ -160,7 +161,21 @@ class WorkspaceManager:
             )
             self.store.save(config)
         self._ensure_db_credentials(workspace)
+        self._import_workflows(workspace)
         return self._find(self.store.load(), workspace_id)
+
+    def _import_workflows(self, workspace: Workspace) -> None:
+        """Import n8n workflow exports from the workspace folder into n8n."""
+        pipelines_dir = workspace.workflows_dir / "n8nPipelines"
+        if not pipelines_dir.is_dir():
+            return
+        # Import files stored at the folder root as well, so a folder that
+        # simply contains workflow exports is picked up too.
+        api = self.api_factory(workspace, workspace.api_key)
+        runner = SyncRunner(api, pipelines_dir)
+        runner.import_all()
+        root_runner = SyncRunner(api, workspace.workflows_dir)
+        root_runner.import_all()
 
     def start(self, workspace_id: str) -> Workspace:
         config = self.store.load()
@@ -195,7 +210,10 @@ class WorkspaceManager:
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         compose = compose_file(workspace.id)
-        if compose.exists():
+        # Skip `docker down` when already stopped: makes the call idempotent so
+        # the atexit stop_all() pass after a GUI close does not tear containers
+        # down a second time.
+        if compose.exists() and workspace.state is not WorkspaceState.STOPPED:
             self.docker.down(workspace, compose, remove_orphans=True)
         workspace.state = WorkspaceState.STOPPED
         self.store.save(config)

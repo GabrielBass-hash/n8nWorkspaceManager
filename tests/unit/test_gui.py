@@ -368,6 +368,17 @@ def test_async_error_surfaces_in_messagebox(app) -> None:
     assert app.mocks.messagebox.errors == ["boom"]
 
 
+def test_raising_callback_does_not_kill_event_loop(app) -> None:
+    def exploding_callback() -> None:
+        raise RuntimeError("browser failed")
+
+    app.app.events.put((exploding_callback, None))
+    app.app._drain_events()
+
+    assert app.mocks.messagebox.errors == ["browser failed"]
+    assert any(delay == 100 for delay, _ in app.app.root.after_callbacks)
+
+
 def test_launch_does_not_restart_when_running(app) -> None:
     app.app._select_row("ws-running")
     app.app.launch_selected()
@@ -465,19 +476,20 @@ def test_delete_unknown_workspace_is_noop(app) -> None:
     app.manager.delete.assert_not_called()
 
 
-def test_prompt_create_uses_managed_db_when_db_layout_present(app, tmp_path) -> None:
+def test_prompt_create_uses_managed_db_when_local_chosen(app, tmp_path) -> None:
     folder = tmp_path / "wf"
     (folder / "db" / "migrations").mkdir(parents=True)
     (folder / "db" / "migrations" / "001.sql").write_text("select 1;")
+    app.mocks.messagebox._yesnocancel = True
 
     with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
         "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
     ):
         app.app.prompt_create_workflow()
 
-    app.manager.create.assert_called_once_with(
-        "My flow", folder, db=DbConfig(DbMode.MANAGED)
-    )
+    database = app.manager.create.call_args.kwargs["db"]
+    assert database.mode is DbMode.MANAGED
+    assert database.password
 
 
 def test_prompt_create_uses_managed_db_by_default_on_empty_folder(app, tmp_path) -> None:
@@ -504,7 +516,7 @@ def test_prompt_create_uses_external_db_when_local_declined(app, tmp_path) -> No
 
     with patch(
         "n8n_launcher.gui.simpledialog.askstring",
-        side_effect=["My flow", "postgresql://u:p@host/db"],
+        side_effect=["My flow", "db.example", "5433", "app", "user", "p$ss"],
     ), patch(
         "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
     ):
@@ -513,7 +525,10 @@ def test_prompt_create_uses_external_db_when_local_declined(app, tmp_path) -> No
     app.manager.create.assert_called_once_with(
         "My flow",
         folder,
-        db=DbConfig(DbMode.EXTERNAL, connection_string="postgresql://u:p@host/db"),
+        db=DbConfig(
+            DbMode.EXTERNAL,
+            connection_string="postgresql://user:p%24ss@db.example:5433/app",
+        ),
     )
 
 
@@ -532,10 +547,11 @@ def test_prompt_create_uses_none_db_when_user_cancels_dialog(app, tmp_path) -> N
     )
 
 
-def test_prompt_create_none_db_when_folder_already_has_content(app, tmp_path) -> None:
+def test_prompt_create_none_db_when_user_cancels_on_non_empty_folder(app, tmp_path) -> None:
     folder = tmp_path / "wf-existing"
     folder.mkdir()
     (folder / "notes.txt").write_text("deja la")
+    app.mocks.messagebox._yesnocancel = None
 
     with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
         "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
@@ -547,18 +563,16 @@ def test_prompt_create_none_db_when_folder_already_has_content(app, tmp_path) ->
     )
 
 
-def test_prompt_create_aborts_with_info_when_dsn_empty(app, tmp_path) -> None:
+def test_prompt_create_aborts_with_info_when_external_host_empty(app, tmp_path) -> None:
     folder = tmp_path / "wf3"
     folder.mkdir()
     app.mocks.messagebox._yesnocancel = False
 
     with patch(
-        "n8n_launcher.gui.simpledialog.askstring", return_value="My flow"
-    ), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ), patch(
         "n8n_launcher.gui.simpledialog.askstring",
         side_effect=["My flow", None],
+    ), patch(
+        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
     ):
         app.app.prompt_create_workflow()
 
@@ -598,6 +612,65 @@ def test_state_poll_runs_reconcile_and_reschedules(gui_mocks, tmp_path) -> None:
 
     manager.reconcile_all.assert_called_once()
     assert any(delay == 5000 for delay, _ in root.after_callbacks)
+
+
+def _drain_queue(app) -> None:
+    while not app.events.empty():
+        app.events.get_nowait()
+
+
+def test_poll_skips_refresh_when_state_unchanged(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.reconcile_all.return_value = 0
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+    _drain_queue(launcher)
+
+    launcher._poll_states()
+
+    assert launcher.events.empty()
+    assert manager.reconcile_all.call_count == 2
+
+
+def test_poll_refreshes_only_when_state_changed(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.reconcile_all.return_value = 1
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+    _drain_queue(launcher)
+
+    launcher._poll_states()
+
+    callback, error = launcher.events.get_nowait()
+    assert error is None
+    assert launcher.events.empty()
+
+
+def test_poll_skips_overlapping_reconcile(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.reconcile_all.return_value = 0
+    launcher = LauncherApp(
+        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+    _drain_queue(launcher)
+
+    launcher._poll_in_flight = True
+    calls_before = manager.reconcile_all.call_count
+    launcher._poll_states()
+
+    assert manager.reconcile_all.call_count == calls_before
+    assert launcher.events.empty()
 
 
 def test_empty_list_has_empty_space_click_binding(gui_mocks, tmp_path) -> None:
@@ -648,6 +721,40 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
     assert manager.create.call_args.args == ("Click flow", folder)
     assert database.mode is DbMode.MANAGED
     assert database.password
+
+
+def test_empty_space_click_deselects_when_rows_exist(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    ws = make_workspace(tmp_path, "Existing", 5678)
+    manager.list.return_value = [ws]
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    launcher._select_row("ws-existing")
+
+    launcher.workspace_list._bindings["<Button-1>"](None)
+
+    assert launcher._selected_id is None
+    manager.create.assert_not_called()
+
+
+def test_watermark_click_triggers_creation(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = []
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    folder = tmp_path / "wf-watermark"
+    folder.mkdir()
+    gui_mocks.messagebox._yesnocancel = True
+
+    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="WM flow"), patch(
+        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
+    ):
+        launcher._watermark._bindings["<Button-1>"](None)
+    launcher._drain_events()
+
+    assert manager.create.call_args.args[0] == "WM flow"
 
 
 def test_close_wired_on_window_protocol(app) -> None:

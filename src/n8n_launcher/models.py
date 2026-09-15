@@ -22,6 +22,9 @@ class WorkspaceState(StrEnum):
     ERROR = "error"
 
 
+DEFAULT_POSTGRES_IMAGE = "postgres:16"
+
+
 @dataclass
 class DbConfig:
     mode: DbMode
@@ -52,6 +55,8 @@ class Workspace:
     port: int
     db: DbConfig
     n8n_version: str = "2.33.3"
+    postgres_image: str | None = None
+    postgres_preload_timescaledb: bool = False
     state: WorkspaceState = WorkspaceState.STOPPED
     restart_required: bool = False
     api_key: str | None = None
@@ -61,6 +66,8 @@ class Workspace:
         data["workflows_dir"] = str(self.workflows_dir)
         data["db"] = self.db.to_dict()
         data["state"] = self.state.value
+        data["postgres_image"] = self.postgres_image
+        data["postgres_preload_timescaledb"] = self.postgres_preload_timescaledb
         return data
 
     @classmethod
@@ -72,6 +79,8 @@ class Workspace:
             port=int(data["port"]),
             db=DbConfig.from_dict(data["db"]),
             n8n_version=data.get("n8n_version", "2.33.3"),
+            postgres_image=data.get("postgres_image"),
+            postgres_preload_timescaledb=bool(data.get("postgres_preload_timescaledb", False)),
             state=WorkspaceState(data.get("state", WorkspaceState.STOPPED)),
             restart_required=bool(data.get("restart_required", False)),
             api_key=data.get("api_key"),

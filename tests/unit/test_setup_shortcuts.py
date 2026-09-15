@@ -20,13 +20,13 @@ def test_first_launch_checks_docker_saves_config_and_installs_shortcut(tmp_path:
         store,
         docker,
         email="owner@example.test",
-        password="secret123",
+        password="Secret123",
         work_dir=tmp_path / "work",
         executable="/tmp/n8n-launcher",
         shortcut_installer=installer,
     )
 
-    assert config == AppConfig("owner@example.test", "secret123", tmp_path / "work")
+    assert config == AppConfig("owner@example.test", "Secret123", tmp_path / "work")
     assert store.load() == config
     installer.assert_called_once_with("/tmp/n8n-launcher")
 
@@ -56,6 +56,36 @@ def test_first_launch_rejects_short_password(tmp_path: Path) -> None:
             docker,
             email="owner@example.test",
             password="short",
+            work_dir=tmp_path / "work",
+            executable="launcher",
+        )
+
+
+def test_first_launch_rejects_password_without_number(tmp_path: Path) -> None:
+    docker = MagicMock()
+    docker.check_available.return_value.available = True
+
+    with pytest.raises(SetupWizardError, match="number"):
+        run_first_launch(
+            ConfigStore(tmp_path / "config.json"),
+            docker,
+            email="owner@example.test",
+            password="UppercaseOnly",
+            work_dir=tmp_path / "work",
+            executable="launcher",
+        )
+
+
+def test_first_launch_rejects_password_without_uppercase(tmp_path: Path) -> None:
+    docker = MagicMock()
+    docker.check_available.return_value.available = True
+
+    with pytest.raises(SetupWizardError, match="uppercase"):
+        run_first_launch(
+            ConfigStore(tmp_path / "config.json"),
+            docker,
+            email="owner@example.test",
+            password="test1234",
             work_dir=tmp_path / "work",
             executable="launcher",
         )

@@ -2,7 +2,6 @@ from pathlib import Path
 
 from n8n_launcher.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.workspace_info import (
-    db_config_for_folder,
     db_connected,
     db_label,
     format_row,
@@ -86,17 +85,6 @@ def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
 def test_format_row_shows_external_db(tmp_path) -> None:
     workspace = make_workspace(tmp_path, mode=DbMode.EXTERNAL, dsn="postgresql://u:p@host/db")
     assert format_row(workspace) == "Demo | stopped | :5678 | db distante | git non | n8nPipelines 0"
-
-
-def test_db_config_for_folder_is_managed_with_db_layout(tmp_path) -> None:
-    add_migration(tmp_path)
-    config = db_config_for_folder(tmp_path)
-    assert config is not None
-    assert config.mode is DbMode.MANAGED
-
-
-def test_db_config_for_folder_is_none_without_db_layout(tmp_path) -> None:
-    assert db_config_for_folder(tmp_path) is None
 
 
 def test_db_label_maps_mode(tmp_path) -> None:

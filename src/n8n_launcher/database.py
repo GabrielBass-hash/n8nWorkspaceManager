@@ -79,12 +79,11 @@ class MigrationRunner:
         pending = [migration for migration in migrations if migration.name not in applied_names]
         for migration in pending:
             body = (
-                "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                "CREATE TABLE IF NOT EXISTS public.schema_migrations ("
                 "filename text PRIMARY KEY,\n"
                 "applied_at timestamptz NOT NULL DEFAULT now());\n"
-                "SELECT pg_catalog.set_config('search_path', '', false);\n"
                 + migration.read_text(encoding="utf-8")
-                + "\nINSERT INTO schema_migrations(filename) VALUES ("
+                + "\nINSERT INTO public.schema_migrations(filename) VALUES ("
                 + _sql_literal(migration.name)
                 + ");\n"
             )
@@ -108,12 +107,15 @@ class MigrationRunner:
                 user=parameters["user"],
                 password=parameters["password"],
                 stdin=(
-                    "SELECT pg_catalog.set_config('search_path', '', false);\n"
-                    "SELECT filename FROM schema_migrations ORDER BY filename;\n"
+                    "SELECT filename FROM public.schema_migrations ORDER BY filename;\n"
                 ),
                 check=False,
             )
         except DockerError:
+            return set()
+        # With ``check=False`` the retry helper returns the last error object
+        # instead of raising it when PostgreSQL stays unreachable.
+        if isinstance(result, DockerError):
             return set()
         if result.returncode != 0:
             return set()

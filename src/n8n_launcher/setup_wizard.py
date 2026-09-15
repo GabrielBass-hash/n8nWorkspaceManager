@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -18,11 +19,24 @@ class SetupWizardError(RuntimeError):
     """Raised when first-launch setup cannot complete."""
 
 
+def validate_password(password: str) -> None:
+    """Enforce n8n's own password policy (8-64 chars, one number, one uppercase)."""
+    if not password or not 8 <= len(password) <= 64:
+        raise SetupWizardError("An owner password of 8 to 64 characters is required")
+    if not re.search(r"\d", password):
+        raise SetupWizardError(
+            "An owner password must contain at least one number"
+        )
+    if not re.search(r"[A-Z]", password):
+        raise SetupWizardError(
+            "An owner password must contain at least one uppercase letter"
+        )
+
+
 def build_initial_config(email: str, password: str, work_dir: Path) -> AppConfig:
     if not email.strip() or "@" not in email:
         raise SetupWizardError("A valid owner email is required")
-    if not password or not 8 <= len(password) <= 64:
-        raise SetupWizardError("An owner password of 8 to 64 characters is required")
+    validate_password(password)
     if not work_dir:
         raise SetupWizardError("A work directory is required")
     work_dir.mkdir(parents=True, exist_ok=True)
