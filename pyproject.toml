@@ -28,7 +28,7 @@ n8n-launcher = "n8n_launcher.__main__:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 markers = [
     "unit: tests that do not require external services",
