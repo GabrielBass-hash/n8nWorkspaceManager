@@ -33,6 +33,26 @@ DEFAULT_POSTGRES_IMAGE = "postgres:16"
 
 
 @dataclass
+class GitConfig:
+    enabled: bool = False
+    remote_url: str | None = None
+    branch: str = "main"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "GitConfig":
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            remote_url=data.get("remote_url"),
+            branch=data.get("branch", "main"),
+        )
+
+
+@dataclass
 class DbConfig:
     """Database mode plus the parameters needed for a managed data database."""
 
@@ -71,6 +91,7 @@ class Workspace:
     workflows_dir: Path
     port: int
     db: DbConfig
+    git: GitConfig = field(default_factory=GitConfig)
     n8n_version: str = "2.33.3"
     postgres_image: str | None = None
     postgres_preload_timescaledb: bool = False
@@ -83,6 +104,7 @@ class Workspace:
         data = asdict(self)
         data["workflows_dir"] = str(self.workflows_dir)
         data["db"] = self.db.to_dict()
+        data["git"] = self.git.to_dict()
         data["state"] = self.state.value
         data["postgres_image"] = self.postgres_image
         data["postgres_preload_timescaledb"] = self.postgres_preload_timescaledb
@@ -97,6 +119,7 @@ class Workspace:
             workflows_dir=Path(data["workflows_dir"]),
             port=int(data["port"]),
             db=DbConfig.from_dict(data["db"]),
+            git=GitConfig.from_dict(data.get("git")),
             n8n_version=data.get("n8n_version", "2.33.3"),
             postgres_image=data.get("postgres_image"),
             postgres_preload_timescaledb=bool(data.get("postgres_preload_timescaledb", False)),

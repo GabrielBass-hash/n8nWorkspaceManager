@@ -5,13 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .db_manager import has_db_layout
+from .git_manager import git_is_repo
 from .models import DbMode, Workspace
 
 
 def git_repo_status(workflows_dir: Path) -> bool:
     """Return True when the workflows directory is inside a Git repository."""
-    git_marker = workflows_dir / ".git"
-    return git_marker.is_dir() or git_marker.is_file()
+    return git_is_repo(workflows_dir)
 
 
 def db_connected(workspace: Workspace) -> bool:

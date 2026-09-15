@@ -1,4 +1,6 @@
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 from n8n_launcher.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.workspace_info import (
@@ -9,6 +11,10 @@ from n8n_launcher.workspace_info import (
     git_repo_status,
     pipelines_count,
 )
+
+
+def completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> CompletedProcess:
+    return CompletedProcess(["git"], returncode, stdout, stderr)
 
 
 def make_workspace(path: Path, *, mode: DbMode = DbMode.MANAGED) -> Workspace:
@@ -33,17 +39,27 @@ def add_pipelines(path: Path) -> None:
 
 
 def test_git_repo_status_detects_git_directory(tmp_path) -> None:
-    (tmp_path / ".git").mkdir()
-    assert git_repo_status(tmp_path) is True
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        return_value=completed(0, "/tmp/.git\n"),
+    ):
+        assert git_repo_status(tmp_path) is True
 
 
 def test_git_repo_status_detects_git_worktree_marker(tmp_path) -> None:
-    (tmp_path / ".git").write_text("gitdir: ../.git\n")
-    assert git_repo_status(tmp_path) is True
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        return_value=completed(0, "/tmp/.git\n"),
+    ):
+        assert git_repo_status(tmp_path) is True
 
 
 def test_git_repo_status_missing(tmp_path) -> None:
-    assert git_repo_status(tmp_path) is False
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        return_value=completed(128, "", "fatal: not a git repository"),
+    ):
+        assert git_repo_status(tmp_path) is False
 
 
 def test_db_connected_managed_requires_layout(tmp_path) -> None:
@@ -54,19 +70,25 @@ def test_db_connected_managed_requires_layout(tmp_path) -> None:
     assert db_connected(workspace) is True
 
 
-def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
-    (tmp_path / ".git").mkdir()
+def test_format_row_shows_running_state_and_pipeline_count(tmp_path) -> None:
     add_migration(tmp_path)
     add_pipelines(tmp_path)
     workspace = make_workspace(tmp_path)
     workspace.state = WorkspaceState.RUNNING
-
-    assert format_row(workspace) == "Demo | running | :5678 | db locale | git oui | n8nPipelines 1"
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        return_value=completed(0, "/tmp/.git\n"),
+    ):
+        assert format_row(workspace) == "Demo | running | :5678 | db locale | git oui | n8nPipelines 1"
 
 
 def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
     workspace = make_workspace(tmp_path, mode=DbMode.NONE)
-    assert format_row(workspace) == "Demo | stopped | :5678 | db aucune | git non | n8nPipelines 0"
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        return_value=completed(128, "", "fatal: not a git repository"),
+    ):
+        assert format_row(workspace) == "Demo | stopped | :5678 | db aucune | git non | n8nPipelines 0"
 
 
 def test_db_label_maps_mode(tmp_path) -> None:
