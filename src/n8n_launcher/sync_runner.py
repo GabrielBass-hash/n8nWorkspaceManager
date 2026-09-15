@@ -13,18 +13,24 @@ from .api_client import N8nApiClient
 
 @dataclass(frozen=True)
 class SyncPolicy:
+    """Controls how synchronization treats remote and local workflows."""
+
     pull_remote_only: bool = True
     delete_orphans: bool = False
 
 
 @dataclass(frozen=True)
 class SyncReport:
+    """Counts of workflows pulled, pushed and skipped by a sync pass."""
+
     pulled: int = 0
     pushed: int = 0
     skipped: int = 0
 
 
 class SyncRunner:
+    """Optionally periodic two-way synchronization with a workspace folder."""
+
     def __init__(
         self,
         api: N8nApiClient,
@@ -42,6 +48,7 @@ class SyncRunner:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        """Start the background sync loop (no-op if already running)."""
         if self.is_running():
             return
         self._stop_event.clear()
@@ -49,6 +56,7 @@ class SyncRunner:
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Signal the sync thread to stop and wait for it to join."""
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout)
@@ -57,9 +65,11 @@ class SyncRunner:
             self._thread = None
 
     def is_running(self) -> bool:
+        """Return True while the background sync thread is alive."""
         return self._thread is not None and self._thread.is_alive()
 
     def sync_once(self) -> SyncReport:
+        """Pull every remote workflow that is not yet exported locally."""
         self.workflows_dir.mkdir(parents=True, exist_ok=True)
         pulled = 0
         skipped = 0

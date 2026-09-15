@@ -27,6 +27,12 @@ class WorkspaceError(RuntimeError):
 
 
 class WorkspaceManager:
+    """Central controller for workspace CRUD and the start/stop lifecycle.
+
+    Orchestrates Compose rendering, Docker, migrations, owner bootstrap, DB
+    credentials, and workflow import on behalf of the GUI and the entry point.
+    """
+
     def __init__(
         self,
         store: ConfigStore,
@@ -50,9 +56,11 @@ class WorkspaceManager:
         return N8nApiClient(f"http://127.0.0.1:{workspace.port}/api/v1", api_key)
 
     def list(self) -> list[Workspace]:
+        """Return all persisted workspaces."""
         return self.store.load().workspaces
 
     def live_state(self, workspace: Workspace) -> WorkspaceState:
+        """Query Docker for the real state, falling back to the stored one."""
         compose = compose_file(workspace.id)
         if not compose.exists():
             return workspace.state
@@ -70,6 +78,10 @@ class WorkspaceManager:
         return WorkspaceState.STOPPED
 
     def reconcile_all(self) -> int:
+        """Sync persisted states with Docker reality and save the changes.
+
+        Returns the number of workspaces whose state changed.
+        """
         changed = 0
         try:
             config = self.store.load()
@@ -96,6 +108,7 @@ class WorkspaceManager:
         port: int | None = None,
         n8n_version: str = "2.33.3",
     ) -> Workspace:
+        """Create and persist a new workspace, scaffolding its folders."""
         if not name.strip():
             raise WorkspaceError("Workspace name is required")
         config = self.store.load()
@@ -126,6 +139,7 @@ class WorkspaceManager:
         return workspace
 
     def update(self, workspace_id: str, **changes: object) -> Workspace:
+        """Update the allowed workspace fields and flag a restart when needed."""
         config = self.store.load()
         current = self._find(config, workspace_id)
         allowed = {"name", "workflows_dir", "port", "db", "n8n_version"}
@@ -140,6 +154,7 @@ class WorkspaceManager:
         return updated
 
     def delete(self, workspace_id: str) -> None:
+        """Remove a stopped workspace from the configuration."""
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         if workspace.state is not WorkspaceState.STOPPED:
@@ -148,6 +163,7 @@ class WorkspaceManager:
         self.store.save(config)
 
     def ensure_running(self, workspace_id: str) -> Workspace:
+        """Start the workspace if needed, then bootstrap owner, DB creds, workflows."""
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         if self.live_state(workspace) is not WorkspaceState.RUNNING:
@@ -179,6 +195,7 @@ class WorkspaceManager:
         root_runner.import_all()
 
     def start(self, workspace_id: str) -> Workspace:
+        """Write Compose, bring the stack up, and apply managed migrations."""
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         if workspace.db.mode is DbMode.MANAGED:
@@ -208,6 +225,7 @@ class WorkspaceManager:
         return workspace
 
     def stop(self, workspace_id: str) -> Workspace:
+        """Stop a workspace, skipping ``docker down`` when already stopped."""
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         compose = compose_file(workspace.id)

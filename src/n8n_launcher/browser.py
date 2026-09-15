@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Browser:
+    """A discoverable browser with the flag that opens it in app mode."""
+
     name: str
     executable: str
     app_flag: str = "--app"
@@ -29,6 +31,7 @@ _BROWSER_FLAGS = {
 
 
 def find_browser() -> Browser | None:
+    """Return the first installed browser, preferring Chromium app-mode ones."""
     for name, flag in _BROWSER_FLAGS.items():
         executable = shutil.which(name)
         if executable:
@@ -37,6 +40,7 @@ def find_browser() -> Browser | None:
 
 
 def open_app(url: str, browser: Browser | None = None) -> None:
+    """Open ``url`` in a dedicated app window of the given (or a discovered) browser."""
     selected = browser or find_browser()
     if selected is None:
         open_url(url)
@@ -50,6 +54,7 @@ def open_app(url: str, browser: Browser | None = None) -> None:
 
 
 def open_url(url: str) -> None:
+    """Open ``url`` via the system handler, trying xdg-open on Linux as a fallback."""
     if webbrowser.open(url):
         return
     # No registered handler succeeded; try xdg-open directly on Linux/X11.

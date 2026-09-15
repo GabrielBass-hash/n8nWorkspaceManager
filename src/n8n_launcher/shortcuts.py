@@ -1,4 +1,4 @@
-"""Desktop shortcut installation for the v0.1 distribution."""
+"""Desktop shortcut installation for the desktop distribution."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ class ShortcutError(RuntimeError):
 
 
 def desktop_dir() -> Path:
+    """Return the current user's Desktop directory."""
     return Path.home() / "Desktop"
 
 
@@ -22,6 +23,7 @@ def install_desktop_shortcut(
     name: str = "n8n Launcher",
     target_dir: Path | None = None,
 ) -> Path:
+    """Create a platform-native desktop shortcut for the launcher executable."""
     directory = target_dir or desktop_dir()
     directory.mkdir(parents=True, exist_ok=True)
     target = Path(executable)

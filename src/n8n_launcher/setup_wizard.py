@@ -34,6 +34,7 @@ def validate_password(password: str) -> None:
 
 
 def build_initial_config(email: str, password: str, work_dir: Path) -> AppConfig:
+    """Validate the first-launch inputs and return a new :class:`AppConfig`."""
     if not email.strip() or "@" not in email:
         raise SetupWizardError("A valid owner email is required")
     validate_password(password)
@@ -53,6 +54,7 @@ def run_first_launch(
     executable: str | Path,
     shortcut_installer: Callable[..., Path] = install_desktop_shortcut,
 ) -> AppConfig:
+    """Check Docker, build and save the initial config, and install a shortcut."""
     status = docker.check_available()
     if not status.available:
         raise SetupWizardError(f"Docker is not ready: {status.message}")
@@ -68,6 +70,7 @@ def run_interactive_first_launch(
     *,
     root: tk.Tk | None = None,
 ) -> AppConfig | None:
+    """Prompt the user interactively for owner details; None when cancelled."""
     owns_root = root is None
     root = root or tk.Tk()
     try:

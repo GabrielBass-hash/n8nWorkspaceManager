@@ -8,10 +8,12 @@ from .models import DbMode, Workspace, DEFAULT_POSTGRES_IMAGE
 
 
 def compose_project_name(workspace: Workspace) -> str:
+    """Return the isolated ``docker compose`` project name for a workspace."""
     return f"n8n-ws-{workspace.id}"
 
 
 def render_compose(workspace: Workspace) -> str:
+    """Return the complete Docker Compose YAML for the given workspace."""
     workflows_dir = _compose_path(workspace.workflows_dir)
     n8n_image = f"n8nio/n8n:{workspace.n8n_version}"
     db_environment, db_service, db_dependency = _database_parts(workspace)
@@ -43,6 +45,7 @@ volumes:
 
 
 def write_compose(workspace: Workspace, output: Path) -> Path:
+    """Render and write the Compose YAML, creating intermediate directories."""
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_compose(workspace), encoding="utf-8")
     return output

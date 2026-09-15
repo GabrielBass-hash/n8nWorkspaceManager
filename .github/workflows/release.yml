@@ -81,10 +81,18 @@ jobs:
         shell: pwsh
         if: runner.os == 'Windows'
         run: Move-Item dist/n8n-launcher.exe "dist/${{ matrix.asset }}"
+      - name: Stage release assets
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          mv "dist/${{ matrix.asset }}" dist/release/
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp scripts/install_macos.sh scripts/dequarantine.sh dist/release/
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.asset }}
+          path: dist/release
 
   release:
     needs: [version, build]
@@ -110,7 +118,9 @@ jobs:
             echo ""
             echo "## Installation"
             echo ""
-            echo "- **macOS**: open \`n8n-launcher-macos.dmg\` and drag \`n8n-launcher.app\` into Applications. First launch: right-click the app -> Open (ad-hoc signed, not notarized build)."
+            echo "- **macOS**: install from the terminal — no Gatekeeper dialog and no Apple Developer Program needed:"
+            echo "  \`curl -fsSL https://github.com/GabrielBass-hash/n8nWorkspaceManager/releases/latest/download/install_macos.sh | bash\`"
+            echo "  Already downloaded the .dmg in a browser? Run \`bash dequarantine.sh\` (attached) or right-click the app -> Open."
             echo "- **Windows**: download \`n8n-launcher-windows.exe\` and pin it to the taskbar or Start menu."
             echo "- **Linux**: download \`n8n-launcher-linux-x86_64.AppImage\`, make it executable (\`chmod +x\`), then double-click or add it to your app menu."
             echo "EOF"

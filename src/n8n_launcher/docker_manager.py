@@ -80,11 +80,14 @@ def parse_compose_status(raw: str) -> dict[str, str]:
 
 
 class DockerManager:
+    """Thin subprocess wrapper around ``docker compose`` lifecycle commands."""
+
     def __init__(self, command: str = "docker", timeout: float = 30.0) -> None:
         self.command = command
         self.timeout = timeout
 
     def check_available(self) -> DockerStatus:
+        """Probe ``docker info`` and report daemon availability."""
         try:
             result = self._run([self.command, "info"], timeout=5.0, check=False)
         except OSError as exc:
@@ -99,6 +102,7 @@ class DockerManager:
         images: list[str],
         on_output: Callable[[str], None] | None = None,
     ) -> None:
+        """Pull images one at a time, raising :class:`DockerError` on failure."""
         for image in images:
             result = self._run([self.command, "pull", image], check=False)
             if on_output:
@@ -108,19 +112,23 @@ class DockerManager:
                 raise DockerError(f"Docker pull failed for {image}: {result.stderr.strip()}")
 
     def up(self, workspace: Workspace, compose_file: Path) -> None:
+        """Bring the workspace stack up detached, removing orphans."""
         self._compose(workspace, compose_file, "up", "-d", "--remove-orphans")
 
     def down(self, workspace: Workspace, compose_file: Path, remove_orphans: bool = False) -> None:
+        """Tear the workspace stack down, optionally removing orphans."""
         args = ["down"]
         if remove_orphans:
             args.append("--remove-orphans")
         self._compose(workspace, compose_file, *args)
 
     def status(self, workspace: Workspace, compose_file: Path) -> ComposeStatus:
+        """Return raw ``docker compose ps --format json`` output and exit code."""
         result = self._compose(workspace, compose_file, "ps", "--format", "json", check=False)
         return ComposeStatus(result.stdout, result.returncode)
 
     def logs(self, workspace: Workspace, compose_file: Path, service: str | None = None) -> str:
+        """Return container logs for one service (or the whole project)."""
         args = ["logs", "--no-color"]
         if service:
             args.append(service)
@@ -138,6 +146,7 @@ class DockerManager:
         stdin: str = "",
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
+        """Run a psql command inside the workspace's Postgres service."""
         command = [
             self.command,
             "compose",

@@ -18,6 +18,11 @@ class MigrationError(RuntimeError):
 
 
 def data_db_parameters(workspace: Workspace) -> dict[str, str]:
+    """Return the workspace data-database credentials as a dict.
+
+    Requires ``DbMode.MANAGED``; falls back to per-field defaults for the
+    managed data database when the workspace has no explicit parameters.
+    """
     if workspace.db.mode is DbMode.MANAGED:
         return {
             "database": workspace.db.database_name or "data",
@@ -34,6 +39,7 @@ class MigrationRunner:
         self.docker = docker
 
     def ensure(self, workspace: Workspace, compose_file: Path) -> None:
+        """Create the data role and database if they do not exist yet."""
         if workspace.db.mode is not DbMode.MANAGED:
             return
         parameters = data_db_parameters(workspace)
@@ -68,6 +74,7 @@ class MigrationRunner:
         )
 
     def apply(self, workspace: Workspace, migrations_dir: Path, compose_file: Path) -> list[str]:
+        """Apply pending migrations and return their filenames in order."""
         migrations = sorted(
             (path for path in migrations_dir.glob("*.sql") if path.is_file()),
             key=lambda path: path.name,
@@ -98,6 +105,7 @@ class MigrationRunner:
         return [migration.name for migration in pending]
 
     def applied(self, workspace: Workspace, compose_file: Path) -> set[str]:
+        """Return the set of migration filenames already recorded as applied."""
         parameters = data_db_parameters(workspace)
         try:
             result = self._run_with_retries(

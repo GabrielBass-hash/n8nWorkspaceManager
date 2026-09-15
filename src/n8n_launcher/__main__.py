@@ -13,6 +13,7 @@ from .workspace_manager import WorkspaceManager
 
 
 def _center(root: tk.Tk, width: int = 820, height: int = 460) -> None:
+    """Centre the root window on screen with a reasonable vertical offset."""
     root.geometry(f"{width}x{height}")
     root.update_idletasks()
     x = (root.winfo_screenwidth() - width) // 2
@@ -35,11 +36,13 @@ def stop_all(store: ConfigStore, docker: DockerManager) -> None:
 
 
 def _signal_shutdown(store: ConfigStore, docker: DockerManager, *_args: object) -> None:
+    """Stop every workspace on SIGTERM / SIGINT, then exit."""
     stop_all(store, docker)
     sys.exit(0)
 
 
 def main() -> None:
+    """Application entry point: config, first-launch wizard, Tkinter GUI."""
     store = ConfigStore()
     docker = DockerManager(command=resolve_docker_command())
     atexit.register(stop_all, store, docker)

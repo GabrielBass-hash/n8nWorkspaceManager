@@ -16,6 +16,12 @@ class N8nApiError(RuntimeError):
 
 
 class N8nApiClient:
+    """Authenticated HTTP client for the n8n public REST API.
+
+    Every request carries the ``X-N8N-API-KEY`` header; errors are wrapped in
+    :class:`N8nApiError` with the HTTP status preserved for 401/403 handling.
+    """
+
     def __init__(
         self,
         base_url: str,
@@ -30,34 +36,42 @@ class N8nApiClient:
         self.session = session or requests.Session()
 
     def list_workflows(self) -> list[dict[str, Any]]:
+        """Return all workflows visible to the API key."""
         payload = self._request("GET", "/workflows")
         if isinstance(payload, list):
             return list(payload)
         return list(payload.get("data", []))
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Return the full export of a single workflow."""
         return self._request("GET", f"/workflows/{workflow_id}")
 
     def create_workflow(self, workflow: dict[str, Any]) -> dict[str, Any]:
+        """Create a workflow from an export payload."""
         return self._request("POST", "/workflows", json=workflow)
 
     def update_workflow(self, workflow_id: str, workflow: dict[str, Any]) -> dict[str, Any]:
+        """Replace an existing workflow by its id."""
         return self._request("PUT", f"/workflows/{workflow_id}", json=workflow)
 
     def delete_workflow(self, workflow_id: str) -> None:
+        """Delete a workflow by its id."""
         self._request("DELETE", f"/workflows/{workflow_id}")
 
     def activate_workflow(self, workflow_id: str, active: bool = True) -> dict[str, Any]:
+        """Activate or deactivate a workflow's triggers."""
         action = "activate" if active else "deactivate"
         return self._request("POST", f"/workflows/{workflow_id}/{action}")
 
     def list_credentials(self) -> list[dict[str, Any]]:
+        """Return all credentials; a missing list is treated as empty."""
         payload = self._request("GET", "/credentials", ignore_not_found=True)
         if isinstance(payload, list):
             return list(payload)
         return list(payload.get("data", []))
 
     def create_credential(self, credential: dict[str, Any]) -> dict[str, Any]:
+        """Create a new credential."""
         return self._request("POST", "/credentials", json=credential)
 
     def ensure_postgres_credential(
@@ -70,6 +84,7 @@ class N8nApiClient:
         user: str,
         password: str,
     ) -> dict[str, Any]:
+        """Return an existing credential by name or create a Postgres one."""
         for credential in self.list_credentials():
             if credential.get("name") == name:
                 return credential
@@ -89,6 +104,11 @@ class N8nApiClient:
         )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
+        """Perform an authenticated request and decode the JSON response.
+
+        Supports an ``ignore_not_found`` kwarg that turns ``404`` into an empty
+        ``{}`` instead of raising, which several callers rely on.
+        """
         headers = {"X-N8N-API-KEY": self.api_key, "Accept": "application/json"}
         ignore_not_found = kwargs.pop("ignore_not_found", False)
         try:

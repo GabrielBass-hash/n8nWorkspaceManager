@@ -10,6 +10,8 @@ from .models import DbConfig, DbMode, Workspace
 
 @dataclass(frozen=True)
 class DatabaseTarget:
+    """Connection parameters for a workspace's managed Postgres service."""
+
     host: str
     port: int
     database: str
@@ -18,6 +20,7 @@ class DatabaseTarget:
 
 
 def data_db_target(workspace: Workspace) -> DatabaseTarget | None:
+    """Return the Postgres connection target for a MANAGED workspace, else None."""
     if workspace.db.mode is DbMode.MANAGED:
         return DatabaseTarget(
             host="postgres",
@@ -30,6 +33,10 @@ def data_db_target(workspace: Workspace) -> DatabaseTarget | None:
 
 
 def configure_db_credential(api: N8nApiClient, workspace: Workspace) -> bool:
+    """Ensure the workspace's Postgres credential exists inside n8n.
+
+    Returns True when a credential was created or already existed.
+    """
     target = data_db_target(workspace)
     if target is None:
         return False

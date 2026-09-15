@@ -39,6 +39,8 @@ class ApiCredentials:
 
 
 class OwnerSetup:
+    """Bootstrap the n8n owner account and create a launcher API key."""
+
     def __init__(self, *, timeout: float = 10.0, session: requests.Session | None = None) -> None:
         self.timeout = timeout
         self.session = session or requests.Session()
@@ -53,6 +55,7 @@ class OwnerSetup:
         last_name: str = "Launcher",
         ready_timeout: float = 180.0,
     ) -> ApiCredentials:
+        """Ensure the owner exists, log in, and return a fresh launcher API key."""
         root = base_url.rstrip("/")
         self._ensure_owner(root, email, password, first_name, last_name, ready_timeout)
         login = self._request(

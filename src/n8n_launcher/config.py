@@ -16,10 +16,13 @@ class ConfigError(RuntimeError):
 
 
 class ConfigStore:
+    """Load and save :class:`AppConfig` to disk, atomically and securely."""
+
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or config_file()
 
     def load(self) -> AppConfig:
+        """Read, parse and validate the configuration file."""
         try:
             with self.path.open(encoding="utf-8") as handle:
                 return AppConfig.from_dict(json.load(handle))
@@ -29,6 +32,7 @@ class ConfigStore:
             raise ConfigError(f"Invalid launcher configuration: {self.path}") from exc
 
     def save(self, config: AppConfig) -> None:
+        """Persist the config via temp-file + atomic rename with 0o600 perms."""
         parent = self.path.parent
         parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=parent)
@@ -53,4 +57,5 @@ def _restrict_file(path: Path) -> None:
 
 
 def ensure_directories() -> None:
+    """Create the configuration directory if it does not exist yet."""
     config_dir().mkdir(parents=True, exist_ok=True)

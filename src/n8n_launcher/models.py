@@ -9,11 +9,19 @@ from typing import Any
 
 
 class DbMode(StrEnum):
+    """How a workspace accesses its database.
+
+    ``MANAGED`` runs a local Postgres service inside the Compose project;
+    ``NONE`` runs n8n without any database service.
+    """
+
     MANAGED = "managed"
     NONE = "none"
 
 
 class WorkspaceState(StrEnum):
+    """Lifecycle states the launcher can persist or display."""
+
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
@@ -26,16 +34,20 @@ DEFAULT_POSTGRES_IMAGE = "postgres:16"
 
 @dataclass
 class DbConfig:
+    """Database mode plus the parameters needed for a managed data database."""
+
     mode: DbMode
     database_name: str | None = None
     username: str | None = None
     password: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dict with the mode as its string value."""
         return asdict(self) | {"mode": self.mode.value}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DbConfig":
+        """Deserialize, mapping any unknown legacy mode to ``NONE``."""
         raw_mode = data.get("mode", DbMode.NONE)
         try:
             mode = DbMode(raw_mode)
@@ -52,6 +64,8 @@ class DbConfig:
 
 @dataclass
 class Workspace:
+    """A user-defined n8n instance bound to a folder of workflow exports."""
+
     id: str
     name: str
     workflows_dir: Path
@@ -65,6 +79,7 @@ class Workspace:
     api_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dict (paths and enums as strings)."""
         data = asdict(self)
         data["workflows_dir"] = str(self.workflows_dir)
         data["db"] = self.db.to_dict()
@@ -75,6 +90,7 @@ class Workspace:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Workspace":
+        """Deserialize, defaulting every optional/legacy field gracefully."""
         return cls(
             id=data["id"],
             name=data["name"],
@@ -92,12 +108,15 @@ class Workspace:
 
 @dataclass
 class AppConfig:
+    """Global launcher configuration: owner identity, work dir, workspaces."""
+
     owner_email: str
     owner_password: str
     work_dir: Path
     workspaces: list[Workspace] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dict."""
         return {
             "owner_email": self.owner_email,
             "owner_password": self.owner_password,
@@ -107,6 +126,7 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+        """Deserialize an :class:`AppConfig` from parsed JSON."""
         return cls(
             owner_email=data["owner_email"],
             owner_password=data["owner_password"],

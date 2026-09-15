@@ -66,7 +66,41 @@ The output depends on the platform:
 
 ## Installation
 
-- **macOS**: open the `.dmg`, drag `n8n-launcher.app` into `/Applications` (or the Dock). Because the build is not notarized, right-click the app and choose *Open* the first time you launch it.
+### macOS — no paid Apple Developer account needed
+
+The macOS build is ad-hoc signed but **not notarized**. macOS Gatekeeper blocks
+apps "not confirmed by Apple" (translation of *"Apple could not confirm that
+'n8n-launcher' did not contain malicious software"*). The block only triggers
+on files tagged with the `com.apple.quarantine` attribute, which Safari/Finder
+add when you download the `.dmg`. Three free routes avoid it:
+
+**1. Terminal installer (recommended, reliable on macOS 15+).** Downloading
+with `curl` never adds the quarantine attribute, so the app installs and runs
+with no Apple Developer Program and no Gatekeeper dialog:
+
+```bash
+curl -fsSL https://github.com/GabrielBass-hash/n8nWorkspaceManager/releases/latest/download/install_macos.sh | bash
+```
+
+Or install a local build (useful to test a freshly built `.dmg`):
+
+```bash
+bash scripts/install_macos.sh -f dist/n8n-launcher-macos.dmg
+```
+
+**2. De-quarantine an app you already downloaded.** If the app is already in
+`/Applications` and Gatekeeper refuses it, strip the flag (see the "Apple could
+not confirm" error before/after this step):
+
+```bash
+bash scripts/dequarantine.sh                         # defaults to /Applications/n8n-launcher.app
+bash scripts/dequarantine.sh /path/to/n8n-launcher.app
+```
+
+**3. Manual bypass (no terminal).** Right-click `n8n-launcher.app` → *Open* →
+*Open*. Works, but macOS 15+ re-applies the quarantine after a relaunch, so
+prefer option 1.
+
 - **Windows**: run or pin `n8n-launcher.exe` from the taskbar / Start menu.
 - **Linux**: make the AppImage executable (`chmod +x n8n-launcher-linux-x86_64.AppImage`) and launch it — it integrates with your desktop environment's app menu.
 
