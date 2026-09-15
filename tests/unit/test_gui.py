@@ -13,11 +13,8 @@ from n8n_launcher.models import (
     Workspace,
     WorkspaceState,
 )
-<<<<<<< HEAD
 from n8n_launcher.updater import Asset, Release, parse_version
-=======
 from n8n_launcher.workspace_info import GitRowStatus
->>>>>>> bbdfb0c (feat: améliorations UX row — dialog création unique, chip git, pastille dirty, boutons démarrer/arrêter)
 
 
 class FakeTk:
@@ -955,7 +952,6 @@ def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) 
     assert folder.is_dir()
     assert (folder / "n8nPipelines").is_dir()
 
-<<<<<<< HEAD
 
 # --- auto-update ------------------------------------------------------------
 
@@ -1143,7 +1139,8 @@ def test_update_download_failure_surfaces_error(app, tmp_path) -> None:
     download_asset.assert_called_once()
     assert app.mocks.messagebox.errors == ["Téléchargement impossible : 500 boom"]
     assert not app.app.root.destroyed
-=======
+
+
 def test_row_stop_button_stops_workspace(app) -> None:
     row_action_button(app, "ws-running").command()
     app.app._drain_events()
