@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -295,7 +296,8 @@ def test_installer_script_writes_executable_sh(monkeypatch, tmp_path: Path) -> N
     script = installer_script(asset, target, script_dir=tmp_path)
 
     assert script.name == "apply_update.sh"
-    assert script.stat().st_mode & 0o100
+    if os.name != "nt":
+        assert script.stat().st_mode & 0o100
     text = script.read_text(encoding="utf-8")
     assert "kill -0" in text
     assert "mv -f" in text
