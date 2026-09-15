@@ -32,3 +32,8 @@ def workspace_runtime_dir(workspace_id: str) -> Path:
 def compose_file(workspace_id: str) -> Path:
     """Return the Compose YAML path for a workspace."""
     return workspace_runtime_dir(workspace_id) / "compose.yml"
+
+
+def updates_dir() -> Path:
+    """Return the staging directory for downloaded update artifacts and helpers."""
+    return config_dir() / "updates"
