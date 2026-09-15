@@ -10,7 +10,6 @@ requires-python = ">=3.12"
 dependencies = [
     "bcrypt>=4.0",
     "platformdirs>=4.0",
-    "psycopg[binary]>=3.1",
     "PyYAML>=6.0",
     "requests>=2.31",
 ]

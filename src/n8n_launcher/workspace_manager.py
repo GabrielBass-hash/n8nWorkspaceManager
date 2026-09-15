@@ -102,9 +102,10 @@ class WorkspaceManager:
         workspace_id = uuid4().hex[:8]
         migrations = detect_migrations(workflows_dir)
         if db is None:
-            if not migrations:
-                raise WorkspaceError("External database configuration is required without migrations")
-            db = self._managed_db_config()
+            if migrations:
+                db = self._managed_db_config()
+            else:
+                db = DbConfig(DbMode.NONE)
         if db.mode is DbMode.MANAGED and not db.password:
             db = self._managed_db_config()
         reserved = {workspace.port for workspace in config.workspaces}

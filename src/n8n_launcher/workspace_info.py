@@ -14,8 +14,6 @@ def git_repo_status(workflows_dir: Path) -> bool:
 
 
 def db_connected(workspace: Workspace) -> bool:
-    if workspace.db.mode is DbMode.EXTERNAL:
-        return bool(workspace.db.connection_string and workspace.db.connection_string.strip())
     if workspace.db.mode is DbMode.MANAGED:
         return has_db_layout(workspace.workflows_dir)
     return False
@@ -24,8 +22,6 @@ def db_connected(workspace: Workspace) -> bool:
 def db_label(workspace: Workspace) -> str:
     if workspace.db.mode is DbMode.MANAGED:
         return "locale"
-    if workspace.db.mode is DbMode.EXTERNAL:
-        return "distante"
     return "aucune"
 
 

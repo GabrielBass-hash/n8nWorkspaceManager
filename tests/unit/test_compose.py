@@ -1,4 +1,4 @@
-from n8n_launcher.compose import ComposeError, render_compose
+from n8n_launcher.compose import render_compose
 from n8n_launcher.models import DbConfig, DbMode, Workspace
 
 
@@ -76,38 +76,6 @@ def test_managed_compose_omits_preload_command_by_default(tmp_path) -> None:
     rendered = render_compose(workspace)
 
     assert "shared_preload_libraries" not in rendered
-
-
-def test_external_database_values_are_quoted_and_dollar_escaped(tmp_path) -> None:
-    workspace = Workspace(
-        id="external1",
-        name="External",
-        workflows_dir=tmp_path,
-        port=5681,
-        db=DbConfig(
-            mode=DbMode.EXTERNAL,
-            connection_string="postgresql://user:p$ss@db.example/app",
-        ),
-    )
-
-    rendered = render_compose(workspace)
-
-    assert 'DB_POSTGRESDB_PASSWORD: "p$$ss"' in rendered
-    assert "image: postgres:16" not in rendered
-    assert "DB_POSTGRESDB_HOST: \"db.example\"" in rendered
-    volumes = rendered.split("volumes:", 1)[1]
-    assert "pgdata-external1:" not in volumes
-
-
-def test_external_database_requires_connection_string(managed_workspace) -> None:
-    managed_workspace.db = DbConfig(mode=DbMode.EXTERNAL)
-
-    try:
-        render_compose(managed_workspace)
-    except ComposeError as error:
-        assert "connection string" in str(error)
-    else:
-        raise AssertionError("Expected ComposeError")
 
 
 def test_none_database_omits_postgres_and_db_environment(tmp_path) -> None:

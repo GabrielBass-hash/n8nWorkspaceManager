@@ -19,11 +19,11 @@ def manager(tmp_path: Path) -> tuple[WorkspaceManager, ConfigStore, MagicMock, M
     return WorkspaceManager(store, docker, owner_booter=booter), store, docker, booter
 
 
-def create_external(launcher: WorkspaceManager, tmp_path: Path, port: int = 5680):
+def create_none(launcher: WorkspaceManager, tmp_path: Path, port: int = 5680):
     return launcher.create(
         "Demo",
         tmp_path / "workflows",
-        db=DbConfig(DbMode.EXTERNAL, connection_string="postgresql://u:p@db/n8n"),
+        db=DbConfig(DbMode.NONE),
         port=port,
     )
 
@@ -74,16 +74,17 @@ def test_workspace_persists_postgres_image_through_config(tmp_path: Path) -> Non
     assert restored.postgres_image == "custom/pg:16"
 
 
-def test_create_without_db_requires_migrations(tmp_path: Path) -> None:
+def test_create_without_db_defaults_to_none(tmp_path: Path) -> None:
     launcher, _, _, _ = manager(tmp_path)
 
-    with pytest.raises(WorkspaceError, match="External database"):
-        launcher.create("Demo", tmp_path / "workflows")
+    workspace = launcher.create("Demo", tmp_path / "workflows")
+
+    assert workspace.db.mode is DbMode.NONE
 
 
 def test_start_and_stop_update_state(tmp_path: Path) -> None:
     launcher, store, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
 
     with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "compose.yml"):
         started = launcher.start(workspace.id)
@@ -97,7 +98,7 @@ def test_start_and_stop_update_state(tmp_path: Path) -> None:
 
 def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
     launcher, store, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
 
     with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "missing.yml"):
         stopped = launcher.stop(workspace.id)
@@ -108,7 +109,7 @@ def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
 
 def test_stop_is_idempotent_on_already_stopped(tmp_path: Path) -> None:
     launcher, _, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
 
     with patch("n8n_launcher.workspace_manager.compose_file", return_value=compose):
@@ -124,7 +125,7 @@ def test_stop_is_idempotent_on_already_stopped(tmp_path: Path) -> None:
 
 def test_live_state_reports_running_when_n8n_up(tmp_path: Path) -> None:
     launcher, _, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
     docker.status.return_value = ComposeStatus(
@@ -138,7 +139,7 @@ def test_live_state_reports_running_when_n8n_up(tmp_path: Path) -> None:
 
 def test_live_state_reports_stopped_when_project_down(tmp_path: Path) -> None:
     launcher, _, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
     docker.status.return_value = ComposeStatus(raw_output="", returncode=0)
@@ -149,7 +150,7 @@ def test_live_state_reports_stopped_when_project_down(tmp_path: Path) -> None:
 
 def test_live_state_falls_back_to_stored_on_docker_error(tmp_path: Path) -> None:
     launcher, _, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     workspace.state = WorkspaceState.RUNNING
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
@@ -161,7 +162,7 @@ def test_live_state_falls_back_to_stored_on_docker_error(tmp_path: Path) -> None
 
 def test_live_state_uses_stored_when_compose_missing(tmp_path: Path) -> None:
     launcher, _, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
 
     with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "missing.yml"):
         assert launcher.live_state(workspace) is WorkspaceState.STOPPED
@@ -171,7 +172,7 @@ def test_live_state_uses_stored_when_compose_missing(tmp_path: Path) -> None:
 
 def test_reconcile_all_persists_live_states(tmp_path: Path) -> None:
     launcher, store, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
     docker.status.return_value = ComposeStatus(
@@ -188,7 +189,7 @@ def test_reconcile_all_persists_live_states(tmp_path: Path) -> None:
 
 def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
     launcher, store, docker, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
     docker.status.return_value = ComposeStatus(raw_output="", returncode=0)
@@ -227,7 +228,7 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
     launcher = WorkspaceManager(
         store, docker, owner_booter=booter, api_factory=MagicMock(return_value=fake_api)
     )
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
 
     with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "compose.yml"):
         launcher.ensure_running(workspace.id)
@@ -237,7 +238,7 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
     stored = store.load().workspaces[0]
     assert stored.state is WorkspaceState.RUNNING
     assert stored.api_key == "api-key-123"
-    fake_api.ensure_postgres_credential.assert_called_once()
+    fake_api.ensure_postgres_credential.assert_not_called()
 
 
 def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None:
@@ -250,7 +251,7 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
     launcher = WorkspaceManager(
         store, docker, owner_booter=booter, api_factory=MagicMock(return_value=fake_api)
     )
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     config = store.load()
     config.workspaces[0].api_key = "already-configured"
     store.save(config)
@@ -260,14 +261,7 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
 
     docker.up.assert_called_once()
     booter.assert_not_called()
-    fake_api.ensure_postgres_credential.assert_called_once_with(
-        "workspace-Demo",
-        host="db",
-        port=5432,
-        database="n8n",
-        user="u",
-        password="p",
-    )
+    fake_api.ensure_postgres_credential.assert_not_called()
 
 
 def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> None:
@@ -280,7 +274,7 @@ def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> N
     launcher = WorkspaceManager(
         store, docker, owner_booter=booter, api_factory=MagicMock(return_value=fake_api)
     )
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     config = store.load()
     config.workspaces[0].state = WorkspaceState.RUNNING
     store.save(config)
@@ -326,7 +320,9 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
         launcher = WorkspaceManager(
             store, docker, owner_booter=booter, api_factory=MagicMock(return_value=forbidden)
         )
-        workspace = create_external(launcher, tmp_path)
+        workspace = launcher.create(
+            "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
+        )
         config = store.load()
         config.workspaces[0].api_key = "old-key"
         store.save(config)
@@ -369,7 +365,7 @@ def test_ensure_running_imports_folder_workflows(tmp_path: Path) -> None:
 
 def test_ensure_running_propagates_bootstrap_error(tmp_path: Path) -> None:
     launcher, _, docker, booter = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path)
+    workspace = create_none(launcher, tmp_path)
     booter.side_effect = OwnerSetupError("boom")
 
     with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "compose.yml"):
@@ -390,7 +386,7 @@ def test_ensure_running_unknown_workspace(tmp_path: Path) -> None:
 
 def test_workspace_serialization_roundtrip_includes_api_key(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
-    workspace = create_external(launcher, tmp_path, port=5700)
+    workspace = create_none(launcher, tmp_path, port=5700)
     config = store.load()
     config.workspaces[0].api_key = "sekret-1"
     store.save(config)
@@ -399,4 +395,4 @@ def test_workspace_serialization_roundtrip_includes_api_key(tmp_path: Path) -> N
     loaded = store.load().workspaces[0]
     assert loaded.api_key == "sekret-1"
     assert loaded.port == 5700
-    assert loaded.db.mode is DbMode.EXTERNAL
+    assert loaded.db.mode is DbMode.NONE

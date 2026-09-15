@@ -11,13 +11,13 @@ from n8n_launcher.workspace_info import (
 )
 
 
-def make_workspace(path: Path, *, mode: DbMode = DbMode.MANAGED, dsn: str | None = None) -> Workspace:
+def make_workspace(path: Path, *, mode: DbMode = DbMode.MANAGED) -> Workspace:
     return Workspace(
         id="w1",
         name="Demo",
         workflows_dir=path,
         port=5678,
-        db=DbConfig(mode=mode, connection_string=dsn),
+        db=DbConfig(mode=mode),
     )
 
 
@@ -54,20 +54,7 @@ def test_db_connected_managed_requires_layout(tmp_path) -> None:
     assert db_connected(workspace) is True
 
 
-def test_db_connected_external_requires_connection_string(tmp_path) -> None:
-    workspace = make_workspace(tmp_path, mode=DbMode.EXTERNAL)
-    assert db_connected(workspace) is False
-
-    workspace.db.connection_string = "postgresql://u:p@host/db"
-    assert db_connected(workspace) is True
-
-
-def test_db_connected_ignores_blank_connection_string(tmp_path) -> None:
-    workspace = make_workspace(tmp_path, mode=DbMode.EXTERNAL, dsn="   ")
-    assert db_connected(workspace) is False
-
-
-def test_format_row_shows_running_state_and_pipeline_count(tmp_path) -> None:
+def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
     (tmp_path / ".git").mkdir()
     add_migration(tmp_path)
     add_pipelines(tmp_path)
@@ -82,16 +69,10 @@ def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
     assert format_row(workspace) == "Demo | stopped | :5678 | db aucune | git non | n8nPipelines 0"
 
 
-def test_format_row_shows_external_db(tmp_path) -> None:
-    workspace = make_workspace(tmp_path, mode=DbMode.EXTERNAL, dsn="postgresql://u:p@host/db")
-    assert format_row(workspace) == "Demo | stopped | :5678 | db distante | git non | n8nPipelines 0"
-
-
 def test_db_label_maps_mode(tmp_path) -> None:
     from n8n_launcher.workspace_info import db_label as db_lbl
 
     assert db_lbl(make_workspace(tmp_path, mode=DbMode.MANAGED)) == "locale"
-    assert db_lbl(make_workspace(tmp_path, mode=DbMode.EXTERNAL, dsn="postgresql://u:p@h/d")) == "distante"
     assert db_lbl(make_workspace(tmp_path, mode=DbMode.NONE)) == "aucune"
 
 

@@ -11,7 +11,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 import requests
@@ -19,9 +19,9 @@ import requests
 from .api_client import N8nApiClient
 from .browser import open_app
 from .config import ConfigStore
+from .db_manager import has_db_layout
 from .docker_manager import DockerManager
 from .models import DbConfig, DbMode, Workspace, WorkspaceState
-from .n8n_setup import build_external_connection_string
 from .sync_runner import SyncRunner
 from .workspace_info import db_connected, db_label, git_repo_status, pipelines_count
 from .workspace_manager import WorkspaceError, WorkspaceManager
@@ -488,9 +488,6 @@ class LauncherApp:
             self._menu.tk_popup(event.x_root, event.y_root)
 
     def prompt_create_workflow(self) -> None:
-        name = simpledialog.askstring("Nouveau workflow", "Nom du workflow :", parent=self.root)
-        if not name:
-            return
         directory = filedialog.askdirectory(
             title="Dossier du workspace (workflows JSON dans n8nPipelines/)", parent=self.root
         )
@@ -498,71 +495,22 @@ class LauncherApp:
             return
         workflows_dir = Path(directory)
         workflows_dir.mkdir(parents=True, exist_ok=True)
-        choice = messagebox.askyesnocancel(
-            "Nouveau workflow",
-            "Quelle base de données pour les workflows ?\n\n"
-            "« Oui » = base locale (gérée, schéma + migrations auto)\n"
-            "« Non » = base distante (accès à une base existante)\n"
-            "« Annuler » = aucune base (workflows sauvegardés en JSON)",
-            parent=self.root,
-        )
-        if choice is True:
+        name = workflows_dir.name
+
+        if has_db_layout(workflows_dir):
             database = self._fresh_managed_db_config()
-        elif choice is False:
-            database = self._prompt_external_db_config()
-            if database is None:
-                messagebox.showinfo(
-                    "Nouveau workflow",
-                    "Création annulée : aucune connexion distante fournie.",
-                    parent=self.root,
-                )
-                return
+        elif messagebox.askyesno(
+            "Nouveau workflow",
+            "Créer une base locale (PostgreSQL) avec schéma et migrations\n"
+            "appliquées automatiquement au lancement ?",
+            parent=self.root,
+        ):
+            database = self._fresh_managed_db_config()
         else:
             database = DbConfig(DbMode.NONE)
         self._run_async(
-            lambda: self.workspace_manager.create(name.strip(), workflows_dir, db=database),
+            lambda: self.workspace_manager.create(name, workflows_dir, db=database),
             on_success=self._refresh_with_selection,
-        )
-
-    def _prompt_external_db_config(self) -> DbConfig | None:
-        """Gather the connection fields for an existing remote PostgreSQL database."""
-        host = simpledialog.askstring(
-            "Nouveau workflow", "Hôte de la base distante :", parent=self.root
-        )
-        if not host:
-            return None
-        port = simpledialog.askstring(
-            "Nouveau workflow",
-            "Port de la base distante (défaut 5432) :",
-            parent=self.root,
-        )
-        database = simpledialog.askstring(
-            "Nouveau workflow", "Nom de la base distante :", parent=self.root
-        )
-        if not database:
-            return None
-        username = simpledialog.askstring(
-            "Nouveau workflow", "Utilisateur de la base distante :", parent=self.root
-        )
-        if not username:
-            return None
-        password = simpledialog.askstring(
-            "Nouveau workflow",
-            "Mot de passe de la base distante :",
-            parent=self.root,
-            show="*",
-        )
-        if password is None:
-            return None
-        return DbConfig(
-            DbMode.EXTERNAL,
-            connection_string=build_external_connection_string(
-                host=host.strip(),
-                port=port or "5432",
-                database=database.strip(),
-                user=username.strip(),
-                password=password,
-            ),
         )
 
     @staticmethod

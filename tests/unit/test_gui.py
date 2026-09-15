@@ -476,15 +476,12 @@ def test_delete_unknown_workspace_is_noop(app) -> None:
     app.manager.delete.assert_not_called()
 
 
-def test_prompt_create_uses_managed_db_when_local_chosen(app, tmp_path) -> None:
+def test_prompt_create_uses_managed_db_when_migrations_exist(app, tmp_path) -> None:
     folder = tmp_path / "wf"
     (folder / "db" / "migrations").mkdir(parents=True)
     (folder / "db" / "migrations" / "001.sql").write_text("select 1;")
-    app.mocks.messagebox._yesnocancel = True
 
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
         app.app.prompt_create_workflow()
 
     database = app.manager.create.call_args.kwargs["db"]
@@ -492,15 +489,25 @@ def test_prompt_create_uses_managed_db_when_local_chosen(app, tmp_path) -> None:
     assert database.password
 
 
-def test_prompt_create_uses_managed_db_by_default_on_empty_folder(app, tmp_path) -> None:
+def test_prompt_create_uses_none_db_when_declined(app, tmp_path) -> None:
     folder = tmp_path / "wf-nomig"
     folder.mkdir()
-    app.mocks.messagebox._yesnocancel = True
 
-    with patch(
-        "n8n_launcher.gui.simpledialog.askstring", return_value="My flow"
-    ), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.messagebox.askyesno", return_value=False
+    ):
+        app.app.prompt_create_workflow()
+
+    database = app.manager.create.call_args.kwargs["db"]
+    assert database.mode is DbMode.NONE
+
+
+def test_prompt_create_uses_managed_db_when_accepted(app, tmp_path) -> None:
+    folder = tmp_path / "wf-accept"
+    folder.mkdir()
+
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.messagebox.askyesno", return_value=True
     ):
         app.app.prompt_create_workflow()
 
@@ -509,81 +516,18 @@ def test_prompt_create_uses_managed_db_by_default_on_empty_folder(app, tmp_path)
     assert database.password
 
 
-def test_prompt_create_uses_external_db_when_local_declined(app, tmp_path) -> None:
-    folder = tmp_path / "wf2"
+def test_prompt_create_uses_folder_name(app, tmp_path) -> None:
+    folder = tmp_path / "MyFlow"
     folder.mkdir()
-    app.mocks.messagebox._yesnocancel = False
 
-    with patch(
-        "n8n_launcher.gui.simpledialog.askstring",
-        side_effect=["My flow", "db.example", "5433", "app", "user", "p$ss"],
-    ), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
         app.app.prompt_create_workflow()
 
-    app.manager.create.assert_called_once_with(
-        "My flow",
-        folder,
-        db=DbConfig(
-            DbMode.EXTERNAL,
-            connection_string="postgresql://user:p%24ss@db.example:5433/app",
-        ),
-    )
+    assert app.manager.create.call_args.args[0] == "MyFlow"
 
 
-def test_prompt_create_uses_none_db_when_user_cancels_dialog(app, tmp_path) -> None:
-    folder = tmp_path / "wf4"
-    folder.mkdir()
-    app.mocks.messagebox._yesnocancel = None
-
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
-        app.app.prompt_create_workflow()
-
-    app.manager.create.assert_called_once_with(
-        "My flow", folder, db=DbConfig(DbMode.NONE)
-    )
-
-
-def test_prompt_create_none_db_when_user_cancels_on_non_empty_folder(app, tmp_path) -> None:
-    folder = tmp_path / "wf-existing"
-    folder.mkdir()
-    (folder / "notes.txt").write_text("deja la")
-    app.mocks.messagebox._yesnocancel = None
-
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="My flow"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
-        app.app.prompt_create_workflow()
-
-    app.manager.create.assert_called_once_with(
-        "My flow", folder, db=DbConfig(DbMode.NONE)
-    )
-
-
-def test_prompt_create_aborts_with_info_when_external_host_empty(app, tmp_path) -> None:
-    folder = tmp_path / "wf3"
-    folder.mkdir()
-    app.mocks.messagebox._yesnocancel = False
-
-    with patch(
-        "n8n_launcher.gui.simpledialog.askstring",
-        side_effect=["My flow", None],
-    ), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
-        app.app.prompt_create_workflow()
-
-    app.manager.create.assert_not_called()
-    assert app.mocks.messagebox.infos == [
-        "Création annulée : aucune connexion distante fournie."
-    ]
-
-
-def test_prompt_create_skips_when_user_cancels(app) -> None:
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value=None):
+def test_prompt_create_skips_when_user_cancels_directory(app) -> None:
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=""):
         app.app.prompt_create_workflow()
 
     app.manager.create.assert_not_called()
@@ -709,18 +653,16 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     folder = tmp_path / "wf-click"
     folder.mkdir()
-    gui_mocks.messagebox._yesnocancel = True
 
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="Click flow"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.messagebox.askyesno", return_value=False
     ):
         launcher.workspace_list._bindings["<Button-1>"](None)
     launcher._drain_events()
 
     database = manager.create.call_args.kwargs["db"]
-    assert manager.create.call_args.args == ("Click flow", folder)
-    assert database.mode is DbMode.MANAGED
-    assert database.password
+    assert manager.create.call_args.args == ("wf-click", folder)
+    assert database.mode is DbMode.NONE
 
 
 def test_empty_space_click_deselects_when_rows_exist(gui_mocks, tmp_path) -> None:
@@ -746,15 +688,12 @@ def test_watermark_click_triggers_creation(gui_mocks, tmp_path) -> None:
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     folder = tmp_path / "wf-watermark"
     folder.mkdir()
-    gui_mocks.messagebox._yesnocancel = True
 
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="WM flow"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
         launcher._watermark._bindings["<Button-1>"](None)
     launcher._drain_events()
 
-    assert manager.create.call_args.args[0] == "WM flow"
+    assert manager.create.call_args.args[0] == "wf-watermark"
 
 
 def test_close_wired_on_window_protocol(app) -> None:
@@ -829,19 +768,17 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
 
     folder = tmp_path / "wf-real"
     folder.mkdir()
-    gui_mocks.messagebox._yesnocancel = True
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="Mon flow"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
+    gui_mocks.messagebox._yesno = True
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
         launcher.prompt_create_workflow()
     launcher._drain_events()
 
     workspaces = store.load().workspaces
     assert len(workspaces) == 1
-    assert workspaces[0].name == "Mon flow"
+    assert workspaces[0].name == "wf-real"
     assert workspaces[0].db.mode is DbMode.MANAGED
     created_id = workspaces[0].id
-    assert row_text(SimpleNamespace(app=launcher), created_id) == "Mon flow"
+    assert row_text(SimpleNamespace(app=launcher), created_id) == "wf-real"
     assert row_status_text(SimpleNamespace(app=launcher), created_id) == "Arrêté"
     assert row_chip_text(SimpleNamespace(app=launcher), created_id, "port_chip") == (
         f":{workspaces[0].port}"
@@ -850,6 +787,7 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     assert launcher._selected_id == created_id
     assert (folder / "n8nPipelines").is_dir()
     assert (folder / "db" / "migrations").is_dir()
+    assert (folder / "db" / "schema.sql").is_file()
 
 
 def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) -> None:
@@ -863,10 +801,7 @@ def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) 
     )
     folder = tmp_path / "wf-to-delete"
     folder.mkdir()
-    gui_mocks.messagebox._yesnocancel = True
-    with patch("n8n_launcher.gui.simpledialog.askstring", return_value="À supprimer"), patch(
-        "n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)
-    ):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
         launcher.prompt_create_workflow()
     launcher._drain_events()
 

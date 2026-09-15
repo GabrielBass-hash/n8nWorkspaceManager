@@ -31,16 +31,9 @@ def test_api_client_sends_key_and_lists_workflows() -> None:
     assert request.kwargs["headers"]["X-N8N-API-KEY"] == "secret"
 
 
-def test_owner_password_hash_is_fully_dollar_escaped() -> None:
-    from n8n_launcher.compose import escape_compose_value
-
+def test_owner_password_hash_is_bcrypt() -> None:
     hashed = hash_owner_password("s3cret with $ dollar signs")
     assert hashed.startswith("$2")
-    assert "$$" not in hashed.replace("$$", "")
-
-    escaped = escape_compose_value(hashed)
-    assert escaped == hashed.replace("$", "$$")
-    assert "$" not in escaped.replace("$$", "")
 
 
 def test_owner_setup_returns_api_key() -> None:

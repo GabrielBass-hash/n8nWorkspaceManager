@@ -9,7 +9,7 @@ def test_workspace_round_trip() -> None:
         name="My workspace",
         workflows_dir=Path("/tmp/workflows"),
         port=5680,
-        db=DbConfig(mode=DbMode.EXTERNAL, connection_string="postgresql://user:secret@db/app"),
+        db=DbConfig(mode=DbMode.MANAGED, database_name="data", username="n8ndata", password="secret"),
         state=WorkspaceState.RUNNING,
         restart_required=True,
     )
@@ -66,6 +66,24 @@ def test_workspace_from_dict_backcompat_without_postgres_image() -> None:
 
     assert restored.postgres_image is None
     assert restored.postgres_preload_timescaledb is False
+
+
+def test_db_config_from_dict_legacy_external_falls_back_to_none() -> None:
+    legacy = DbConfig.from_dict(
+        {
+            "mode": "external",
+            "connection_string": "postgresql://user:secret@db.example/app",
+            "database_name": None,
+            "username": None,
+            "password": None,
+        }
+    )
+
+    assert legacy.mode is DbMode.NONE
+    assert legacy.database_name is None
+
+    round_trip = DbConfig.from_dict(legacy.to_dict())
+    assert round_trip.mode is DbMode.NONE
 
 
 def test_app_config_round_trip(tmp_path: Path) -> None:

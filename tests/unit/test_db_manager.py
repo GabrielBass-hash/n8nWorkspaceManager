@@ -1,16 +1,8 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from n8n_launcher.database import MigrationRunner
-from n8n_launcher.db_manager import (
-    DatabaseError,
-    apply_migrations,
-    detect_migrations,
-    has_db_layout,
-    validate_external,
-)
+from n8n_launcher.db_manager import detect_migrations, has_db_layout
 from n8n_launcher.models import DbConfig, DbMode, Workspace
 
 
@@ -33,41 +25,6 @@ def test_has_db_layout_detects_schema_and_migrations(tmp_path: Path) -> None:
 
     (tmp_path / "db" / "schema.sql").unlink()
     assert has_db_layout(tmp_path) is False
-
-
-def test_validate_external_executes_select_one() -> None:
-    connection = MagicMock()
-    connection.__enter__.return_value = connection
-    cursor = connection.cursor.return_value.__enter__.return_value
-
-    with patch("n8n_launcher.db_manager.psycopg.connect", return_value=connection) as connect:
-        validate_external("postgresql://user:secret@db.example/app")
-
-    connect.assert_called_once_with("postgresql://user:secret@db.example/app", connect_timeout=5)
-    cursor.execute.assert_called_once_with("SELECT 1")
-
-
-def test_apply_migrations_runs_in_order(tmp_path: Path) -> None:
-    first = tmp_path / "001-first.sql"
-    second = tmp_path / "002-second.sql"
-    first.write_text("create table first;", encoding="utf-8")
-    second.write_text("create table second;", encoding="utf-8")
-    connection = MagicMock()
-    connection.__enter__.return_value = connection
-    cursor = connection.cursor.return_value.__enter__.return_value
-
-    apply_migrations("postgresql://db/app", [first, second], connect=MagicMock(return_value=connection))
-
-    assert [call.args[0] for call in cursor.execute.call_args_list] == [
-        "create table first;",
-        "create table second;",
-    ]
-    connection.commit.assert_called_once_with()
-
-
-def test_empty_external_connection_is_rejected() -> None:
-    with pytest.raises(DatabaseError, match="empty"):
-        validate_external("  ")
 
 
 def test_ensure_sends_semicolon_terminated_gexec_scripts(tmp_path: Path) -> None:

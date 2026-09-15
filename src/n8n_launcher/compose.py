@@ -3,22 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from .models import DbMode, Workspace, DEFAULT_POSTGRES_IMAGE
 
 
-class ComposeError(ValueError):
-    """Raised when a workspace cannot be represented as Compose configuration."""
-
-
 def compose_project_name(workspace: Workspace) -> str:
     return f"n8n-ws-{workspace.id}"
-
-
-def escape_compose_value(value: str) -> str:
-    """Escape dollar signs so Compose does not interpolate secret values."""
-    return value.replace("$", "$$")
 
 
 def render_compose(workspace: Workspace) -> str:
@@ -96,25 +86,6 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
         dependency = "    depends_on:\n      postgres:\n        condition: service_healthy\n"
         return environment, service, dependency
 
-    if not workspace.db.connection_string:
-        raise ComposeError("External database mode requires a connection string")
-    parsed = urlparse(workspace.db.connection_string)
-    if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
-        raise ComposeError("External database connection string is invalid")
-    environment = f"""      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: {_yaml_quote(escape_compose_value(parsed.hostname))}
-      DB_POSTGRESDB_PORT: \"{parsed.port or 5432}\"
-      DB_POSTGRESDB_DATABASE: {_yaml_quote(escape_compose_value(unquote(parsed.path.lstrip("/"))))}
-      DB_POSTGRESDB_USER: {_yaml_quote(escape_compose_value(unquote(parsed.username or "")))}
-      DB_POSTGRESDB_PASSWORD: {_yaml_quote(escape_compose_value(unquote(parsed.password or "")))}
-"""
-    return environment, "", ""
-
 
 def _compose_path(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace("\"", "\\\"")
-
-
-def _yaml_quote(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'

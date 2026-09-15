@@ -10,7 +10,6 @@ from typing import Any
 
 class DbMode(StrEnum):
     MANAGED = "managed"
-    EXTERNAL = "external"
     NONE = "none"
 
 
@@ -28,7 +27,6 @@ DEFAULT_POSTGRES_IMAGE = "postgres:16"
 @dataclass
 class DbConfig:
     mode: DbMode
-    connection_string: str | None = None
     database_name: str | None = None
     username: str | None = None
     password: str | None = None
@@ -38,9 +36,14 @@ class DbConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DbConfig":
+        raw_mode = data.get("mode", DbMode.NONE)
+        try:
+            mode = DbMode(raw_mode)
+        except ValueError:
+            # Legacy "external" configs fall back to NONE.
+            mode = DbMode.NONE
         return cls(
-            mode=DbMode(data["mode"]),
-            connection_string=data.get("connection_string"),
+            mode=mode,
             database_name=data.get("database_name"),
             username=data.get("username"),
             password=data.get("password"),
