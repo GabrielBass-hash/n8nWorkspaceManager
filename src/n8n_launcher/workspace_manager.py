@@ -237,6 +237,17 @@ class WorkspaceManager:
                 git_push(workspace.workflows_dir)
             except GitError as exc:
                 logger.warning("git push failed for %s: %s", workspace.name, exc)
+                self._set_git_push_failed(workspace, True)
+                return
+            self._set_git_push_failed(workspace, False)
+
+    def _set_git_push_failed(self, workspace: Workspace, failed: bool) -> None:
+        """Persist the push-failed flag (and mirror it on the in-memory object)."""
+        workspace.git_push_failed = failed
+        config = self.store.load()
+        current = self._find(config, workspace.id)
+        current.git_push_failed = failed
+        self.store.save(config)
 
     def git_init_workspace(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Initialize a git repository in the workspace folder."""
@@ -250,6 +261,7 @@ class WorkspaceManager:
         config = self.store.load()
         workspace = self._find(config, workspace.id)
         workspace.git = GitConfig(enabled=True, remote_url=remote_url)
+        workspace.git_push_failed = False
         self.store.save(config)
 
     def git_remote_url(self, workspace: Workspace) -> str | None:
@@ -268,6 +280,7 @@ class WorkspaceManager:
             else:
                 git_add_remote(workspace.workflows_dir, "origin", remote_url)
         workspace.git = GitConfig(enabled=True, remote_url=remote_url)
+        workspace.git_push_failed = False
         self.store.save(config)
         logger.info("Configured git for %s", workspace.name)
 

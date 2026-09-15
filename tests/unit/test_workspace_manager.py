@@ -434,6 +434,7 @@ def test_sync_git_commits_and_pushes(tmp_path: Path) -> None:
     add.assert_called_once_with(workspace.workflows_dir)
     commit.assert_called_once()
     push.assert_called_once()
+    assert store.load().workspaces[0].git_push_failed is False
 
 
 def test_sync_git_pushes_only_when_committed_or_unpushed(tmp_path: Path) -> None:
@@ -455,12 +456,13 @@ def test_sync_git_pushes_only_when_committed_or_unpushed(tmp_path: Path) -> None
     push.assert_not_called()
 
 
-def test_sync_git_swallows_push_failure(tmp_path: Path) -> None:
+def test_sync_git_swallows_push_failure_and_flags_workspace(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
     config = store.load()
     config.workspaces[0].git = GitConfig(enabled=True)
     store.save(config)
+    workspace.git = GitConfig(enabled=True)
 
     with (
         patch("n8n_launcher.workspace_manager.git_is_repo", return_value=True),
@@ -471,10 +473,39 @@ def test_sync_git_swallows_push_failure(tmp_path: Path) -> None:
     ):
         launcher.sync_git(workspace)  # must not raise
 
+    assert workspace.git_push_failed is True
+    assert store.load().workspaces[0].git_push_failed is True
+
+
+def test_sync_git_clears_push_failed_after_success(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True)
+    config.workspaces[0].git_push_failed = True
+    store.save(config)
+    workspace.git = GitConfig(enabled=True)
+    workspace.git_push_failed = True
+
+    with (
+        patch("n8n_launcher.workspace_manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspace_manager.git_add"),
+        patch("n8n_launcher.workspace_manager.git_commit", return_value=True),
+        patch("n8n_launcher.workspace_manager.git_has_unpushed_commits", return_value=False),
+        patch("n8n_launcher.workspace_manager.git_push"),
+    ):
+        launcher.sync_git(workspace)
+
+    assert workspace.git_push_failed is False
+    assert store.load().workspaces[0].git_push_failed is False
+
 
 def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git_push_failed = True
+    store.save(config)
 
     with (
         patch("n8n_launcher.workspace_manager.git_is_repo", return_value=False),
@@ -489,6 +520,7 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
     stored = store.load().workspaces[0]
     assert stored.git.enabled is True
     assert stored.git.remote_url == "https://example.test/repo.git"
+    assert stored.git_push_failed is False
 
 
 def test_git_init_workspace_reuses_existing_repo(tmp_path: Path) -> None:
@@ -512,6 +544,9 @@ def test_git_init_workspace_reuses_existing_repo(tmp_path: Path) -> None:
 def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git_push_failed = True
+    store.save(config)
 
     with (
         patch("n8n_launcher.workspace_manager.git_has_remote", return_value=True),
@@ -523,6 +558,7 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     stored = store.load().workspaces[0]
     assert stored.git.enabled is True
     assert stored.git.remote_url == "https://example.test/other.git"
+    assert stored.git_push_failed is False
 
 
 def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> None:

@@ -92,6 +92,7 @@ class Workspace:
     port: int
     db: DbConfig
     git: GitConfig = field(default_factory=GitConfig)
+    git_push_failed: bool = False
     n8n_version: str = "2.33.3"
     postgres_image: str | None = None
     postgres_preload_timescaledb: bool = False
@@ -108,6 +109,7 @@ class Workspace:
         data["state"] = self.state.value
         data["postgres_image"] = self.postgres_image
         data["postgres_preload_timescaledb"] = self.postgres_preload_timescaledb
+        data["git_push_failed"] = self.git_push_failed
         return data
 
     @classmethod
@@ -126,6 +128,7 @@ class Workspace:
             state=WorkspaceState(data.get("state", WorkspaceState.STOPPED)),
             restart_required=bool(data.get("restart_required", False)),
             api_key=data.get("api_key"),
+            git_push_failed=bool(data.get("git_push_failed", False)),
         )
 
 
