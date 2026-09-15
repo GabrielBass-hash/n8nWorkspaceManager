@@ -4,16 +4,19 @@ from unittest.mock import patch
 
 from n8n_launcher.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.workspace_info import (
+    GitRowStatus,
     db_connected,
     db_label,
     format_row,
     git_label,
     git_repo_status,
+    git_row_label,
+    git_row_status,
     pipelines_count,
 )
 
 
-def completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> CompletedProcess:
+def completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
     return CompletedProcess(["git"], returncode, stdout, stderr)
 
 
@@ -102,3 +105,76 @@ def test_pipelines_count_counts_json_files(tmp_path) -> None:
     assert pipelines_count(tmp_path) == 0
     add_pipelines(tmp_path)
     assert pipelines_count(tmp_path) == 1
+
+
+def test_git_row_status_flat_when_not_a_repo(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+
+    with (
+        patch("n8n_launcher.workspace_info.git_is_repo", return_value=False),
+        patch("n8n_launcher.workspace_info.git_has_remote") as has_remote,
+    ):
+        status = git_row_status(workspace)
+
+    assert status == GitRowStatus()
+    has_remote.assert_not_called()
+
+
+def test_git_row_status_clean_repo(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+
+    with (
+        patch("n8n_launcher.workspace_info.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspace_info.git_has_remote", return_value=False),
+        patch("n8n_launcher.workspace_info.git_has_uncommitted", return_value=False) as dirty,
+    ):
+        status = git_row_status(workspace)
+
+    assert status == GitRowStatus(is_repo=True)
+    dirty.assert_called_once_with(tmp_path)
+
+
+def test_git_row_status_reports_dirty_diverged_and_remote(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    workspace.git_push_failed = True
+
+    with (
+        patch("n8n_launcher.workspace_info.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspace_info.git_has_remote", return_value=True),
+        patch("n8n_launcher.workspace_info.git_has_uncommitted", return_value=True),
+        patch("n8n_launcher.workspace_info.git_has_unpushed_commits", return_value=True),
+        patch(
+            "n8n_launcher.workspace_info.git_remote_url",
+            return_value="https://example.test/repo.git",
+        ),
+    ):
+        status = git_row_status(workspace)
+
+    assert status.is_repo is True
+    assert status.dirty is True
+    assert status.diverged is True
+    assert status.push_failed is True
+    assert status.remote_url == "https://example.test/repo.git"
+
+
+def test_git_row_label_maps_status() -> None:
+    assert git_row_label(GitRowStatus()) == "git"
+    assert git_row_label(GitRowStatus(is_repo=True)) == "git"
+    assert git_row_label(GitRowStatus(is_repo=True, dirty=True)) == "git"
+    assert git_row_label(GitRowStatus(is_repo=True, diverged=True)) == "git ⇅"
+    assert git_row_label(GitRowStatus(is_repo=True, push_failed=True)) == "git ✗"
+
+
+def test_git_row_status_tooltip() -> None:
+    status = GitRowStatus(
+        is_repo=True,
+        dirty=True,
+        diverged=True,
+        push_failed=True,
+        remote_url="https://example.test/repo.git",
+    )
+    assert "https://example.test/repo.git" in status.tooltip
+    assert "non commités" in status.tooltip
+    assert "pousser" in status.tooltip
+    assert "push a échoué" in status.tooltip
+    assert "Dépôt Git initialisé" in GitRowStatus(is_repo=True).tooltip
