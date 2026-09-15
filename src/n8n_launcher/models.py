@@ -93,7 +93,7 @@ class Workspace:
     db: DbConfig
     git: GitConfig = field(default_factory=GitConfig)
     git_push_failed: bool = False
-    n8n_version: str = "2.33.3"
+    n8n_version: str = "2.40.0"
     postgres_image: str | None = None
     postgres_preload_timescaledb: bool = False
     state: WorkspaceState = WorkspaceState.STOPPED

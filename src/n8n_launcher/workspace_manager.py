@@ -125,7 +125,7 @@ class WorkspaceManager:
         *,
         db: DbConfig | None = None,
         port: int | None = None,
-        n8n_version: str = "2.33.3",
+        n8n_version: str = "2.40.0",
     ) -> Workspace:
         """Create and persist a new workspace, scaffolding its folders."""
         if not name.strip():
@@ -181,14 +181,25 @@ class WorkspaceManager:
         config.workspaces.remove(workspace)
         self.store.save(config)
 
-    def ensure_running(self, workspace_id: str) -> Workspace:
-        """Start the workspace if needed, then bootstrap owner, DB creds, workflows."""
+    def ensure_running(
+        self,
+        workspace_id: str,
+        *,
+        on_ready: Callable[[int], None] | None = None,
+    ) -> Workspace:
+        """Start the workspace, wait for n8n readiness, then bootstrap owner, DB creds, workflows.
+
+        ``on_ready`` is invoked with the workspace port once the container is up so
+        the caller can wait for n8n's HTTP health endpoint before any API call.
+        """
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         if self.live_state(workspace) is not WorkspaceState.RUNNING:
             self.start(workspace_id)
             config = self.store.load()
             workspace = self._find(config, workspace_id)
+        if on_ready is not None:
+            on_ready(workspace.port)
         if not workspace.api_key:
             workspace.api_key = self.owner_booter(
                 f"http://127.0.0.1:{workspace.port}",

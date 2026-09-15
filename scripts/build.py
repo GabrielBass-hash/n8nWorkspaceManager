@@ -113,6 +113,43 @@ def build_icns() -> Path:
     return icns
 
 
+HIDDEN_IMPORTS = [
+    "n8n_launcher.gui",
+    "n8n_launcher.api_client",
+    "n8n_launcher.browser",
+    "n8n_launcher.config",
+    "n8n_launcher.db_manager",
+    "n8n_launcher.docker_manager",
+    "n8n_launcher.models",
+    "n8n_launcher.sync_runner",
+    "n8n_launcher.workspace_info",
+    "n8n_launcher.workspace_manager",
+    "n8n_launcher.owner_setup",
+    "n8n_launcher.n8n_setup",
+    "n8n_launcher.paths",
+    "n8n_launcher.setup_wizard",
+    "n8n_launcher.shortcuts",
+    "n8n_launcher.database",
+    "n8n_launcher.git_manager",
+    "n8n_launcher.updater",
+    "tkinter",
+    "tkinter.ttk",
+    "tkinter.filedialog",
+    "tkinter.messagebox",
+    "tkinter.simpledialog",
+    "requests",
+    "bcrypt",
+    "platformdirs",
+]
+
+
+def _hidden_import_args() -> list[str]:
+    args = []
+    for imp in HIDDEN_IMPORTS:
+        args.extend(["--hidden-import", imp])
+    return args
+
+
 def build_onedir() -> Path:
     app = Path("dist") / f"{APP_NAME}.app"
     if app.exists():
@@ -131,6 +168,7 @@ def build_onedir() -> Path:
             BUNDLE_ID,
             "--paths",
             "src",
+            *_hidden_import_args(),
             ENTRY_POINT,
         ]
     )
@@ -149,6 +187,7 @@ def build_onefile() -> None:
             APP_NAME,
             "--paths",
             "src",
+            *_hidden_import_args(),
             ENTRY_POINT,
         ]
     )

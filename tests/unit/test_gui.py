@@ -384,7 +384,9 @@ def test_double_click_launches_selected(app) -> None:
     app.app._handle_double("ws-stopped")
     app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-stopped", on_ready=app.app._wait_until_healthy
+    )
     app.browser.assert_called_once_with("http://127.0.0.1:5680")
 
 
@@ -408,14 +410,16 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
     assert len(HoldingThread.instances) == 1
     HoldingThread.instances[0].target()
     assert launcher._launching is None
-    manager.ensure_running.assert_called_once_with("ws-hold")
+    manager.ensure_running.assert_called_once_with("ws-hold", on_ready=launcher._wait_until_healthy)
 
 
 def test_launch_dispatches_to_manager(app) -> None:
     app.app._select_row("ws-stopped")
     app.app.launch_selected()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-stopped", on_ready=app.app._wait_until_healthy
+    )
     app.manager.stop.assert_not_called()
 
 
@@ -446,12 +450,19 @@ def test_launch_does_not_restart_when_running(app) -> None:
     app.app.launch_selected()
     app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-running")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-running", on_ready=app.app._wait_until_healthy
+    )
     app.manager.start.assert_not_called()
     app.browser.assert_called_once_with("http://127.0.0.1:5678")
 
 
 def test_launch_reports_health_timeout(app, gui_mocks) -> None:
+    def ensure_running(workspace_id, *, on_ready=None):
+        if on_ready:
+            on_ready(5678)
+
+    app.manager.ensure_running.side_effect = ensure_running
     gui_mocks.health_ok = SimpleNamespace(ok=False)
     with patch(
         "n8n_launcher.gui.requests.get",
@@ -463,7 +474,6 @@ def test_launch_reports_health_timeout(app, gui_mocks) -> None:
         app.app.launch_selected()
         app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
     app.browser.assert_not_called()
     assert "did not become ready" in app.mocks.messagebox.errors[0]
 
@@ -1148,7 +1158,9 @@ def test_row_start_button_launches_and_opens(app) -> None:
     row_action_button(app, "ws-stopped").command()
     app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-stopped", on_ready=app.app._wait_until_healthy
+    )
     app.browser.assert_called_once_with("http://127.0.0.1:5680")
 
 
@@ -1199,4 +1211,59 @@ def test_close_sync_reports_status(app) -> None:
         f"Fermeture : synchronisation de « {running.name} »…"
     )
     app.app._drain_events()
->>>>>>> bbdfb0c (feat: améliorations UX row — dialog création unique, chip git, pastille dirty, boutons démarrer/arrêter)
+
+
+def test_toggle_from_row_blocks_while_launching(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app.toggle_from_row("ws-stopped")
+    app.app.toggle_from_row("ws-running")
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_not_called()
+    app.manager.stop.assert_not_called()
+
+
+def test_handle_double_blocks_while_launching(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app._handle_double("ws-stopped")
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_not_called()
+
+
+def test_launch_selected_blocks_while_launching(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app.launch_selected()
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_not_called()
+
+
+def test_row_shows_launching_while_in_progress(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app.refresh()
+
+    btn = row_action_button(app, "ws-stopped")
+    assert btn.text == "Démarrage…"
+    assert btn.command is None
+
+
+def test_launch_sets_status_and_refreshes(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app.launch_selected()
+    app.app._drain_events()
+
+    status = app.app._status_label._options["text"]
+    assert "Lancement" in status
+    assert "ws-stopped" in status or "Stopped" in status
+
+
+def test_launch_resets_flag_and_re_enables_button_after_success(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app.launch_selected()
+    app.app._drain_events()
+
+    assert app.app._launching is None
+    btn = row_action_button(app, "ws-stopped")
+    assert btn.text == "Démarrer"
+    assert btn.command is not None

@@ -10,11 +10,8 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-<<<<<<< HEAD
 import webbrowser
-=======
 from dataclasses import dataclass
->>>>>>> bbdfb0c (feat: améliorations UX row — dialog création unique, chip git, pastille dirty, boutons démarrer/arrêter)
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
@@ -318,16 +315,30 @@ class LauncherApp:
 
         name_label.pack(side="left", fill="x", expand=True)
 
-        if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
+        if workspace.id == self._launching:
+            action_text = "Démarrage…"
+            action_command = None
+            action_cursor = "arrow"
+            action_bg = BORDER
+            action_fg = TEXT_MUTED
+        elif workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
             action_text = "Démarrer"
+            action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
+            action_cursor = "hand2"
+            action_bg = BORDER
+            action_fg = TEXT_PRIMARY
         else:
             action_text = "Arrêter"
+            action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
+            action_cursor = "hand2"
+            action_bg = BORDER
+            action_fg = TEXT_PRIMARY
         action_button = tk.Button(
             frame,
             text=action_text,
             font=FONT_PILL,
-            bg=BORDER,
-            fg=TEXT_PRIMARY,
+            bg=action_bg,
+            fg=action_fg,
             activebackground=SURFACE_HOVER,
             activeforeground=TEXT_PRIMARY,
             relief="flat",
@@ -335,8 +346,8 @@ class LauncherApp:
             highlightthickness=0,
             padx=8,
             pady=2,
-            cursor="hand2",
-            command=lambda wid=workspace.id: self.toggle_from_row(wid),
+            cursor=action_cursor,
+            command=action_command,
         )
         action_button.pack(side="right", padx=(6, 0))
 
@@ -492,7 +503,7 @@ class LauncherApp:
 
     def toggle_from_row(self, workspace_id: str) -> None:
         """Start (and open) or stop the workspace bound to a row button."""
-        if self._closing:
+        if self._closing or self._launching:
             return
         workspace = next(
             (item for item in self.workspace_manager.list() if item.id == workspace_id),
@@ -746,6 +757,8 @@ class LauncherApp:
         self.set_status(f"{workspace.name} · :{workspace.port} · {state_label(workspace.state)}")
 
     def _handle_double(self, workspace_id: str) -> None:
+        if self._launching:
+            return
         self._select_row(workspace_id)
         self.launch_selected()
 
@@ -995,7 +1008,7 @@ class LauncherApp:
         )
 
     def launch_selected(self) -> None:
-        if self._closing:
+        if self._closing or self._launching:
             return
         workspace = self._selected_or_warn()
         if workspace is None:
@@ -1007,6 +1020,8 @@ class LauncherApp:
             return
         self._launching = workspace.id
         url = f"http://127.0.0.1:{workspace.port}"
+        self.set_status(f"Lancement de « {workspace.name} » — attente que n8n réponde…")
+        self.refresh()
 
         def action() -> None:
             try:
@@ -1014,9 +1029,13 @@ class LauncherApp:
             finally:
                 self._launching = None
 
+        def on_success() -> None:
+            self.refresh()
+            self.browser_opener(url)
+
         self._run_async(
             action,
-            on_success=lambda: self.browser_opener(url),
+            on_success=on_success,
         )
 
     def open_workflows(self) -> None:
@@ -1041,8 +1060,9 @@ class LauncherApp:
         if current is None:
             raise WorkspaceError(f"Unknown workspace: {workspace.id}")
         needs_bootstrap = not bool(current.api_key)
-        self.workspace_manager.ensure_running(current.id)
-        self._wait_until_healthy(current.port)
+        self.workspace_manager.ensure_running(
+            current.id, on_ready=self._wait_until_healthy
+        )
         if needs_bootstrap:
             email = self.config_store.load().owner_email
             self.events.put(

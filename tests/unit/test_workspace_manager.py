@@ -242,6 +242,28 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
     fake_api.ensure_postgres_credential.assert_not_called()
 
 
+def test_ensure_running_calls_on_ready_with_port_after_start(tmp_path: Path) -> None:
+    fake_api = MagicMock()
+    fake_api.list_workflows.return_value = []
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    docker = MagicMock()
+    launcher = WorkspaceManager(
+        store,
+        docker,
+        owner_booter=MagicMock(return_value="api-key-123"),
+        api_factory=MagicMock(return_value=fake_api),
+    )
+    workspace = create_none(launcher, tmp_path)
+
+    ready_call = []
+    with patch("n8n_launcher.workspace_manager.compose_file", return_value=tmp_path / "compose.yml"):
+        launcher.ensure_running(workspace.id, on_ready=lambda port: ready_call.append(port))
+
+    docker.up.assert_called_once()
+    assert ready_call == [workspace.port]
+
+
 def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
