@@ -12,7 +12,7 @@ import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
 
 import requests
@@ -67,6 +67,10 @@ STATE_LABELS = {
 }
 
 STATE_POLL_MS = 5000
+
+# Sentinel returned by :meth:`LauncherApp._prompt_git_config` when the user
+# declines git setup during workspace creation.
+_GIT_SKIP = object()
 
 
 def state_label(state: WorkspaceState) -> str:
@@ -249,6 +253,8 @@ class LauncherApp:
         self._menu = tk.Menu(self.root, tearoff=0)
         self._menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
         self._menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
+        self._menu.add_separator()
+        self._menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
         self._menu.add_separator()
         self._menu.add_command(label="Supprimer", command=self._delete_selected)
 
@@ -653,8 +659,19 @@ class LauncherApp:
             database = self._fresh_managed_db_config()
         else:
             database = DbConfig(DbMode.NONE)
+        git_remote = self._prompt_git_config(workflows_dir)
+
+        def action() -> None:
+            workspace = self.workspace_manager.create(
+                name.strip(), workflows_dir, db=database
+            )
+            if git_remote is not _GIT_SKIP:
+                self.workspace_manager.git_init_workspace(
+                    workspace, remote_url=git_remote or None
+                )
+
         self._run_async(
-            lambda: self.workspace_manager.create(name, workflows_dir, db=database),
+            action,
             on_success=self._refresh_with_selection,
         )
 
@@ -665,6 +682,64 @@ class LauncherApp:
             database_name="data",
             username="n8ndata",
             password=secrets.token_hex(16),
+        )
+
+    def _prompt_git_config(self, workflows_dir: Path) -> object:
+        """Ask the user whether to enable git for the new workspace.
+
+        Returns ``_GIT_SKIP`` when the user declines, otherwise the remote URL
+        (possibly empty for a local-only repository).
+        """
+        wants_git = messagebox.askyesno(
+            "Nouveau workflow",
+            "Voulez-vous sauvegarder les workflows avec Git ?\n\n"
+            "« Oui » = initialiser un dépôt (git init)\n"
+            "« Non » = pas de versioning Git",
+            parent=self.root,
+        )
+        if not wants_git:
+            return _GIT_SKIP
+        remote_url = simpledialog.askstring(
+            "Nouveau workflow",
+            "URL du dépôt distant (laisser vide pour un dépôt local) :",
+            parent=self.root,
+        )
+        if remote_url is None:
+            return _GIT_SKIP
+        return remote_url.strip()
+
+    def configure_git_selected(self) -> None:
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        current_remote = self.workspace_manager.git_remote_url(workspace)
+        remote_url = simpledialog.askstring(
+            "Configurer Git",
+            f"URL du dépôt distant pour « {workspace.name} »"
+            f"{(f' (actuelle : {current_remote})' if current_remote else '')}\n"
+            "Laisser vide pour un dépôt local uniquement :",
+            parent=self.root,
+        )
+        if remote_url is None:
+            return
+
+        def action() -> None:
+            if git_repo_status(workspace.workflows_dir):
+                self.workspace_manager.configure_git(
+                    workspace, remote_url=remote_url.strip() or None
+                )
+            else:
+                self.workspace_manager.git_init_workspace(
+                    workspace, remote_url=remote_url.strip() or None
+                )
+
+        self._run_async(
+            action,
+            on_success=lambda: self.set_status(
+                f"Git configuré pour « {workspace.name} »."
+            ),
         )
 
     def launch_selected(self) -> None:
@@ -876,6 +951,7 @@ class LauncherApp:
         def worker() -> None:
             try:
                 self._export_workflows(workspace)
+                self.workspace_manager.sync_git(workspace, push=True)
             except Exception as exc:
                 self.events.put(
                     (lambda exc=exc: self._ask_sync_retry(workspace, rest, exc), None)

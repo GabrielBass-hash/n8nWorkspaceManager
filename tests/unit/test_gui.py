@@ -294,7 +294,11 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
     plain = make_workspace(tmp_path, "Plain", 5680)
     app.manager.list.return_value = [rich, plain]
 
-    app.app.refresh()
+    def is_repo(path: Path) -> bool:
+        return path == git_dir
+
+    with patch("n8n_launcher.gui.git_repo_status", side_effect=is_repo):
+        app.app.refresh()
 
     assert row_text(app, "ws-gitws") == "GitWs"
     assert row_status_text(app, "ws-gitws") == "En cours"
@@ -440,7 +444,7 @@ def test_watermark_plus_is_centered(app) -> None:
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
     labels = [label for label, _ in app.app._menu._items if label]
-    assert labels == ["Ouvrir n8n", "Ouvrir le dossier", "Supprimer"]
+    assert labels == ["Ouvrir n8n", "Ouvrir le dossier", "Configurer Git…", "Supprimer"]
 
 
 def test_delete_per_row_confirms_then_removes_workspace(app) -> None:
@@ -514,7 +518,7 @@ def test_prompt_create_uses_managed_db_when_accepted(app, tmp_path) -> None:
 
     with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
         "n8n_launcher.gui.messagebox.askyesno", return_value=True
-    ):
+    ), patch("n8n_launcher.gui.simpledialog.askstring", return_value=None):
         app.app.prompt_create_workflow()
 
     database = app.manager.create.call_args.kwargs["db"]
@@ -775,7 +779,9 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     folder = tmp_path / "wf-real"
     folder.mkdir()
     gui_mocks.messagebox._yesno = True
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.simpledialog.askstring", return_value=None
+    ):
         launcher.prompt_create_workflow()
     launcher._drain_events()
 
