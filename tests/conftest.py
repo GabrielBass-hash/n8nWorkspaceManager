@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from n8n_launcher.models import DbConfig, DbMode, Workspace
+from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 
 
 @pytest.fixture

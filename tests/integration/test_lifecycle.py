@@ -9,12 +9,12 @@ from uuid import uuid4
 import pytest
 import requests
 
-from n8n_launcher.api_client import N8nApiClient
-from n8n_launcher.compose import write_compose
-from n8n_launcher.models import DbConfig, DbMode, Workspace
-from n8n_launcher.owner_setup import OwnerSetup
-from n8n_launcher.ports import suggest_port
-from n8n_launcher.sync_runner import SyncRunner
+from n8n_launcher.core.models import DbConfig, DbMode, Workspace
+from n8n_launcher.docker.compose import write_compose
+from n8n_launcher.n8n.api import N8nApiClient
+from n8n_launcher.n8n.owner import OwnerSetup
+from n8n_launcher.n8n.workflows import SyncRunner
+from n8n_launcher.platform.ports import suggest_port
 
 pytestmark = pytest.mark.integration
 

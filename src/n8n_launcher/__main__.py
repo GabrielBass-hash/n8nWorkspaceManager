@@ -5,11 +5,11 @@ import signal
 import sys
 import tkinter as tk
 
-from .config import ConfigError, ConfigStore
-from .docker_manager import DockerManager, resolve_docker_command
-from .gui import LauncherApp
-from .setup_wizard import run_interactive_first_launch
-from .workspace_manager import WorkspaceManager
+from .core.config import ConfigError, ConfigStore
+from .docker.manager import DockerManager, resolve_docker_command
+from .gui.app import LauncherApp
+from .gui.first_launch import run_interactive_first_launch
+from .workspaces.manager import WorkspaceManager
 
 
 def _center(root: tk.Tk, width: int = 820, height: int = 460) -> None:
