@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from n8n_launcher.models import AppConfig, DbConfig, DbMode, Workspace, WorkspaceState
+from n8n_launcher.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
 
 
 def test_workspace_round_trip() -> None:
@@ -95,3 +95,77 @@ def test_app_config_round_trip(tmp_path: Path) -> None:
     )
 
     assert AppConfig.from_dict(config.to_dict()) == config
+
+
+def test_git_config_round_trip() -> None:
+    config = GitConfig(enabled=True, remote_url="https://example.test/repo.git", branch="main")
+
+    assert GitConfig.from_dict(config.to_dict()) == config
+
+
+def test_git_config_defaults_from_empty_dict() -> None:
+    restored = GitConfig.from_dict({})
+
+    assert restored == GitConfig()
+
+
+def test_git_config_defaults_from_none() -> None:
+    assert GitConfig.from_dict(None) == GitConfig()
+
+
+def test_workspace_round_trip_includes_git_config() -> None:
+    workspace = Workspace(
+        id="abc",
+        name="My workspace",
+        workflows_dir=Path("/tmp/workflows"),
+        port=5680,
+        db=DbConfig(mode=DbMode.MANAGED),
+        git=GitConfig(enabled=True, remote_url="https://example.test/repo.git"),
+    )
+
+    restored = Workspace.from_dict(workspace.to_dict())
+
+    assert restored.git == workspace.git
+    assert restored == workspace
+
+
+def test_workspace_round_trip_includes_git_push_failed() -> None:
+    workspace = Workspace(
+        id="abc",
+        name="My workspace",
+        workflows_dir=Path("/tmp/workflows"),
+        port=5680,
+        db=DbConfig(mode=DbMode.NONE),
+        git_push_failed=True,
+    )
+
+    assert Workspace.from_dict(workspace.to_dict()).git_push_failed is True
+    assert Workspace.from_dict(workspace.to_dict()) == workspace
+
+
+def test_workspace_from_dict_defaults_push_failed_to_false() -> None:
+    data = {
+        "id": "abc",
+        "name": "My workspace",
+        "workflows_dir": "/tmp/workflows",
+        "port": 5680,
+        "db": {"mode": "none"},
+    }
+
+    restored = Workspace.from_dict(data)
+
+    assert restored.git_push_failed is False
+
+
+def test_workspace_from_dict_backcompat_without_git() -> None:
+    data = {
+        "id": "abc",
+        "name": "My workspace",
+        "workflows_dir": "/tmp/workflows",
+        "port": 5680,
+        "db": {"mode": "none"},
+    }
+
+    restored = Workspace.from_dict(data)
+
+    assert restored.git == GitConfig()

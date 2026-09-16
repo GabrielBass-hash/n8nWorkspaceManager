@@ -11,8 +11,9 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
 
 import requests
@@ -27,7 +28,15 @@ from .db_manager import has_db_layout
 from .docker_manager import DockerManager
 from .models import DbConfig, DbMode, Workspace, WorkspaceState
 from .sync_runner import SyncRunner
-from .workspace_info import db_connected, db_label, git_repo_status, pipelines_count
+from .workspace_info import (
+    GitRowStatus,
+    db_connected,
+    db_label,
+    git_repo_status,
+    git_row_label,
+    git_row_status,
+    pipelines_count,
+)
 from .workspace_manager import WorkspaceError, WorkspaceManager
 
 APP_BACKGROUND = "#0f172a"
@@ -55,6 +64,7 @@ STATUS_STYLE = {
 CHIP_ACTIVE = ("#064e3b", "#34d399")
 CHIP_INACTIVE = ("#7f1d1d", "#fca5a5")
 CHIP_NEUTRAL = ("#334155", "#cbd5e1")
+CHIP_WARN = ("#78350f", "#fcd34d")
 
 WATERMARK_COLOR = "#2b3950"
 
@@ -67,6 +77,20 @@ STATE_LABELS = {
 }
 
 STATE_POLL_MS = 5000
+
+# Sentinel returned by :meth:`LauncherApp._prompt_git_config` when the user
+# declines git setup during workspace creation.
+_GIT_SKIP = object()
+
+
+@dataclass
+class CreatePlan:
+    """Chosen options for creating a new workspace (single-dialog workflow)."""
+
+    name: str
+    db: DbConfig
+    git_enabled: bool = False
+    git_url: str | None = None
 
 
 def state_label(state: WorkspaceState) -> str:
@@ -250,6 +274,8 @@ class LauncherApp:
         self._menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
         self._menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
         self._menu.add_separator()
+        self._menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
+        self._menu.add_separator()
         self._menu.add_command(label="Supprimer", command=self._delete_selected)
 
     def _build_row(self, workspace: Workspace) -> tuple[tk.Frame, tk.Label]:
@@ -276,7 +302,54 @@ class LauncherApp:
             anchor="w",
             padx=8,
         )
+
+        git_status = git_row_status(workspace)
+
+        dirty_dot = self._chip(
+            frame,
+            text="●" if git_status.dirty else "",
+            palette=CHIP_WARN if git_status.dirty else (SURFACE, SURFACE),
+        )
+        if git_status.dirty:
+            dirty_dot.pack(side="left", padx=(8, 0))
+
         name_label.pack(side="left", fill="x", expand=True)
+
+        if workspace.id == self._launching:
+            action_text = "Démarrage…"
+            action_command = None
+            action_cursor = "arrow"
+            action_bg = BORDER
+            action_fg = TEXT_MUTED
+        elif workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
+            action_text = "Démarrer"
+            action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
+            action_cursor = "hand2"
+            action_bg = BORDER
+            action_fg = TEXT_PRIMARY
+        else:
+            action_text = "Arrêter"
+            action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
+            action_cursor = "hand2"
+            action_bg = BORDER
+            action_fg = TEXT_PRIMARY
+        action_button = tk.Button(
+            frame,
+            text=action_text,
+            font=FONT_PILL,
+            bg=action_bg,
+            fg=action_fg,
+            activebackground=SURFACE_HOVER,
+            activeforeground=TEXT_PRIMARY,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=8,
+            pady=2,
+            cursor=action_cursor,
+            command=action_command,
+        )
+        action_button.pack(side="right", padx=(6, 0))
 
         delete_button = tk.Button(
             frame,
@@ -313,11 +386,9 @@ class LauncherApp:
         db_chip = self._chip(frame, text=db_label(workspace), palette=db_palette)
         db_chip.pack(side="right", padx=(6, 0))
 
-        git_palette = (
-            CHIP_ACTIVE if git_repo_status(workspace.workflows_dir) else CHIP_INACTIVE
-        )
-        git_chip = self._chip(frame, text="git", palette=git_palette)
+        git_chip = self._chip(frame, text=git_row_label(git_status), palette=self._git_chip_palette(git_status))
         git_chip.pack(side="right", padx=(6, 0))
+        self._attach_tooltip(git_chip, git_status.tooltip)
 
         pipelines = pipelines_count(workspace.workflows_dir)
         pipelines_chip = self._chip(
@@ -357,6 +428,8 @@ class LauncherApp:
         frame.port_chip = port_chip
         frame.pipelines_chip = pipelines_chip
         frame.delete_button = delete_button
+        frame.action_button = action_button
+        frame.dirty_dot = dirty_dot
         return frame, name_label
 
     @staticmethod
@@ -379,6 +452,69 @@ class LauncherApp:
             padx=kwargs.pop("padx", 8),
             pady=kwargs.pop("pady", 2),
         )
+
+    @staticmethod
+    def _git_chip_palette(status: GitRowStatus) -> tuple[str, str]:
+        if not status.is_repo or status.push_failed:
+            return CHIP_INACTIVE
+        if status.dirty or status.diverged:
+            return CHIP_WARN
+        return CHIP_ACTIVE
+
+    def _attach_tooltip(self, widget: tk.Label, text: str) -> None:
+        """Show *text* in a small frameless window while hovering the widget."""
+        if not text:
+            return
+        tip: tk.Toplevel | None = None
+
+        def on_enter(_event: tk.Event) -> None:
+            nonlocal tip
+            if tip is not None:
+                return
+            try:
+                x = widget.winfo_rootx() + 12
+                y = widget.winfo_rooty() + widget.winfo_height() + 4
+                tip = tk.Toplevel(self.root)
+                tip.wm_overrideredirect(True)
+                label = tk.Label(
+                    tip,
+                    text=text,
+                    bg=SURFACE_HOVER,
+                    fg=TEXT_PRIMARY,
+                    relief="solid",
+                    borderwidth=1,
+                    font=FONT_META,
+                    padx=8,
+                    pady=4,
+                )
+                label.pack()
+                tip.geometry(f"+{x}+{y}")
+            except Exception:
+                tip = None
+
+        def on_leave(_event: tk.Event) -> None:
+            nonlocal tip
+            if tip is not None:
+                tip.destroy()
+                tip = None
+
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+
+    def toggle_from_row(self, workspace_id: str) -> None:
+        """Start (and open) or stop the workspace bound to a row button."""
+        if self._closing or self._launching:
+            return
+        workspace = next(
+            (item for item in self.workspace_manager.list() if item.id == workspace_id),
+            None,
+        )
+        if workspace is None:
+            return
+        if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
+            self._launch_workspace(workspace)
+        else:
+            self._run_async(lambda: self.workspace_manager.stop(workspace_id))
 
     def refresh(self) -> None:
         if self._closed:
@@ -621,6 +757,8 @@ class LauncherApp:
         self.set_status(f"{workspace.name} · :{workspace.port} · {state_label(workspace.state)}")
 
     def _handle_double(self, workspace_id: str) -> None:
+        if self._launching:
+            return
         self._select_row(workspace_id)
         self.launch_selected()
 
@@ -640,23 +778,184 @@ class LauncherApp:
             return
         workflows_dir = Path(directory)
         workflows_dir.mkdir(parents=True, exist_ok=True)
-        name = workflows_dir.name
 
-        if has_db_layout(workflows_dir):
-            database = self._fresh_managed_db_config()
-        elif messagebox.askyesno(
-            "Nouveau workflow",
-            "Créer une base locale (PostgreSQL) avec schéma et migrations\n"
-            "appliquées automatiquement au lancement ?",
-            parent=self.root,
-        ):
-            database = self._fresh_managed_db_config()
-        else:
-            database = DbConfig(DbMode.NONE)
+        plan = self._prompt_create_dialog(workflows_dir)
+        if plan is None:
+            return
+        self._create_from_plan(plan, workflows_dir)
+
+    def _create_from_plan(self, plan: CreatePlan, workflows_dir: Path) -> None:
+        """Create the workspace from a creation plan, initializing git if asked."""
+        def action() -> None:
+            workspace = self.workspace_manager.create(
+                plan.name.strip(), workflows_dir, db=plan.db
+            )
+            if plan.git_enabled:
+                self.workspace_manager.git_init_workspace(
+                    workspace, remote_url=plan.git_url or None
+                )
+
         self._run_async(
-            lambda: self.workspace_manager.create(name, workflows_dir, db=database),
+            action,
             on_success=self._refresh_with_selection,
         )
+
+    def _prompt_create_dialog(self, workflows_dir: Path) -> CreatePlan | None:
+        """Show the single creation form; returns a plan or None when cancelled."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Nouveau workspace")
+        dialog.configure(bg=APP_BACKGROUND)
+        dialog.resizable(False, False)
+        try:
+            dialog.transient(self.root)
+        except Exception:
+            pass
+
+        result: CreatePlan | None = None
+
+        tk.Label(
+            dialog,
+            text="Nom du workspace",
+            bg=APP_BACKGROUND,
+            fg=TEXT_PRIMARY,
+            font=FONT_META,
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(14, 2))
+        name_var = tk.StringVar(value=workflows_dir.name)
+        tk.Entry(
+            dialog,
+            textvariable=name_var,
+            bg=SURFACE,
+            fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            relief="flat",
+            font=FONT_META,
+        ).pack(fill="x", padx=18, pady=(0, 6))
+        tk.Label(
+            dialog,
+            text=str(workflows_dir),
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_SUBTITLE,
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(0, 10))
+
+        tk.Label(
+            dialog,
+            text="Base de données",
+            bg=APP_BACKGROUND,
+            fg=TEXT_PRIMARY,
+            font=FONT_META,
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(0, 2))
+        db_default = self._default_creation_db(workflows_dir)
+        db_var = tk.StringVar(value="managed" if db_default.mode is DbMode.MANAGED else "none")
+        tk.Radiobutton(
+            dialog,
+            text="Locale (PostgreSQL, schéma et migrations gérés)",
+            variable=db_var,
+            value="managed",
+            bg=APP_BACKGROUND,
+            fg=TEXT_PRIMARY,
+            activebackground=APP_BACKGROUND,
+            activeforeground=ACCENT_HOVER,
+            selectcolor=SURFACE,
+            font=FONT_META,
+        ).pack(fill="x", padx=18)
+        tk.Radiobutton(
+            dialog,
+            text="Aucune base",
+            variable=db_var,
+            value="none",
+            bg=APP_BACKGROUND,
+            fg=TEXT_PRIMARY,
+            activebackground=APP_BACKGROUND,
+            activeforeground=ACCENT_HOVER,
+            selectcolor=SURFACE,
+            font=FONT_META,
+        ).pack(fill="x", padx=18, pady=(0, 10))
+
+        git_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            dialog,
+            text="Activer Git (sauvegarde des workflows)",
+            variable=git_var,
+            bg=APP_BACKGROUND,
+            fg=TEXT_PRIMARY,
+            activebackground=APP_BACKGROUND,
+            activeforeground=ACCENT_HOVER,
+            selectcolor=SURFACE,
+            highlightthickness=0,
+            font=FONT_META,
+        ).pack(fill="x", padx=18, pady=(4, 2))
+        tk.Label(
+            dialog,
+            text="URL du dépôt distant (optionnel) :",
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_SUBTITLE,
+            anchor="w",
+        ).pack(fill="x", padx=18)
+        url_var = tk.StringVar(value="")
+        tk.Entry(
+            dialog,
+            textvariable=url_var,
+            bg=SURFACE,
+            fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            relief="flat",
+            font=FONT_META,
+        ).pack(fill="x", padx=18, pady=(0, 12))
+
+        buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+        buttons.pack(fill="x", padx=18, pady=(0, 16))
+        tk.Button(
+            buttons,
+            text="Annuler",
+            bg=BORDER,
+            fg=TEXT_PRIMARY,
+            activebackground=SURFACE_HOVER,
+            activeforeground=TEXT_PRIMARY,
+            relief="flat",
+            borderwidth=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=dialog.destroy,
+        ).pack(side="right")
+
+        def submit() -> None:
+            nonlocal result
+            db = (
+                self._fresh_managed_db_config()
+                if db_var.get() == "managed"
+                else DbConfig(DbMode.NONE)
+            )
+            result = CreatePlan(
+                name=name_var.get().strip() or workflows_dir.name,
+                db=db,
+                git_enabled=git_var.get(),
+                git_url=url_var.get().strip() or None,
+            )
+            dialog.destroy()
+
+        tk.Button(
+            buttons,
+            text="Créer",
+            bg=ACCENT,
+            fg="#ffffff",
+            activebackground=ACCENT_ACTIVE,
+            activeforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            padx=16,
+            pady=6,
+            cursor="hand2",
+            command=submit,
+        ).pack(side="right", padx=(8, 0))
+
+        dialog.wait_window()
+        return result
 
     @staticmethod
     def _fresh_managed_db_config() -> DbConfig:
@@ -667,16 +966,62 @@ class LauncherApp:
             password=secrets.token_hex(16),
         )
 
-    def launch_selected(self) -> None:
+    @staticmethod
+    def _default_creation_db(workflows_dir: Path) -> DbConfig:
+        """Pick the creation-dialog DB default: managed when a DB layout exists."""
+        if has_db_layout(workflows_dir):
+            return LauncherApp._fresh_managed_db_config()
+        return DbConfig(DbMode.NONE)
+
+    def configure_git_selected(self) -> None:
         if self._closing:
             return
         workspace = self._selected_or_warn()
         if workspace is None:
             return
+        current_remote = self.workspace_manager.git_remote_url(workspace)
+        remote_url = simpledialog.askstring(
+            "Configurer Git",
+            f"URL du dépôt distant pour « {workspace.name} »"
+            f"{(f' (actuelle : {current_remote})' if current_remote else '')}\n"
+            "Laisser vide pour un dépôt local uniquement :",
+            parent=self.root,
+        )
+        if remote_url is None:
+            return
+
+        def action() -> None:
+            if git_repo_status(workspace.workflows_dir):
+                self.workspace_manager.configure_git(
+                    workspace, remote_url=remote_url.strip() or None
+                )
+            else:
+                self.workspace_manager.git_init_workspace(
+                    workspace, remote_url=remote_url.strip() or None
+                )
+
+        self._run_async(
+            action,
+            on_success=lambda: self.set_status(
+                f"Git configuré pour « {workspace.name} »."
+            ),
+        )
+
+    def launch_selected(self) -> None:
+        if self._closing or self._launching:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        self._launch_workspace(workspace)
+
+    def _launch_workspace(self, workspace: Workspace) -> None:
         if self._launching == workspace.id:
             return
         self._launching = workspace.id
         url = f"http://127.0.0.1:{workspace.port}"
+        self.set_status(f"Lancement de « {workspace.name} » — attente que n8n réponde…")
+        self.refresh()
 
         def action() -> None:
             try:
@@ -684,9 +1029,13 @@ class LauncherApp:
             finally:
                 self._launching = None
 
+        def on_success() -> None:
+            self.refresh()
+            self.browser_opener(url)
+
         self._run_async(
             action,
-            on_success=lambda: self.browser_opener(url),
+            on_success=on_success,
         )
 
     def open_workflows(self) -> None:
@@ -711,8 +1060,9 @@ class LauncherApp:
         if current is None:
             raise WorkspaceError(f"Unknown workspace: {workspace.id}")
         needs_bootstrap = not bool(current.api_key)
-        self.workspace_manager.ensure_running(current.id)
-        self._wait_until_healthy(current.port)
+        self.workspace_manager.ensure_running(
+            current.id, on_ready=self._wait_until_healthy
+        )
         if needs_bootstrap:
             email = self.config_store.load().owner_email
             self.events.put(
@@ -873,17 +1223,35 @@ class LauncherApp:
             self._close_stop(workspace, rest)
 
     def _close_sync(self, workspace: Workspace, rest: list[Workspace]) -> None:
+        self.set_status(f"Fermeture : synchronisation de « {workspace.name} »…")
+
         def worker() -> None:
             try:
                 self._export_workflows(workspace)
+                self.workspace_manager.sync_git(workspace, push=True)
             except Exception as exc:
                 self.events.put(
                     (lambda exc=exc: self._ask_sync_retry(workspace, rest, exc), None)
                 )
             else:
+                if workspace.git_push_failed:
+                    self.events.put(
+                        (lambda: self._warn_push_failed(workspace), None)
+                    )
                 self.events.put((lambda: self._close_stop(workspace, rest), None))
 
         threading.Thread(target=worker, name="n8n-close-sync", daemon=True).start()
+
+    def _warn_push_failed(self, workspace: Workspace) -> None:
+        if self._closed:
+            return
+        messagebox.showwarning(
+            "Synchronisation Git",
+            f"Les workflows de « {workspace.name} » ont été sauvegardés, mais le push\n"
+            "vers le dépôt distant a échoué (connexion ? permissions ?).\n"
+            "Les changements restent commités localement.",
+            parent=self.root,
+        )
 
     def _export_workflows(self, workspace: Workspace) -> None:
         api = N8nApiClient(f"http://127.0.0.1:{workspace.port}/api/v1", workspace.api_key)
@@ -891,6 +1259,8 @@ class LauncherApp:
         SyncRunner(api, pipelines_dir).export_all()
 
     def _close_stop(self, workspace: Workspace, rest: list[Workspace]) -> None:
+        self.set_status(f"Fermeture : arrêt de « {workspace.name} »…")
+
         def worker() -> None:
             try:
                 self.workspace_manager.stop(workspace.id)

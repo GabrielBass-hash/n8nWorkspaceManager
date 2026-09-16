@@ -82,7 +82,7 @@ def parse_compose_status(raw: str) -> dict[str, str]:
 class DockerManager:
     """Thin subprocess wrapper around ``docker compose`` lifecycle commands."""
 
-    def __init__(self, command: str = "docker", timeout: float = 30.0) -> None:
+    def __init__(self, command: str = "docker", timeout: float = 180.0) -> None:
         self.command = command
         self.timeout = timeout
 

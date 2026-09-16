@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
@@ -14,12 +16,29 @@ from .config import ConfigStore
 from .database import MigrationRunner
 from .db_manager import detect_migrations
 from .docker_manager import DockerManager, DockerError, parse_compose_status
-from .models import AppConfig, DbConfig, DbMode, Workspace, WorkspaceState
+from .git_manager import (
+    GitError,
+    git_add,
+    git_add_remote,
+    git_commit,
+    git_has_remote,
+    git_init,
+    git_is_repo,
+    git_pull,
+    git_push,
+    git_remote_url,
+    git_set_remote_url,
+    git_has_unpushed_commits,
+)
+from .models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
 from .n8n_setup import configure_db_credential
 from .owner_setup import OwnerSetup
 from .paths import compose_file
 from .ports import suggest_port
 from .sync_runner import SyncRunner
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceError(RuntimeError):
@@ -106,7 +125,7 @@ class WorkspaceManager:
         *,
         db: DbConfig | None = None,
         port: int | None = None,
-        n8n_version: str = "2.33.3",
+        n8n_version: str = "2.40.0",
     ) -> Workspace:
         """Create and persist a new workspace, scaffolding its folders."""
         if not name.strip():
@@ -142,7 +161,7 @@ class WorkspaceManager:
         """Update the allowed workspace fields and flag a restart when needed."""
         config = self.store.load()
         current = self._find(config, workspace_id)
-        allowed = {"name", "workflows_dir", "port", "db", "n8n_version"}
+        allowed = {"name", "workflows_dir", "port", "db", "git", "n8n_version"}
         unknown = set(changes) - allowed
         if unknown:
             raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
@@ -162,14 +181,25 @@ class WorkspaceManager:
         config.workspaces.remove(workspace)
         self.store.save(config)
 
-    def ensure_running(self, workspace_id: str) -> Workspace:
-        """Start the workspace if needed, then bootstrap owner, DB creds, workflows."""
+    def ensure_running(
+        self,
+        workspace_id: str,
+        *,
+        on_ready: Callable[[int], None] | None = None,
+    ) -> Workspace:
+        """Start the workspace, wait for n8n readiness, then bootstrap owner, DB creds, workflows.
+
+        ``on_ready`` is invoked with the workspace port once the container is up so
+        the caller can wait for n8n's HTTP health endpoint before any API call.
+        """
         config = self.store.load()
         workspace = self._find(config, workspace_id)
         if self.live_state(workspace) is not WorkspaceState.RUNNING:
             self.start(workspace_id)
             config = self.store.load()
             workspace = self._find(config, workspace_id)
+        if on_ready is not None:
+            on_ready(workspace.port)
         if not workspace.api_key:
             workspace.api_key = self.owner_booter(
                 f"http://127.0.0.1:{workspace.port}",
@@ -184,6 +214,11 @@ class WorkspaceManager:
     def _import_workflows(self, workspace: Workspace) -> None:
         """Import n8n workflow exports from the workspace folder into n8n."""
         pipelines_dir = workspace.workflows_dir / "n8nPipelines"
+        if workspace.git.enabled and git_is_repo(workspace.workflows_dir):
+            try:
+                git_pull(workspace.workflows_dir)
+            except GitError as exc:
+                logger.warning("git pull failed for %s: %s", workspace.name, exc)
         if not pipelines_dir.is_dir():
             return
         # Import files stored at the folder root as well, so a folder that
@@ -193,6 +228,72 @@ class WorkspaceManager:
         runner.import_all()
         root_runner = SyncRunner(api, workspace.workflows_dir)
         root_runner.import_all()
+
+    def sync_git(self, workspace: Workspace, *, push: bool = True) -> None:
+        """Commit local workflow changes and push to the remote.
+
+        Called automatically when an n8n instance is stopped (exported
+        workflows are committed and pushed so the repository tracks the last
+        known state).
+        """
+        if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
+            return
+        message = f"n8n-launcher: sync workflows [{datetime.now().isoformat(timespec='seconds')}]"
+        git_add(workspace.workflows_dir)
+        committed = git_commit(workspace.workflows_dir, message)
+        if committed:
+            logger.info("Committed workflow changes for %s", workspace.name)
+        if push and (committed or git_has_unpushed_commits(workspace.workflows_dir)):
+            try:
+                git_push(workspace.workflows_dir)
+            except GitError as exc:
+                logger.warning("git push failed for %s: %s", workspace.name, exc)
+                self._set_git_push_failed(workspace, True)
+                return
+            self._set_git_push_failed(workspace, False)
+
+    def _set_git_push_failed(self, workspace: Workspace, failed: bool) -> None:
+        """Persist the push-failed flag (and mirror it on the in-memory object)."""
+        workspace.git_push_failed = failed
+        config = self.store.load()
+        current = self._find(config, workspace.id)
+        current.git_push_failed = failed
+        self.store.save(config)
+
+    def git_init_workspace(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
+        """Initialize a git repository in the workspace folder."""
+        if not git_is_repo(workspace.workflows_dir):
+            git_init(workspace.workflows_dir)
+        if remote_url:
+            if git_has_remote(workspace.workflows_dir):
+                git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
+            else:
+                git_add_remote(workspace.workflows_dir, "origin", remote_url)
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = GitConfig(enabled=True, remote_url=remote_url)
+        workspace.git_push_failed = False
+        self.store.save(config)
+
+    def git_remote_url(self, workspace: Workspace) -> str | None:
+        """Return the current origin URL of the workspace repository."""
+        if not git_is_repo(workspace.workflows_dir):
+            return None
+        return git_remote_url(workspace.workflows_dir)
+
+    def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
+        """Attach or update a remote for an existing git repository."""
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        if remote_url:
+            if git_has_remote(workspace.workflows_dir):
+                git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
+            else:
+                git_add_remote(workspace.workflows_dir, "origin", remote_url)
+        workspace.git = GitConfig(enabled=True, remote_url=remote_url)
+        workspace.git_push_failed = False
+        self.store.save(config)
+        logger.info("Configured git for %s", workspace.name)
 
     def start(self, workspace_id: str) -> Workspace:
         """Write Compose, bring the stack up, and apply managed migrations."""

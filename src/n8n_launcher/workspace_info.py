@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from .db_manager import has_db_layout
+from .git_manager import (
+    git_has_remote,
+    git_has_uncommitted,
+    git_has_unpushed_commits,
+    git_is_repo,
+    git_remote_url,
+)
 from .models import DbMode, Workspace
 
 
 def git_repo_status(workflows_dir: Path) -> bool:
     """Return True when the workflows directory is inside a Git repository."""
-    git_marker = workflows_dir / ".git"
-    return git_marker.is_dir() or git_marker.is_file()
+    return git_is_repo(workflows_dir)
 
 
 def db_connected(workspace: Workspace) -> bool:
@@ -39,6 +46,59 @@ def pipelines_count(workflows_dir: Path) -> int:
     if not pipelines_dir.is_dir():
         return 0
     return sum(1 for path in pipelines_dir.glob("*.json") if path.is_file())
+
+
+@dataclass
+class GitRowStatus:
+    """Per-workspace git state for the row widget.
+
+    All probes are local (no network) so they are safe to run at every render.
+    """
+
+    is_repo: bool = False
+    dirty: bool = False
+    diverged: bool = False
+    push_failed: bool = False
+    remote_url: str | None = None
+
+    @property
+    def tooltip(self) -> str:
+        lines: list[str] = []
+        if self.remote_url:
+            lines.append(f"Dépôt distant : {self.remote_url}")
+        if self.dirty:
+            lines.append("Changements locaux non commités")
+        if self.diverged:
+            lines.append("Commits à pousser vers le dépôt distant")
+        if self.push_failed:
+            lines.append("Le dernier push a échoué")
+        return "\n".join(lines) if lines else "Dépôt Git initialisé (aucun dépôt distant)"
+
+
+def git_row_status(workspace: Workspace) -> GitRowStatus:
+    """Probe the workspace folder and return its git state without networking."""
+    folder = workspace.workflows_dir
+    if not git_is_repo(folder):
+        return GitRowStatus()
+    has_remote = git_has_remote(folder)
+    return GitRowStatus(
+        is_repo=True,
+        dirty=git_has_uncommitted(folder),
+        diverged=has_remote and git_has_unpushed_commits(folder),
+        push_failed=workspace.git_push_failed,
+        remote_url=git_remote_url(folder) if has_remote else None,
+    )
+
+
+def git_row_label(status: GitRowStatus) -> str:
+    """Return the chip label for a git row status."""
+    if not status.is_repo:
+        return "git"
+    if status.push_failed:
+        return "git ✗"
+    if status.diverged:
+        return "git ⇅"
+    return "git"
 
 
 def format_row(workspace: Workspace) -> str:

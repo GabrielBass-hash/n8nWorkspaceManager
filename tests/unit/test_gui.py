@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from n8n_launcher.config import ConfigStore
-from n8n_launcher.gui import LauncherApp
+from n8n_launcher.gui import CreatePlan, LauncherApp
 from n8n_launcher.models import (
     AppConfig,
     DbConfig,
@@ -14,6 +14,7 @@ from n8n_launcher.models import (
     WorkspaceState,
 )
 from n8n_launcher.updater import Asset, Release, parse_version
+from n8n_launcher.workspace_info import GitRowStatus
 
 
 class FakeTk:
@@ -206,6 +207,11 @@ def make_workspace(tmp_path: Path, name: str, port: int) -> Workspace:
     )
 
 
+def _safe_git_row_status(workspace):
+    """Return a default GitRowStatus; avoid calling real git in tests."""
+    return GitRowStatus()
+
+
 @pytest.fixture
 def gui_mocks():
     mocks = SimpleNamespace(tk=FakeTk(), ttk=FakeTtk(), messagebox=FakeMessagebox())
@@ -219,7 +225,11 @@ def gui_mocks():
         "n8n_launcher.gui.requests.get", return_value=mocks.health_ok
     ), patch(
         "n8n_launcher.gui.time.sleep"
-    ), patch("n8n_launcher.gui.N8nApiClient"), patch("n8n_launcher.gui.SyncRunner"):
+    ), patch("n8n_launcher.gui.N8nApiClient"), patch(
+        "n8n_launcher.gui.SyncRunner"
+    ), patch(
+        "n8n_launcher.gui.git_row_status", side_effect=_safe_git_row_status
+    ):
         yield mocks
 
 
@@ -277,8 +287,18 @@ def row_chip_colors(app, workspace_id: str, attr: str) -> tuple[str, str]:
     return chip._options["bg"], chip._options["fg"]
 
 
+def row_action_button(app, workspace_id: str):
+    frame = app.app._rows[workspace_id][0]
+    return getattr(frame, "action_button")
+
+
+def row_action_text(app, workspace_id: str) -> str:
+    return row_action_button(app, workspace_id).text
+
+
 ACTIVE_CHIP = ("#064e3b", "#34d399")
 INACTIVE_CHIP = ("#7f1d1d", "#fca5a5")
+WARN_CHIP = ("#78350f", "#fcd34d")
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -294,7 +314,19 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
     plain = make_workspace(tmp_path, "Plain", 5680)
     app.manager.list.return_value = [rich, plain]
 
-    app.app.refresh()
+    def rich_git_status() -> GitRowStatus:
+        return GitRowStatus(is_repo=True, remote_url="https://example.test/r.git")
+
+    def plain_git_status() -> GitRowStatus:
+        return GitRowStatus()
+
+    statuses = {rich.id: rich_git_status, plain.id: plain_git_status}
+
+    def pick_status(_workspace):
+        return statuses[_workspace.id]()
+
+    with patch("n8n_launcher.gui.git_row_status", side_effect=pick_status):
+        app.app.refresh()
 
     assert row_text(app, "ws-gitws") == "GitWs"
     assert row_status_text(app, "ws-gitws") == "En cours"
@@ -304,6 +336,7 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
     assert row_chip_text(app, "ws-gitws", "git_chip") == "git"
     assert row_chip_colors(app, "ws-gitws", "git_chip") == ACTIVE_CHIP
     assert row_chip_text(app, "ws-gitws", "pipelines_chip") == "1"
+    assert row_action_text(app, "ws-gitws") == "Arrêter"
     assert row_text(app, "ws-plain") == "Plain"
     assert row_status_text(app, "ws-plain") == "Arrêté"
     assert row_chip_text(app, "ws-plain", "port_chip") == ":5680"
@@ -311,6 +344,35 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
     assert row_chip_colors(app, "ws-plain", "db_chip") == INACTIVE_CHIP
     assert row_chip_colors(app, "ws-plain", "git_chip") == INACTIVE_CHIP
     assert row_chip_text(app, "ws-plain", "pipelines_chip") == "0"
+    assert row_action_text(app, "ws-plain") == "Démarrer"
+    ws_ws = app.app._rows["ws-gitws"][0]
+    assert "<Enter>" in ws_ws.git_chip._bindings
+    assert "<Leave>" in ws_ws.git_chip._bindings
+
+
+def test_git_row_status_chips(app, tmp_path) -> None:
+    cases = [
+        (GitRowStatus(), ("git", INACTIVE_CHIP, "")),
+        (GitRowStatus(is_repo=True), ("git", ACTIVE_CHIP, "")),
+        (GitRowStatus(is_repo=True, dirty=True), ("git", WARN_CHIP, "●")),
+        (GitRowStatus(is_repo=True, dirty=True, diverged=True), ("git ⇅", WARN_CHIP, "●")),
+        (GitRowStatus(is_repo=True, diverged=True), ("git ⇅", WARN_CHIP, "")),
+        (GitRowStatus(is_repo=True, push_failed=True), ("git ✗", INACTIVE_CHIP, "")),
+        (GitRowStatus(is_repo=True, push_failed=True, dirty=True), ("git ✗", INACTIVE_CHIP, "●")),
+    ]
+    folder = tmp_path / "g"
+    folder.mkdir()
+    ws = make_workspace(tmp_path, "G", 5700)
+    ws.workflows_dir = folder
+    app.manager.list.return_value = [ws]
+
+    for status, (expected_label, expected_palette, expected_dot) in cases:
+        with patch("n8n_launcher.gui.git_row_status", return_value=status):
+            app.app.refresh()
+        assert row_chip_text(app, "ws-g", "git_chip") == expected_label, status
+        assert row_chip_colors(app, "ws-g", "git_chip") == expected_palette, status
+        dot = row_chip(app, "ws-g", "dirty_dot")
+        assert dot._options["text"] == expected_dot, status
 
 
 def test_each_row_has_its_own_delete_button(app) -> None:
@@ -328,7 +390,9 @@ def test_double_click_launches_selected(app) -> None:
     app.app._handle_double("ws-stopped")
     app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-stopped", on_ready=app.app._wait_until_healthy
+    )
     app.browser.assert_called_once_with("http://127.0.0.1:5680")
 
 
@@ -352,14 +416,16 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
     assert len(HoldingThread.instances) == 1
     HoldingThread.instances[0].target()
     assert launcher._launching is None
-    manager.ensure_running.assert_called_once_with("ws-hold")
+    manager.ensure_running.assert_called_once_with("ws-hold", on_ready=launcher._wait_until_healthy)
 
 
 def test_launch_dispatches_to_manager(app) -> None:
     app.app._select_row("ws-stopped")
     app.app.launch_selected()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-stopped", on_ready=app.app._wait_until_healthy
+    )
     app.manager.stop.assert_not_called()
 
 
@@ -390,12 +456,19 @@ def test_launch_does_not_restart_when_running(app) -> None:
     app.app.launch_selected()
     app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-running")
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-running", on_ready=app.app._wait_until_healthy
+    )
     app.manager.start.assert_not_called()
     app.browser.assert_called_once_with("http://127.0.0.1:5678")
 
 
 def test_launch_reports_health_timeout(app, gui_mocks) -> None:
+    def ensure_running(workspace_id, *, on_ready=None):
+        if on_ready:
+            on_ready(5678)
+
+    app.manager.ensure_running.side_effect = ensure_running
     gui_mocks.health_ok = SimpleNamespace(ok=False)
     with patch(
         "n8n_launcher.gui.requests.get",
@@ -407,7 +480,6 @@ def test_launch_reports_health_timeout(app, gui_mocks) -> None:
         app.app.launch_selected()
         app.app._drain_events()
 
-    app.manager.ensure_running.assert_called_once_with("ws-stopped")
     app.browser.assert_not_called()
     assert "did not become ready" in app.mocks.messagebox.errors[0]
 
@@ -440,7 +512,7 @@ def test_watermark_plus_is_centered(app) -> None:
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
     labels = [label for label, _ in app.app._menu._items if label]
-    assert labels == ["Ouvrir n8n", "Ouvrir le dossier", "Supprimer"]
+    assert labels == ["Ouvrir n8n", "Ouvrir le dossier", "Configurer Git…", "Supprimer"]
 
 
 def test_delete_per_row_confirms_then_removes_workspace(app) -> None:
@@ -482,54 +554,86 @@ def test_delete_unknown_workspace_is_noop(app) -> None:
     app.manager.delete.assert_not_called()
 
 
-def test_prompt_create_uses_managed_db_when_migrations_exist(app, tmp_path) -> None:
-    folder = tmp_path / "wf"
-    (folder / "db" / "migrations").mkdir(parents=True)
-    (folder / "db" / "migrations" / "001.sql").write_text("select 1;")
+def test_prompt_create_uses_plan_name_and_db(app, tmp_path) -> None:
+    folder = tmp_path / "wf-plan"
+    folder.mkdir()
+    plan = CreatePlan(name="MyPlan", db=DbConfig(DbMode.NONE))
 
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
         app.app.prompt_create_workflow()
+    app.app._drain_events()
+
+    app.manager.create.assert_called_once()
+    assert app.manager.create.call_args.args[0] == "MyPlan"
+    assert app.manager.create.call_args.kwargs["db"].mode is DbMode.NONE
+
+
+def test_prompt_create_uses_managed_db_from_plan(app, tmp_path) -> None:
+    folder = tmp_path / "wf-managed"
+    folder.mkdir()
+    plan = CreatePlan(name="wf-managed", db=DbConfig(DbMode.MANAGED, database_name="data", username="n8ndata", password="secret"))
+
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
+        app.app.prompt_create_workflow()
+    app.app._drain_events()
 
     database = app.manager.create.call_args.kwargs["db"]
     assert database.mode is DbMode.MANAGED
-    assert database.password
+    assert database.password == "secret"
 
 
-def test_prompt_create_uses_none_db_when_declined(app, tmp_path) -> None:
-    folder = tmp_path / "wf-nomig"
+def test_prompt_create_with_git_enabled_inits_repo(app, tmp_path) -> None:
+    folder = tmp_path / "wf-git"
+    folder.mkdir()
+    plan = CreatePlan(
+        name="wf-git",
+        db=DbConfig(DbMode.NONE),
+        git_enabled=True,
+        git_url="https://example.test/repo.git",
+    )
+
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
+        app.app.prompt_create_workflow()
+    app.app._drain_events()
+
+    app.manager.git_init_workspace.assert_called_once()
+    workspace_obj = app.manager.create.return_value
+    app.manager.git_init_workspace.assert_called_with(
+        workspace_obj, remote_url="https://example.test/repo.git"
+    )
+
+
+def test_prompt_create_with_git_disabled_skips_init(app, tmp_path) -> None:
+    folder = tmp_path / "wf-nogit"
+    folder.mkdir()
+    plan = CreatePlan(name="wf-nogit", db=DbConfig(DbMode.NONE), git_enabled=False)
+
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
+        app.app.prompt_create_workflow()
+    app.app._drain_events()
+
+    app.manager.git_init_workspace.assert_not_called()
+
+
+def test_prompt_create_cancels_when_plan_is_none(app, tmp_path) -> None:
+    folder = tmp_path / "wf-cancel"
     folder.mkdir()
 
     with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
-        "n8n_launcher.gui.messagebox.askyesno", return_value=False
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=None
     ):
         app.app.prompt_create_workflow()
 
-    database = app.manager.create.call_args.kwargs["db"]
-    assert database.mode is DbMode.NONE
-
-
-def test_prompt_create_uses_managed_db_when_accepted(app, tmp_path) -> None:
-    folder = tmp_path / "wf-accept"
-    folder.mkdir()
-
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
-        "n8n_launcher.gui.messagebox.askyesno", return_value=True
-    ):
-        app.app.prompt_create_workflow()
-
-    database = app.manager.create.call_args.kwargs["db"]
-    assert database.mode is DbMode.MANAGED
-    assert database.password
-
-
-def test_prompt_create_uses_folder_name(app, tmp_path) -> None:
-    folder = tmp_path / "MyFlow"
-    folder.mkdir()
-
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
-        app.app.prompt_create_workflow()
-
-    assert app.manager.create.call_args.args[0] == "MyFlow"
+    app.manager.create.assert_not_called()
+    app.app._drain_events()
 
 
 def test_prompt_create_skips_when_user_cancels_directory(app) -> None:
@@ -537,6 +641,24 @@ def test_prompt_create_skips_when_user_cancels_directory(app) -> None:
         app.app.prompt_create_workflow()
 
     app.manager.create.assert_not_called()
+
+
+def test_default_creation_db_uses_managed_when_migrations_exist(app, tmp_path) -> None:
+    folder = tmp_path / "wf"
+    (folder / "db" / "migrations").mkdir(parents=True)
+    (folder / "db" / "migrations" / "001.sql").write_text("select 1;")
+
+    db = app.app._default_creation_db(folder)
+    assert db.mode is DbMode.MANAGED
+    assert db.password
+
+
+def test_default_creation_db_uses_none_when_no_migrations(app, tmp_path) -> None:
+    folder = tmp_path / "wf-nomig"
+    folder.mkdir()
+
+    db = app.app._default_creation_db(folder)
+    assert db.mode is DbMode.NONE
 
 
 def test_no_auto_prompt_on_empty_list(gui_mocks, tmp_path) -> None:
@@ -659,9 +781,10 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     folder = tmp_path / "wf-click"
     folder.mkdir()
+    plan = CreatePlan(name="wf-click", db=DbConfig(DbMode.NONE))
 
     with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
-        "n8n_launcher.gui.messagebox.askyesno", return_value=False
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
     ):
         launcher.workspace_list._bindings["<Button-1>"](None)
     launcher._drain_events()
@@ -694,8 +817,11 @@ def test_watermark_click_triggers_creation(gui_mocks, tmp_path) -> None:
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     folder = tmp_path / "wf-watermark"
     folder.mkdir()
+    plan = CreatePlan(name="wf-watermark", db=DbConfig(DbMode.NONE))
 
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
         launcher._watermark._bindings["<Button-1>"](None)
     launcher._drain_events()
 
@@ -774,8 +900,15 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
 
     folder = tmp_path / "wf-real"
     folder.mkdir()
+    plan = CreatePlan(
+        name="wf-real",
+        db=DbConfig(DbMode.MANAGED, database_name="data", username="n8ndata", password="pw"),
+        git_enabled=False,
+    )
     gui_mocks.messagebox._yesno = True
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
         launcher.prompt_create_workflow()
     launcher._drain_events()
 
@@ -784,6 +917,12 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     assert workspaces[0].name == "wf-real"
     assert workspaces[0].db.mode is DbMode.MANAGED
     created_id = workspaces[0].id
+
+    if created_id not in launcher._rows:
+        launcher.refresh()
+    if launcher._row_order and launcher._selected_id != created_id:
+        launcher._select_row(created_id)
+
     assert row_text(SimpleNamespace(app=launcher), created_id) == "wf-real"
     assert row_status_text(SimpleNamespace(app=launcher), created_id) == "Arrêté"
     assert row_chip_text(SimpleNamespace(app=launcher), created_id, "port_chip") == (
@@ -807,7 +946,14 @@ def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) 
     )
     folder = tmp_path / "wf-to-delete"
     folder.mkdir()
-    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)):
+    plan = CreatePlan(
+        name="wf-to-delete",
+        db=DbConfig(DbMode.NONE),
+        git_enabled=False,
+    )
+    with patch("n8n_launcher.gui.filedialog.askdirectory", return_value=str(folder)), patch(
+        "n8n_launcher.gui.LauncherApp._prompt_create_dialog", return_value=plan
+    ):
         launcher.prompt_create_workflow()
     launcher._drain_events()
 
@@ -1008,3 +1154,128 @@ def test_update_download_failure_surfaces_error(app, tmp_path) -> None:
     download_asset.assert_called_once()
     assert app.mocks.messagebox.errors == ["Téléchargement impossible : 500 boom"]
     assert not app.app.root.destroyed
+
+
+def test_row_stop_button_stops_workspace(app) -> None:
+    row_action_button(app, "ws-running").command()
+    app.app._drain_events()
+
+    app.manager.stop.assert_called_once_with("ws-running")
+    app.manager.ensure_running.assert_not_called()
+
+
+def test_row_start_button_launches_and_opens(app) -> None:
+    app.mocks.messagebox._yesno = True
+
+    row_action_button(app, "ws-stopped").command()
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_called_once_with(
+        "ws-stopped", on_ready=app.app._wait_until_healthy
+    )
+    app.browser.assert_called_once_with("http://127.0.0.1:5680")
+
+
+def test_toggle_from_row_ignores_unknown_workspace(app) -> None:
+    app.app.toggle_from_row("ws-ghost")
+    app.app._drain_events()
+
+    app.manager.stop.assert_not_called()
+    app.manager.ensure_running.assert_not_called()
+
+
+def test_on_close_warns_when_push_failed_during_sync(app) -> None:
+    running = app.manager.list.return_value[0]
+    running.api_key = "key-1"
+
+    def fail_push(workspace, *, push: bool = True) -> None:
+        workspace.git_push_failed = True
+
+    app.manager.sync_git.side_effect = fail_push
+    app.app.on_close()
+    app.app._drain_events()
+
+    assert app.mocks.messagebox.warnings, "a push-failure warning should be shown"
+    assert "push" in app.mocks.messagebox.warnings[0].lower()
+    app.manager.stop.assert_has_calls([call("ws-running"), call("ws-stopped")])
+    assert app.app.root.destroyed
+
+
+def test_on_close_does_not_warn_when_push_ok(app) -> None:
+    running = app.manager.list.return_value[0]
+    running.api_key = "key-1"
+
+    app.manager.sync_git.side_effect = lambda ws, **kwargs: None
+    app.app.on_close()
+    app.app._drain_events()
+
+    assert app.mocks.messagebox.warnings == []
+    assert app.app.root.destroyed
+
+
+def test_close_sync_reports_status(app) -> None:
+    running = app.manager.list.return_value[0]
+    running.api_key = "key-1"
+
+    app.app._close_sync(running, [])
+
+    assert app.app._status_label._options["text"] == (
+        f"Fermeture : synchronisation de « {running.name} »…"
+    )
+    app.app._drain_events()
+
+
+def test_toggle_from_row_blocks_while_launching(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app.toggle_from_row("ws-stopped")
+    app.app.toggle_from_row("ws-running")
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_not_called()
+    app.manager.stop.assert_not_called()
+
+
+def test_handle_double_blocks_while_launching(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app._handle_double("ws-stopped")
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_not_called()
+
+
+def test_launch_selected_blocks_while_launching(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app.launch_selected()
+    app.app._drain_events()
+
+    app.manager.ensure_running.assert_not_called()
+
+
+def test_row_shows_launching_while_in_progress(app) -> None:
+    app.app._launching = "ws-stopped"
+    app.app.refresh()
+
+    btn = row_action_button(app, "ws-stopped")
+    assert btn.text == "Démarrage…"
+    assert btn.command is None
+
+
+def test_launch_sets_status_and_refreshes(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app.launch_selected()
+    app.app._drain_events()
+
+    status = app.app._status_label._options["text"]
+    assert "Lancement" in status
+    assert "ws-stopped" in status or "Stopped" in status
+
+
+def test_launch_resets_flag_and_re_enables_button_after_success(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app.launch_selected()
+    app.app._drain_events()
+
+    assert app.app._launching is None
+    btn = row_action_button(app, "ws-stopped")
+    assert btn.text == "Démarrer"
+    assert btn.command is not None
