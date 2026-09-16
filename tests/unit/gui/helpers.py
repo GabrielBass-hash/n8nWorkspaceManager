@@ -1,0 +1,266 @@
+"""Shared fakes and helpers for the GUI unit tests."""
+
+from pathlib import Path
+
+from n8n_launcher.core.models import DbConfig, DbMode, Workspace
+
+
+class FakeTk:
+    END = "end"
+
+    class Tk:
+        def __init__(self):
+            raise AssertionError("A real Tk root must not be created in tests")
+
+    class Frame:
+        def __init__(self, _parent, **kwargs):
+            self.children: list[object] = []
+            self._options = dict(kwargs)
+            self.destroyed = False
+            self._bindings: dict[str, object] = {}
+
+        def pack(self, *_args, **_kwargs) -> None:
+            pass
+
+        def config(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+        def destroy(self) -> None:
+            self.destroyed = True
+            self.children.clear()
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def place(self, **kwargs) -> None:
+            self._place_options = dict(kwargs)
+
+    class Label:
+        def __init__(self, parent, **kwargs):
+            self._parent = parent
+            self._options = dict(kwargs)
+            self._bindings: dict[str, object] = {}
+
+        def pack(self, *_args, **_kwargs) -> None:
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def config(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def unbind(self, sequence: str) -> None:
+            self._bindings.pop(sequence, None)
+
+        def place(self, **kwargs) -> None:
+            self._place_options = dict(kwargs)
+
+    class Button:
+        def __init__(self, parent, **kwargs):
+            self._parent = parent
+            self.text = kwargs.get("text")
+            self.command = kwargs.get("command")
+            self._options = dict(kwargs)
+            self.packed = False
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+    class Menu:
+        def __init__(self, _parent, **_kwargs):
+            self._items: list[tuple[str | None, object | None]] = []
+
+        def add_command(self, label: str, command) -> None:
+            self._items.append((label, command))
+
+        def add_separator(self) -> None:
+            self._items.append((None, None))
+
+        def tk_popup(self, _x, _y) -> None:
+            pass
+
+
+class FakeTtk:
+    class Frame:
+        def __init__(self, _parent, *_args, **_kwargs):
+            pass
+
+        def pack(self, *_args, **_kwargs) -> None:
+            pass
+
+    class Button:
+        instances: list["FakeTtk.Button"] = []
+
+        def __init__(self, _parent, **kwargs):
+            self.text = kwargs.pop("text", None)
+            self.command = kwargs.pop("command", None)
+            self.packed = False
+            FakeTtk.Button.instances.append(self)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+
+
+class FakeRoot:
+    def __init__(self):
+        self.after_callbacks: list[tuple[int, object]] = []
+        self._protocol_handlers: dict[str, object] = {}
+        self.destroyed = False
+
+    def after(self, delay: int, callback) -> None:
+        self.after_callbacks.append((delay, callback))
+
+    def mainloop(self) -> None:
+        pass
+
+    def protocol(self, name: str, handler) -> None:
+        self._protocol_handlers[name] = handler
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+    def title(self, _value: str) -> None:
+        pass
+
+    def geometry(self, _value: str) -> None:
+        pass
+
+    def minsize(self, *_args) -> None:
+        pass
+
+    def configure(self, **_kwargs) -> None:
+        pass
+
+
+class SyncThread:
+    """Runs the worker synchronously on ``start()`` instead of on a real thread."""
+
+    def __init__(self, *, target=None, args=(), kwargs=None, **_extra):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+
+    def start(self) -> None:
+        if self.target:
+            self.target(*self.args, **self.kwargs)
+
+
+class HoldingThread:
+    """Captures threads so tests can run their payloads explicitly."""
+
+    instances: list["HoldingThread"] = []
+
+    def __init__(self, *, target=None, **kwargs):
+        self.target = target
+        self.started = False
+        HoldingThread.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+
+class FakeMessagebox:
+    def __init__(self):
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
+        self.infos: list[str] = []
+        self._yesno = False
+        self._yesnocancel = None
+        self._yesnocancel_messages: list[str] = []
+
+    def showerror(self, _title, message, **_kwargs) -> None:
+        self.errors.append(message)
+
+    def showwarning(self, _title, message, **_kwargs) -> None:
+        self.warnings.append(message)
+
+    def showinfo(self, _title, message, **_kwargs) -> None:
+        self.infos.append(message)
+
+    def askyesno(self, *args, **_kwargs) -> bool:
+        return self._yesno
+
+    def askyesnocancel(self, *_args, **_kwargs) -> bool | None:
+        self._yesnocancel_messages.append(_args[1] if len(_args) > 1 else "")
+        return self._yesnocancel
+
+
+def make_workspace(tmp_path: Path, name: str, port: int) -> Workspace:
+    return Workspace(
+        id=f"ws-{name.lower()}",
+        name=name,
+        workflows_dir=tmp_path / name,
+        port=port,
+        db=DbConfig(DbMode.MANAGED),
+    )
+
+
+def _safe_git_row_status(_workspace):
+    """Return a default status without ever touching real git in tests."""
+    from n8n_launcher.gui.display import GitRowStatus
+
+    return GitRowStatus()
+
+
+def _drain_queue(app) -> None:
+    while not app.events.empty():
+        app.events.get_nowait()
+
+
+def next_event(app):
+    return app.app.events.get_nowait()
+
+
+ACTIVE_CHIP = ("#064e3b", "#34d399")
+INACTIVE_CHIP = ("#7f1d1d", "#fca5a5")
+WARN_CHIP = ("#78350f", "#fcd34d")
+
+
+def row_label(app, workspace_id: str) -> FakeTk.Label:
+    return app.app._rows[workspace_id][1]
+
+
+def row_delete_button(app, workspace_id: str):
+    frame = app.app._rows[workspace_id][0]
+    for child in frame.children:
+        if isinstance(child, FakeTk.Button) and child.text == "×":
+            return child
+    raise AssertionError(f"no delete button in row {workspace_id}")
+
+
+def row_text(app, workspace_id: str) -> str:
+    return row_label(app, workspace_id)._options["text"]
+
+
+def row_status_label(app, workspace_id: str):
+    return app.app._rows[workspace_id][0].status_label
+
+
+def row_status_text(app, workspace_id: str) -> str:
+    return row_status_label(app, workspace_id)._options["text"]
+
+
+def row_chip(app, workspace_id: str, attr: str):
+    return getattr(app.app._rows[workspace_id][0], attr)
+
+
+def row_chip_text(app, workspace_id: str, attr: str) -> str:
+    return row_chip(app, workspace_id, attr)._options["text"]
+
+
+def row_chip_colors(app, workspace_id: str, attr: str) -> tuple[str, str]:
+    chip = row_chip(app, workspace_id, attr)
+    return chip._options["bg"], chip._options["fg"]
+
+
+def row_action_button(app, workspace_id: str):
+    frame = app.app._rows[workspace_id][0]
+    return getattr(frame, "action_button")
+
+
+def row_action_text(app, workspace_id: str) -> str:
+    return row_action_button(app, workspace_id).text

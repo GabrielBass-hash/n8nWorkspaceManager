@@ -1,6 +1,6 @@
 import pytest
 
-from n8n_launcher.docker_manager import DockerManager
+from n8n_launcher.docker.manager import DockerManager
 
 
 @pytest.fixture(scope="session")
