@@ -2,7 +2,7 @@
 
 ## What this is
 
-Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu**) for managing isolated Docker-based n8n workspaces. Single package `n8n_launcher` under `src/`, no subpackages. Flat module layout — each file is one concern.
+Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu**) for managing isolated Docker-based n8n workspaces. Single package `n8n_launcher` under `src/`, split into subpackages by concern: `core/` (config, models, paths), `database/`, `docker/`, `git/`, `n8n/` (API, owner bootstrap, workflow sync), `platform/` (updater, browser, ports, shortcuts), `gui/` (app, dialogs, close/update flows, display), `workspaces/` (manager). Each file is one concern.
 
 Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via `dmgbuild` with app icon + full `Info.plist`), one-file `.exe` (Windows), `.AppImage` (Linux). CI builds all three in the `build` job and the release-asset job.
 
@@ -20,10 +20,10 @@ pytest
 pytest -m integration
 
 # Run a single test file
-pytest tests/unit/test_compose.py
+pytest tests/unit/docker/test_compose.py
 
 # Run a single test
-pytest tests/unit/test_compose.py::test_render_compose_managed -v
+pytest tests/unit/docker/test_compose.py::test_render_compose_managed -v
 
 # Build desktop executable (macOS: .dmg via dmgbuild; Linux/Windows: one-file exe)
 python -m pip install -e '.[packaging]'
@@ -37,10 +37,10 @@ There is **no lint, typecheck, or formatter** configured in this repo. CI only r
 
 ## Test structure
 
-- `tests/unit/` — self-contained, no external services. Run by default.
+- `tests/unit/` — self-contained, no external services. Run by default. Mirrors `src/n8n_launcher/` layout: `tests/unit/<subpackage>/test_<module>.py`, with `tests/unit/gui/` holding a shared `conftest.py` (mock ticks, `SyncThread`, messagebox patches) and `helpers.py` (row/chip inspection helpers). `tests/unit/<subpackage>/test_manager.py` **must not** be used as a filename — the base name collides across `docker/`, `git/`, `workspaces/`; the files are `test_docker_manager.py`, `test_git_manager.py`, `test_workspace_manager.py`.
 - `tests/integration/` — requires Docker. Auto-skips if Docker is unavailable. Uses a session-scoped `DockerManager` with a 180-second timeout.
 - `tests/conftest.py` — provides `managed_workspace` fixture (a `Workspace` with `tmp_path` and managed DB).
-- `tests/unit/test_api_sync.py`, `test_ports_browser.py`, `test_setup_shortcuts.py`, `test_workspace_info.py` cover the newer helpers (API sync, browser app-mode, shortcuts, display metadata).
+- `tests/unit/n8n/` (API sync, owner bootstrap, workflow import), `platform/test_browser.py` (browser app-mode), `platform/test_shortcuts.py`, `gui/test_display.py` (display metadata), `git/test_git_manager.py`, `workspaces/test_workspace_manager.py`, and `database/test_database.py` cover the newer helpers. GUI behavior (list, dialogs, close/update flows) lives under `tests/unit/gui/`.
 
 The `addopts` in `pyproject.toml` is `"-m 'not integration'"`, so plain `pytest` only runs unit tests.
 
@@ -55,29 +55,39 @@ The `addopts` in `pyproject.toml` is `"-m 'not integration'"`, so plain `pytest`
 | Module | Role |
 |---|---|
 | `__main__.py` | Entry point. Loads config, runs first-launch wizard if needed, then opens Tkinter GUI. Resolves the Docker CLI via `resolve_docker_command()` (macOS PATH caveat). Registers `atexit` to stop all workspaces. |
-| `workspace_manager.py` | Central controller — CRUD + start/stop lifecycle. Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, and workflow import. |
-| `compose.py` | Renders Docker Compose YAML. Each workspace gets its own isolated Compose project named `n8n-ws-<id>`. Handles managed Postgres and `DbMode.NONE` (no DB service). |
-| `docker_manager.py` | Thin subprocess wrapper around `docker compose` commands. Uses `-p <project>` and `-f <file>` for isolation. `resolve_docker_command()` probes macOS install locations (Homebrew, Docker Desktop, `/usr/local/bin`) before falling back to `PATH`. |
-| `config.py` | JSON config store with atomic writes (temp file → rename) and `0o600` perms on non-Windows. |
-| `paths.py` | Uses `platformdirs` for cross-platform config/log/runtime directories under `n8n-launcher`. |
-| `owner_setup.py` | n8n owner bootstrap via internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`). |
-| `api_client.py` | Small HTTP client for the n8n **public** API (workflows, credentials). Used by owner bootstrap and workflow sync. |
-| `n8n_setup.py` | Auto-creates n8n DB credentials; `data_db_target()` resolves the per-workspace DB target. |
-| `sync_runner.py` | Workflow synchronization: `import_all()` creates in n8n every workflow JSON found in the workspace folder; optional background sync thread. |
-| `gui.py` | Tkinter GUI (~800 lines). Dark theme, workspace list view and actions. Creation dialog asks DB choice (local managed / none). |
-| `database.py` / `db_manager.py` | Migration detection and runner (executes SQL via `docker compose exec psql`). |
-| `browser.py` | Opens n8n in browser app mode (`--app` flag for Chrome/Edge/Brave/Chromium, falls back to `webbrowser.open`). |
-| `setup_wizard.py` | First-launch config (`email`, owner password, work dir, desktop shortcut). `validate_password()` enforces n8n's own password policy. |
-| `ports.py` | Port availability check (`is_port_available`) and automatic suggestion (`suggest_port`) for n8n instances. |
-| `shortcuts.py` | Desktop shortcut creation: `.desktop` (Linux), `.url` (Windows), `.command` (macOS). |
-| `workspace_info.py` | Display helpers for the GUI: git status, DB label, pipeline count, per-workspace row formatting. |
-| `models.py` | Dataclasses incl. `DbMode` (`NONE` / `MANAGED`), `DbConfig`, `Workspace` (with `postgres_image`, `postgres_preload_timescaledb`). |
+| `workspaces/manager.py` | Central controller — CRUD + start/stop lifecycle. Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, workflow import, and **Git synchronization** (auto-pull on start, auto-push on close). |
+| `docker/compose.py` | Renders Docker Compose YAML. Each workspace gets its own isolated Compose project named `n8n-ws-<id>`. Handles managed Postgres and `DbMode.NONE` (no DB service). |
+| `docker/manager.py` | Thin subprocess wrapper around `docker compose` commands. Uses `-p <project>` and `-f <file>` for isolation. `resolve_docker_command()` probes macOS install locations (Homebrew, Docker Desktop, `/usr/local/bin`) before falling back to `PATH`. |
+| `core/config.py` | JSON config store with atomic writes (temp file → rename) and `0o600` perms on non-Windows. |
+| `core/paths.py` | Uses `platformdirs` for cross-platform config/log/runtime directories under `n8n-launcher`. Also exports `compose_file(workspace_id)`. |
+| `n8n/owner.py` | n8n owner bootstrap via internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`). |
+| `n8n/api.py` | Small HTTP client for the n8n **public** API (workflows, credentials). Used by owner bootstrap and workflow sync. |
+| `database/credentials.py` | Auto-creates n8n DB credentials; `data_db_target()` resolves the per-workspace DB target. |
+| `n8n/workflows.py` | Workflow synchronization: `import_all()` creates in n8n every workflow JSON found in the workspace folder; optional background sync thread. |
+| `git/manager.py` | Git operations for workspace workflow synchronization. Wraps `subprocess.run` calls to `git` (init, clone, add, commit, push, pull, remote management). All commands run in the workspace's `workflows_dir` with a 30 s timeout. |
+| `gui/app.py` | Tkinter GUI. Dark theme, workspace list view and actions. Creation dialog asks DB choice (local managed / none) then offers git setup. Context menu has "Configurer Git…" for existing workspaces. |
+| `database/layout.py` / `database/migrations.py` | Migration detection and runner (executes SQL via `docker compose exec psql`). |
+| `platform/browser.py` | Opens n8n in browser app mode (`--app` flag for Chrome/Edge/Brave/Chromium, falls back to `webbrowser.open`). |
+| `gui/first_launch.py` | First-launch config (`email`, owner password, work dir, desktop shortcut). `validate_password()` enforces n8n's own password policy. |
+| `platform/ports.py` | Port availability check (`is_port_available`) and automatic suggestion (`suggest_port`) for n8n instances. |
+| `platform/shortcuts.py` | Desktop shortcut creation: `.desktop` (Linux), `.url` (Windows), `.command` (macOS). |
+| `gui/display.py` | Display helpers for the GUI: git status (`git_repo_status`), DB label, pipeline count, per-workspace row formatting. |
+| `core/models.py` | Dataclasses incl. `DbMode` (`NONE` / `MANAGED`), `DbConfig`, `GitConfig`, `Workspace` (with `postgres_image`, `postgres_preload_timescaledb`, `git`). |
 
 ## Workflow import
 
 - On `ensure_running()`, `_import_workflows()` scans `<workflows_dir>/n8nPipelines/` **and** the workspace folder root for `*.json` workflow exports and creates them in n8n via the public API.
 - JSON files without a `nodes` key, unreadable files, and workflows already present (by id **or** name) are skipped.
 - `_create_payload()` is a **whitelist** of fields accepted by the public create schema (`name`, `nodes`, `connections`, `settings`, `staticData`, `pinData`, `nodeGroups`, `projectId`, `parentFolderId`); `settings` is defaulted to `{}`. Anything else (e.g. `active`, `triggerCount`, `shared`) is dropped.
+
+## Git synchronization
+
+Git is optional per-workspace and configured at workspace creation (git init + optional remote URL) or later via the "Configurer Git…" context menu entry. Persisted as `Workspace.git` (`GitConfig(enabled, remote_url, branch)`).
+
+- **Auto-pull on start**: before `_import_workflows()`, `git_pull()` (with `--rebase`) brings remote JSON changes into `workflows_dir` only when `git.enabled` is set and the folder is a real repo. Failures are logged as warnings and never block startup.
+- **Auto-push on close**: the GUI close sequence exports n8n workflows to JSON (`export_all`), then `WorkspaceManager.sync_git()` stages everything (`git add -A`), commits with a timestamped message, and pushes. Push is skipped when there is nothing to commit *and* no unpushed commits. Push failures are logged, never raised.
+- `git_push` uses `-u origin <branch>` so a branch created by the launcher (`main` via `git init` + `git branch -M main`) seeds a fresh (empty) remote on first push.
+- `git_repo_status()` in `gui/display.py` probes the real repo with `git rev-parse --git-dir` — a bare `.git` directory is not enough.
 
 ## Gotchas
 

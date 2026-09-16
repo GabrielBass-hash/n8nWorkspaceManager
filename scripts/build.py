@@ -113,6 +113,57 @@ def build_icns() -> Path:
     return icns
 
 
+HIDDEN_IMPORTS = [
+    "n8n_launcher.core",
+    "n8n_launcher.core.config",
+    "n8n_launcher.core.models",
+    "n8n_launcher.core.paths",
+    "n8n_launcher.database",
+    "n8n_launcher.database.credentials",
+    "n8n_launcher.database.layout",
+    "n8n_launcher.database.migrations",
+    "n8n_launcher.docker",
+    "n8n_launcher.docker.compose",
+    "n8n_launcher.docker.manager",
+    "n8n_launcher.git",
+    "n8n_launcher.git.manager",
+    "n8n_launcher.gui",
+    "n8n_launcher.gui.app",
+    "n8n_launcher.gui.close",
+    "n8n_launcher.gui.dialogs",
+    "n8n_launcher.gui.display",
+    "n8n_launcher.gui.first_launch",
+    "n8n_launcher.gui.theme",
+    "n8n_launcher.gui.update_flow",
+    "n8n_launcher.n8n",
+    "n8n_launcher.n8n.api",
+    "n8n_launcher.n8n.owner",
+    "n8n_launcher.n8n.workflows",
+    "n8n_launcher.platform",
+    "n8n_launcher.platform.browser",
+    "n8n_launcher.platform.ports",
+    "n8n_launcher.platform.shortcuts",
+    "n8n_launcher.platform.updater",
+    "n8n_launcher.workspaces",
+    "n8n_launcher.workspaces.manager",
+    "tkinter",
+    "tkinter.ttk",
+    "tkinter.filedialog",
+    "tkinter.messagebox",
+    "tkinter.simpledialog",
+    "requests",
+    "bcrypt",
+    "platformdirs",
+]
+
+
+def _hidden_import_args() -> list[str]:
+    args = []
+    for imp in HIDDEN_IMPORTS:
+        args.extend(["--hidden-import", imp])
+    return args
+
+
 def build_onedir() -> Path:
     app = Path("dist") / f"{APP_NAME}.app"
     if app.exists():
@@ -131,6 +182,7 @@ def build_onedir() -> Path:
             BUNDLE_ID,
             "--paths",
             "src",
+            *_hidden_import_args(),
             ENTRY_POINT,
         ]
     )
@@ -149,6 +201,7 @@ def build_onefile() -> None:
             APP_NAME,
             "--paths",
             "src",
+            *_hidden_import_args(),
             ENTRY_POINT,
         ]
     )
