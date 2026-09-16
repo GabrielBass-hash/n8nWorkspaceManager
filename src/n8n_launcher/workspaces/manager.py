@@ -164,7 +164,7 @@ class WorkspaceManager:
         if unknown:
             raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
         updated = replace(current, **changes)
-        if "workflows_dir" in changes or "port" in changes:
+        if any(key in changes for key in ("workflows_dir", "port", "db")):
             updated.restart_required = True
         config.workspaces[config.workspaces.index(current)] = updated
         self.store.save(config)
@@ -278,6 +278,22 @@ class WorkspaceManager:
         if not git_is_repo(workspace.workflows_dir):
             return None
         return git_remote_url(workspace.workflows_dir)
+
+    def configure_db(self, workspace: Workspace, db: DbConfig) -> Workspace:
+        """Switch or update the workspace database configuration.
+
+        Enabling a ``MANAGED`` DB on a workspace that has none scaffolds the
+        ``db/`` layout (migrations dir + schema) so the start flow can detect
+        and apply migrations on the next launch. Missing credentials are
+        filled with the usual defaults / a fresh random password.
+        """
+        if db.mode is DbMode.MANAGED:
+            db.database_name = db.database_name or "data"
+            db.username = db.username or "n8ndata"
+            db.password = db.password or secrets.token_hex(16)
+            if workspace.db.mode is not DbMode.MANAGED:
+                self._scaffold(workspace.workflows_dir, db)
+        return self.update(workspace.id, db=db)
 
     def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Attach or update a remote for an existing git repository."""

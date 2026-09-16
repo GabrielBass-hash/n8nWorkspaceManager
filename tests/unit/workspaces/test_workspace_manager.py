@@ -583,6 +583,48 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     assert stored.git_push_failed is False
 
 
+def test_configure_db_switches_to_managed_and_scaffolds(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    assert not (workspace.workflows_dir / "db").exists()
+
+    updated = launcher.configure_db(
+        workspace, DbConfig(DbMode.MANAGED, database_name="data", username="n8ndata", password="pw")
+    )
+
+    assert (workspace.workflows_dir / "db" / "migrations").is_dir()
+    assert (workspace.workflows_dir / "db" / "schema.sql").is_file()
+    stored = store.load().workspaces[0]
+    assert stored.db.mode is DbMode.MANAGED
+    assert stored.db.database_name == "data"
+    assert stored.db.password == "pw"
+    assert updated.restart_required is True
+
+
+def test_configure_db_fills_missing_managed_defaults(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    launcher.configure_db(workspace, DbConfig(DbMode.MANAGED))
+
+    stored = store.load().workspaces[0]
+    assert stored.db.database_name == "data"
+    assert stored.db.username == "n8ndata"
+    assert len(stored.db.password) >= 16
+
+
+def test_configure_db_disables_managed(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = launcher.create(
+        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
+    )
+
+    updated = launcher.configure_db(workspace, DbConfig(DbMode.NONE))
+
+    assert store.load().workspaces[0].db.mode is DbMode.NONE
+    assert updated.restart_required is True
+
+
 def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
