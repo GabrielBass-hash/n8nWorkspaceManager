@@ -208,12 +208,8 @@ def make_workspace(tmp_path: Path, name: str, port: int) -> Workspace:
 
 
 def _safe_git_row_status(workspace):
-    """Return a default GitRowStatus for non-existent directories."""
-    if not workspace.workflows_dir.is_dir():
-        return GitRowStatus()
-    from n8n_launcher.workspace_info import git_row_status as _real
-
-    return _real(workspace)
+    """Return a default GitRowStatus; avoid calling real git in tests."""
+    return GitRowStatus()
 
 
 @pytest.fixture
