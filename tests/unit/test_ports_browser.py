@@ -10,14 +10,20 @@ def test_suggest_port_skips_reserved_and_busy_ports() -> None:
 
 
 def test_find_browser_uses_supported_order() -> None:
-    with patch("n8n_launcher.browser.shutil.which", side_effect=[None, "/usr/bin/edge"]):
+    with (
+        patch("n8n_launcher.browser.os.path.isfile", return_value=False),
+        patch("n8n_launcher.browser.shutil.which", side_effect=[None, "/usr/bin/edge"]),
+    ):
         assert find_browser() == Browser("microsoft-edge", "/usr/bin/edge")
 
 
 def test_find_browser_falls_back_to_firefox() -> None:
-    with patch(
-        "n8n_launcher.browser.shutil.which",
-        side_effect=[None] * 5 + ["/usr/bin/firefox"],
+    with (
+        patch("n8n_launcher.browser.os.path.isfile", return_value=False),
+        patch(
+            "n8n_launcher.browser.shutil.which",
+            side_effect=[None] * 5 + ["/usr/bin/firefox"],
+        ),
     ):
         browser = find_browser()
 
@@ -25,7 +31,10 @@ def test_find_browser_falls_back_to_firefox() -> None:
 
 
 def test_find_browser_returns_none_when_no_supported_browser() -> None:
-    with patch("n8n_launcher.browser.shutil.which", return_value=None):
+    with (
+        patch("n8n_launcher.browser.os.path.isfile", return_value=False),
+        patch("n8n_launcher.browser.shutil.which", return_value=None),
+    ):
         assert find_browser() is None
 
 
