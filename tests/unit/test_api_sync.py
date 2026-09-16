@@ -145,7 +145,7 @@ def test_sync_runner_pulls_workflows_and_stops(tmp_path: Path) -> None:
 
     report = runner.sync_once()
     assert report.pulled == 1
-    assert (tmp_path / "My_workflow-one.json").exists()
+    assert (tmp_path / "My_workflow.json").exists()
 
     runner.start()
     runner.stop()
@@ -191,7 +191,7 @@ def test_sync_runner_import_defaults_settings_and_strips_server_fields(tmp_path:
 def test_sync_runner_import_skips_unknown_and_non_workflow_files(tmp_path: Path) -> None:
     api = MagicMock()
     api.list_workflows.return_value = [{"id": "existing", "name": "Meteo"}]
-    (tmp_path / "Meteo-existing.json").write_text(
+    (tmp_path / "Meteo.json").write_text(
         '{"id": "existing", "name": "Meteo", "nodes": [], "connections": {}}',
         encoding="utf-8",
     )

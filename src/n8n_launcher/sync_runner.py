@@ -78,7 +78,7 @@ class SyncRunner:
             if not workflow_id:
                 skipped += 1
                 continue
-            target = self.workflows_dir / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            target = self.workflows_dir / f"{_safe_name(workflow.get('name', workflow_id))}.json"
             if target.exists():
                 skipped += 1
                 continue
@@ -97,7 +97,7 @@ class SyncRunner:
             workflow_id = str(workflow.get("id", ""))
             if not workflow_id:
                 continue
-            target = self.workflows_dir / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            target = self.workflows_dir / f"{_safe_name(workflow.get('name', workflow_id))}.json"
             detail = self.api.get_workflow(workflow_id)
             target.write_text(json.dumps(detail, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             exported.add(target.name)

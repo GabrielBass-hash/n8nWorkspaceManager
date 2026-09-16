@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import platform
 import shutil
 import subprocess
 import webbrowser
@@ -29,9 +31,23 @@ _BROWSER_FLAGS = {
     "x-www-browser": "--new-window",
 }
 
+# macOS application bundle paths (shutil.which cannot find these via PATH).
+_MACOS_APP_PATHS: dict[str, str] = {
+    "Google Chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "Brave Browser": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "Microsoft Edge": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "Chromium": "/Applications/Chromium.app/Contents/MacOS/Chromium",
+}
+
 
 def find_browser() -> Browser | None:
     """Return the first installed browser, preferring Chromium app-mode ones."""
+    if platform.system() == "Darwin":
+        for name, mac_path in _MACOS_APP_PATHS.items():
+            if os.path.isfile(mac_path):
+                lookup = name.lower().replace(" ", "-")
+                flag = _BROWSER_FLAGS.get(lookup, "--app")
+                return Browser(name, mac_path, flag)
     for name, flag in _BROWSER_FLAGS.items():
         executable = shutil.which(name)
         if executable:
