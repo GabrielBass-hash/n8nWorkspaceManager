@@ -207,6 +207,15 @@ def make_workspace(tmp_path: Path, name: str, port: int) -> Workspace:
     )
 
 
+def _safe_git_row_status(workspace):
+    """Return a default GitRowStatus for non-existent directories."""
+    if not workspace.workflows_dir.is_dir():
+        return GitRowStatus()
+    from n8n_launcher.workspace_info import git_row_status as _real
+
+    return _real(workspace)
+
+
 @pytest.fixture
 def gui_mocks():
     mocks = SimpleNamespace(tk=FakeTk(), ttk=FakeTtk(), messagebox=FakeMessagebox())
@@ -220,7 +229,11 @@ def gui_mocks():
         "n8n_launcher.gui.requests.get", return_value=mocks.health_ok
     ), patch(
         "n8n_launcher.gui.time.sleep"
-    ), patch("n8n_launcher.gui.N8nApiClient"), patch("n8n_launcher.gui.SyncRunner"):
+    ), patch("n8n_launcher.gui.N8nApiClient"), patch(
+        "n8n_launcher.gui.SyncRunner"
+    ), patch(
+        "n8n_launcher.gui.git_row_status", side_effect=_safe_git_row_status
+    ):
         yield mocks
 
 
