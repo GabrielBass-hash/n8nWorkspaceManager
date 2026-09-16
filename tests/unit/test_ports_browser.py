@@ -41,13 +41,28 @@ def test_find_browser_returns_none_when_no_supported_browser() -> None:
 def test_open_app_starts_browser_without_shell() -> None:
     browser = Browser("chrome", "/usr/bin/google-chrome")
 
-    with patch("n8n_launcher.browser.subprocess.Popen") as popen:
+    with patch("n8n_launcher.browser.platform.system", return_value="Linux"), patch(
+        "n8n_launcher.browser.subprocess.Popen"
+    ) as popen:
         open_app("http://127.0.0.1:5678", browser)
 
     popen.assert_called_once_with([
         "/usr/bin/google-chrome",
         "--app",
         "http://127.0.0.1:5678",
+    ])
+
+
+def test_open_app_uses_open_a_on_macos() -> None:
+    browser = Browser("Google Chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+
+    with patch("n8n_launcher.browser.platform.system", return_value="Darwin"), patch(
+        "n8n_launcher.browser.subprocess.Popen"
+    ) as popen:
+        open_app("http://127.0.0.1:5678", browser)
+
+    popen.assert_called_once_with([
+        "open", "-a", "Google Chrome", "--args", "--app", "http://127.0.0.1:5678",
     ])
 
 

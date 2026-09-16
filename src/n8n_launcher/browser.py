@@ -62,7 +62,12 @@ def open_app(url: str, browser: Browser | None = None) -> None:
         open_url(url)
         return
     try:
-        subprocess.Popen([selected.executable, selected.app_flag, url])
+        if platform.system() == "Darwin":
+            subprocess.Popen(
+                ["open", "-a", selected.name, "--args", selected.app_flag, url]
+            )
+        else:
+            subprocess.Popen([selected.executable, selected.app_flag, url])
     except OSError:
         # Preferred binary disappeared between discovery and launch — fall back
         # to the system handler instead of failing silently.
