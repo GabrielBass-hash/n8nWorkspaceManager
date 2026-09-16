@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -921,6 +922,11 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     assert workspaces[0].name == "wf-real"
     assert workspaces[0].db.mode is DbMode.MANAGED
     created_id = workspaces[0].id
+    for _ in range(50):
+        if created_id in launcher._rows:
+            break
+        launcher._drain_events()
+        time.sleep(0.01)
     assert row_text(SimpleNamespace(app=launcher), created_id) == "wf-real"
     assert row_status_text(SimpleNamespace(app=launcher), created_id) == "Arrêté"
     assert row_chip_text(SimpleNamespace(app=launcher), created_id, "port_chip") == (
