@@ -15,6 +15,9 @@ htmlcov/
 state/
 logs/
 workspaces/
+# ... but keep the tracked source tree of the `workspaces` package.
+!src/n8n_launcher/workspaces/
+!tests/unit/workspaces/
 
 # IDE
 .vscode/

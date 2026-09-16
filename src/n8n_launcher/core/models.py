@@ -37,6 +37,8 @@ class GitConfig:
     enabled: bool = False
     remote_url: str | None = None
     branch: str = "main"
+    ci_enabled: bool = False
+    ci_credentials: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -49,6 +51,9 @@ class GitConfig:
             enabled=bool(data.get("enabled", False)),
             remote_url=data.get("remote_url"),
             branch=data.get("branch", "main"),
+            ci_enabled=bool(data.get("ci_enabled", False)),
+            # Legacy configs have no credential metadata; they degrade to empty.
+            ci_credentials=list(data.get("ci_credentials") or []),
         )
 
 

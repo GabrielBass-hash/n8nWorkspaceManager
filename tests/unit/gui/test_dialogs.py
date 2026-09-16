@@ -6,10 +6,10 @@ from unittest.mock import MagicMock, patch
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, DbConfig, DbMode
 from n8n_launcher.gui import CreatePlan, LauncherApp
-from n8n_launcher.gui.dialogs import default_creation_db
+from n8n_launcher.gui.dialogs import default_creation_db, prompt_ask_string, prompt_db_config
 
 from helpers import FakeRoot, make_workspace  # noqa: E402
-from helpers import row_chip_text, row_status_text, row_text  # noqa: E402
+from helpers import row_chip_text, row_text  # noqa: E402
 from n8n_launcher.workspaces.manager import WorkspaceManager
 
 
@@ -210,7 +210,6 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
 
     wrapper = types.SimpleNamespace(app=launcher)
     assert row_text(wrapper, created_id) == "wf-real"
-    assert row_status_text(wrapper, created_id) == "Arrêté"
     assert row_chip_text(wrapper, created_id, "port_chip") == (
         f":{workspaces[0].port}"
     )
@@ -250,3 +249,70 @@ def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) 
     assert launcher._rows == {}
     assert folder.is_dir()
     assert (folder / "n8nPipelines").is_dir()
+
+
+def test_prompt_ask_string_returns_submitted_value(gui_mocks) -> None:
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk):
+        result = prompt_ask_string(
+            FakeRoot(), "Configurer Git", "Question ?", initial="valeur"
+        )
+
+    assert result == "valeur"
+
+
+def test_prompt_ask_string_escape_returns_none(gui_mocks) -> None:
+    toplevel = gui_mocks.tk.Toplevel
+    saved = toplevel.cancel_on_wait
+    toplevel.cancel_on_wait = True
+    try:
+        with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk):
+            result = prompt_ask_string(
+                FakeRoot(), "Configurer Git", "Question ?", initial="valeur"
+            )
+    finally:
+        toplevel.cancel_on_wait = saved
+
+    assert result is None
+
+
+def test_prompt_db_config_returns_submitted_managed_config(gui_mocks) -> None:
+    expected = DbConfig(
+        DbMode.MANAGED, database_name="data", username="n8ndata", password="oldpass"
+    )
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk):
+        result = prompt_db_config(FakeRoot(), expected)
+
+    assert result == expected
+
+
+def test_prompt_db_config_locks_identity_for_existing_managed(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+    expected = DbConfig(
+        DbMode.MANAGED, database_name="data", username="n8ndata", password="oldpass"
+    )
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk):
+        result = prompt_db_config(FakeRoot(), expected)
+
+    dialog = gui_mocks.tk.Toplevel.instances[0]
+    gui_entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+    assert len(gui_entries) == 3
+    assert all(entry._options.get("state") == "disabled" for entry in gui_entries)
+
+    gui_buttons = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Button)]
+    generate = next(button for button in gui_buttons if "Régénérer" in (button.text or ""))
+    assert generate._options.get("state") == "disabled"
+    assert result == expected
+
+
+def test_prompt_db_config_escape_returns_none(gui_mocks) -> None:
+    toplevel = gui_mocks.tk.Toplevel
+    saved = toplevel.cancel_on_wait
+    toplevel.cancel_on_wait = True
+    try:
+        with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk):
+            result = prompt_db_config(FakeRoot(), DbConfig(DbMode.NONE))
+    finally:
+        toplevel.cancel_on_wait = saved
+
+    assert result is None

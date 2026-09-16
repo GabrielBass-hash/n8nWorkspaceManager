@@ -1,10 +1,13 @@
+import json
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
+from n8n_launcher.core.models import DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
 from n8n_launcher.gui.display import (
     GitRowStatus,
+    ci_enabled,
+    ci_tooltip,
     db_connected,
     db_label,
     format_row,
@@ -39,6 +42,23 @@ def add_pipelines(path: Path) -> None:
     pipelines = path / "n8nPipelines"
     pipelines.mkdir(parents=True, exist_ok=True)
     (pipelines / "hello-1.json").write_text("{}")
+
+
+def add_ci_export(path: Path, rel: str) -> None:
+    pipeline = path / rel
+    pipeline.parent.mkdir(parents=True, exist_ok=True)
+    pipeline.write_text(
+        json.dumps(
+            {
+                "name": "CI",
+                "nodes": [
+                    {"name": "Bouton", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1}
+                ],
+                "connections": {},
+                "settings": {},
+            }
+        )
+    )
 
 
 def test_git_repo_status_detects_git_directory(tmp_path) -> None:
@@ -178,3 +198,58 @@ def test_git_row_status_tooltip() -> None:
     assert "pousser" in status.tooltip
     assert "push a échoué" in status.tooltip
     assert "Dépôt Git initialisé" in GitRowStatus(is_repo=True).tooltip
+
+
+def test_ci_enabled_reflects_gitconfig(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    assert ci_enabled(workspace) is False
+    workspace.git = GitConfig(ci_enabled=True)
+    assert ci_enabled(workspace) is True
+
+
+def test_ci_tooltip_disabled_offers_configure(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    assert "désactivés" in ci_tooltip(workspace)
+
+
+def test_ci_tooltip_reports_selection_counts(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    workspace.git = GitConfig(ci_enabled=True)
+    add_ci_export(tmp_path, "n8nPipelines/manual.json")
+    selection = tmp_path / ".n8n-tests" / "tests.json"
+    selection.parent.mkdir(parents=True)
+    selection.write_text('{"selected": ["n8nPipelines/manual.json"]}', encoding="utf-8")
+
+    tooltip = ci_tooltip(workspace)
+
+    assert "activés" in tooltip
+    assert "1 pipeline(s) sélectionnée(s) sur 1 testable(s)" in tooltip
+
+
+def test_ci_tooltip_warns_when_selected_no_longer_testable(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    workspace.git = GitConfig(ci_enabled=True)
+    add_ci_export(tmp_path, "n8nPipelines/aa-manual.json")
+    # A webhook export whose trigger is not pinned is ineligible.
+    (tmp_path / "n8nPipelines" / "zz-hook.json").write_text(
+        json.dumps(
+            {
+                "name": "Hook",
+                "nodes": [
+                    {"name": "Webhook", "type": "n8n-nodes-base.webhookTrigger", "typeVersion": 1}
+                ],
+                "connections": {},
+                "settings": {},
+            }
+        )
+    )
+    selection = tmp_path / ".n8n-tests" / "tests.json"
+    selection.parent.mkdir(parents=True)
+    selection.write_text(
+        '{"selected": ["n8nPipelines/aa-manual.json", "n8nPipelines/zz-hook.json"]}',
+        encoding="utf-8",
+    )
+
+    tooltip = ci_tooltip(workspace)
+
+    assert "plus testables" in tooltip

@@ -53,12 +53,37 @@ def test_ensure_sends_semicolon_terminated_gexec_scripts(tmp_path: Path) -> None
     sent = docker.exec_psql.call_args.kwargs["stdin"]
     assert ";\n\\gexec\n" in sent
     assert sent.count("\n\\gexec\n") == 2
-    assert "format('CREATE ROLE %I LOGIN SUPERUSER PASSWORD %L'," in sent
+    # The data role is a plain LOGIN: ownership of its database is enough for
+    # schema and migration work, there is no need for superuser privileges.
+    assert "format('CREATE ROLE %I LOGIN PASSWORD %L'," in sent
+    assert "LOGIN SUPERUSER" not in sent
     assert "format('CREATE DATABASE %I OWNER %I'," in sent
     assert "'n8ndata'" in sent
     assert "p''w" in sent
     assert docker.exec_psql.call_args.kwargs["database"] == "postgres"
     assert docker.exec_psql.call_args.kwargs["user"] == "n8n"
+
+
+def test_ensure_keeps_superuser_for_timescale_workspace(tmp_path: Path) -> None:
+    docker = MagicMock()
+    workspace = Workspace(
+        id="db1",
+        name="Db",
+        workflows_dir=tmp_path,
+        port=5680,
+        db=DbConfig(
+            mode=DbMode.MANAGED,
+            database_name="data",
+            username="n8ndata",
+            password="pw",
+        ),
+        postgres_preload_timescaledb=True,
+    )
+
+    MigrationRunner(docker).ensure(workspace, tmp_path / "compose.yaml")
+
+    sent = docker.exec_psql.call_args.kwargs["stdin"]
+    assert "CREATE ROLE %I LOGIN SUPERUSER PASSWORD %L" in sent
 
 
 def test_apply_qualifies_schema_migrations_bookkeeping(tmp_path: Path) -> None:
