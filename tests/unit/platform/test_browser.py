@@ -1,7 +1,30 @@
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from n8n_launcher.platform.browser import Browser, find_browser, open_app, open_url
+from n8n_launcher.platform.browser import (
+    Browser,
+    _linux_candidate,
+    find_browser,
+    open_app,
+    open_url,
+)
+
+
+@contextmanager
+def _path_only_discovery():
+    """Force PATH-only candidate discovery regardless of the runner platform.
+
+    On macOS/Windows ``_candidate`` looks up real installed app bundles, so
+    these tests would probe the CI machine's actual Chrome instead of the
+    mocked ``shutil.which``. Routing through ``_linux_candidate`` makes the
+    outcome deterministic everywhere.
+    """
+    with patch(
+        "n8n_launcher.platform.browser._candidate",
+        side_effect=_linux_candidate,
+    ):
+        yield
 
 
 def test_find_browser_prefers_first_found_chromium() -> None:
@@ -10,7 +33,9 @@ def test_find_browser_prefers_first_found_chromium() -> None:
             return "/usr/bin/unexpected"
         return "/usr/bin/edge" if name == "microsoft-edge" else None
 
-    with patch("n8n_launcher.platform.browser.shutil.which", side_effect=which):
+    with _path_only_discovery(), patch(
+        "n8n_launcher.platform.browser.shutil.which", side_effect=which
+    ):
         assert find_browser() == Browser("google-chrome-stable", "/usr/bin/unexpected")
 
 
@@ -18,14 +43,18 @@ def test_find_browser_falls_back_to_firefox() -> None:
     def which(name: str) -> str:
         return "/usr/bin/firefox" if name == "firefox" else None
 
-    with patch("n8n_launcher.platform.browser.shutil.which", side_effect=which):
+    with _path_only_discovery(), patch(
+        "n8n_launcher.platform.browser.shutil.which", side_effect=which
+    ):
         browser = find_browser()
 
     assert browser == Browser("firefox", "/usr/bin/firefox", app_mode=False)
 
 
 def test_find_browser_returns_none_when_no_supported_browser() -> None:
-    with patch("n8n_launcher.platform.browser.shutil.which", return_value=None):
+    with _path_only_discovery(), patch(
+        "n8n_launcher.platform.browser.shutil.which", return_value=None
+    ):
         assert find_browser() is None
 
 
@@ -37,7 +66,9 @@ def test_find_browser_prefers_chromium_over_firefox() -> None:
             return "/usr/bin/firefox"
         return None
 
-    with patch("n8n_launcher.platform.browser.shutil.which", side_effect=which):
+    with _path_only_discovery(), patch(
+        "n8n_launcher.platform.browser.shutil.which", side_effect=which
+    ):
         browser = find_browser()
 
     assert browser == Browser("chromium-browser", "/usr/bin/chromium-browser")
@@ -52,7 +83,7 @@ def test_open_app_uses_isolated_profile_and_app_flag() -> None:
 
     popen.assert_called_once_with([
         "/usr/bin/google-chrome",
-        "--user-data-dir=/tmp/n8n-profile",
+        f"--user-data-dir={profile}",
         "--app=http://127.0.0.1:5678",
         "--no-first-run",
     ])
