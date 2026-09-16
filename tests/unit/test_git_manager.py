@@ -276,3 +276,22 @@ def test_git_error_raised_on_timeout(tmp_path: Path) -> None:
             git_init(tmp_path)
 
     assert "timed out" in str(excinfo.value)
+
+
+def test_git_error_raised_on_os_error(tmp_path: Path) -> None:
+    """OSError from subprocess.run (e.g. PermissionError on Windows) is converted to GitError."""
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        side_effect=PermissionError(13, "Permission denied"),
+    ):
+        with pytest.raises(GitError, match="could not be executed"):
+            git_init(tmp_path)
+
+
+def test_git_is_repo_false_on_os_error(tmp_path: Path) -> None:
+    """git_is_repo returns False instead of leaking an OSError."""
+    with patch(
+        "n8n_launcher.git_manager.subprocess.run",
+        side_effect=PermissionError(13, "Permission denied"),
+    ):
+        assert git_is_repo(tmp_path) is False

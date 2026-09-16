@@ -28,6 +28,12 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.Co
         raise GitError("git is not installed or not found in PATH")
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)} timed out")
+    # Windows can surface other OS-level failures (PermissionError, broken pipe,
+    # transient locks) when spawning git — report them all as a GitError so
+    # diagnostic probes such as git_is_repo() degrade to "not a repo" instead
+    # of leaking a raw exception into the caller.
+    except OSError as exc:
+        raise GitError(f"git {' '.join(args)} could not be executed: {exc}")
     if check and result.returncode != 0:
         stderr = result.stderr.strip()
         raise GitError(f"git {' '.join(args)} failed: {stderr}")
