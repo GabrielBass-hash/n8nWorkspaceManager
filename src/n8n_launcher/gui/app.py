@@ -19,8 +19,10 @@ from ..core.config import ConfigStore
 from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
 from ..docker.manager import DockerManager
-from ..platform.browser import open_app
+from ..platform.browser import open_app, open_url
+from ..workspaces import ci
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
+from . import ci_edit
 from . import display
 from .close import CloseController
 from .dialogs import (
@@ -263,6 +265,22 @@ class LauncherApp:
         self._menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
         self._menu.add_separator()
         self._menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
+        self._menu.add_command(
+            label="Configurer les tests GitHub Actions…",
+            command=self.configure_ci_selected,
+        )
+        self._menu.add_command(
+            label="Gérer les credentials CI…",
+            command=self.configure_ci_credentials_selected,
+        )
+        self._menu.add_command(
+            label="Ouvrir les Actions GitHub…",
+            command=self.open_ci_actions,
+        )
+        self._menu.add_command(
+            label="Désactiver les tests CI",
+            command=self.disable_ci_selected,
+        )
         self._menu.add_separator()
         self._menu.add_command(label="Supprimer", command=self._delete_selected)
 
@@ -387,6 +405,14 @@ class LauncherApp:
         )
         self._attach_tooltip(git_chip, git_status.tooltip)
 
+        ci_chip = self._chip(frame, text="CI", palette=self._ci_chip_palette(workspace))
+        ci_chip.pack(side="right", padx=(6, 0))
+        ci_chip.configure(cursor="hand2")
+        ci_chip.bind(
+            "<Button-1>", lambda _event, wid=workspace.id: self._on_ci_chip_click(wid)
+        )
+        self._attach_tooltip(ci_chip, display.ci_tooltip(workspace))
+
         pipelines = display.pipelines_count(workspace.workflows_dir)
         pipelines_chip = self._chip(
             frame, text=str(pipelines), palette=CHIP_NEUTRAL
@@ -421,6 +447,7 @@ class LauncherApp:
         frame.name_label = name_label
         frame.db_chip = db_chip
         frame.git_chip = git_chip
+        frame.ci_chip = ci_chip
         frame.port_chip = port_chip
         frame.pipelines_chip = pipelines_chip
         frame.action_button = action_button
@@ -453,6 +480,17 @@ class LauncherApp:
         if not status.is_repo or status.push_failed:
             return CHIP_INACTIVE
         if status.dirty or status.diverged:
+            return CHIP_WARN
+        return CHIP_ACTIVE
+
+    @staticmethod
+    def _ci_chip_palette(workspace: Workspace) -> tuple[str, str]:
+        """Color the CI chip: neutral when off, warn when on but nothing runs."""
+        if not workspace.git.ci_enabled:
+            return CHIP_NEUTRAL
+        provided = ci.provided_credentials(workspace.git.ci_credentials)
+        counts = ci.ci_counts(workspace.workflows_dir, provided)
+        if counts["selected"] == 0 or counts["selected_eligible"] < counts["selected"]:
             return CHIP_WARN
         return CHIP_ACTIVE
 
@@ -693,6 +731,117 @@ class LauncherApp:
             return
         self._select_row(workspace_id)
         self.configure_git_selected()
+
+    def _on_ci_chip_click(self, workspace_id: str) -> None:
+        """Clicking the CI chip opens the CI test configuration dialog."""
+        if self._closing:
+            return
+        self._select_row(workspace_id)
+        self.configure_ci_selected()
+
+    def configure_ci_selected(self) -> None:
+        """Enable CI if needed, then open the pipeline selection dialog."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        if not display.ci_enabled(workspace):
+            self._enable_ci_selected(workspace)
+        else:
+            self._show_ci_dialog(workspace)
+
+    def _enable_ci_selected(self, workspace: Workspace) -> None:
+        """Generate the CI harness (async) then let the user pick pipelines."""
+        def action() -> None:
+            self.workspace_manager.enable_ci(workspace)
+
+        def on_success() -> None:
+            self.refresh()
+            current = self._reload_workspace(workspace.id)
+            if current is not None:
+                self._show_ci_dialog(current)
+
+        self._run_async(action, on_success=on_success)
+
+    def _show_ci_dialog(self, workspace: Workspace) -> None:
+        """Open the pipeline tree; persist the result through the manager."""
+        result = ci_edit.prompt_ci_workflows(self.root, workspace)
+        if result is None:
+            return
+        selected, push = result
+        self._run_async(
+            lambda: self.workspace_manager.save_ci_selection(
+                workspace, selected, push=push
+            ),
+            on_success=lambda: self.set_status(
+                f"Sélection des tests CI enregistrée pour « {workspace.name} »."
+            ),
+        )
+
+    def configure_ci_credentials_selected(self) -> None:
+        """Open the credentials dialog (requires a running workspace)."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        ci_edit.prompt_ci_credentials(self.root, self.workspace_manager, workspace)
+        self.refresh()
+
+    def open_ci_actions(self) -> None:
+        """Open the GitHub Actions page of the workspace's repository."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        remote = self.workspace_manager.git_remote_url(workspace)
+        repo_path = ci.github_repo_path(remote) if remote else None
+        if repo_path is None:
+            messagebox.showwarning(
+                "n8n Launcher",
+                "Aucun dépôt distant GitHub configuré pour ce workspace.",
+                parent=self.root,
+            )
+            return
+        open_url(ci.actions_url(repo_path))
+
+    def disable_ci_selected(self) -> None:
+        """Disable CI for the selected workspace, keeping its selection."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        if not display.ci_enabled(workspace):
+            messagebox.showinfo(
+                "n8n Launcher",
+                "Les tests GitHub Actions ne sont pas activés pour ce workspace.",
+                parent=self.root,
+            )
+            return
+        confirmed = messagebox.askyesno(
+            "Désactiver les tests CI",
+            "Désactiver les tests GitHub Actions ?\n"
+            "La sélection de pipelines (tests.json) sera conservée.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        self._run_async(
+            lambda: self.workspace_manager.disable_ci(workspace),
+            on_success=lambda: self.set_status(
+                f"Tests GitHub Actions désactivés pour « {workspace.name} »."
+            ),
+        )
+
+    def _reload_workspace(self, workspace_id: str) -> Workspace | None:
+        """Return the freshest persisted version of a workspace (or None)."""
+        return next(
+            (item for item in self.workspace_manager.list() if item.id == workspace_id),
+            None,
+        )
 
     def _on_db_chip_click(self, workspace_id: str) -> None:
         """Clicking the DB chip opens database configuration for that workspace."""

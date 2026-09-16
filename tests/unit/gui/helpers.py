@@ -14,13 +14,15 @@ class FakeTk:
 
     class Frame:
         def __init__(self, _parent, **kwargs):
+            self._parent = _parent
             self.children: list[object] = []
             self._options = dict(kwargs)
             self.destroyed = False
             self._bindings: dict[str, object] = {}
 
         def pack(self, *_args, **_kwargs) -> None:
-            pass
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
 
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
@@ -118,6 +120,33 @@ class FakeTk:
         def set(self, value) -> None:
             self._value = value
 
+    class IntVar:
+        def __init__(self, value=0):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value) -> None:
+            self._value = value
+
+    class Checkbutton:
+        def __init__(self, parent, **kwargs):
+            self._parent = parent
+            self.text = kwargs.get("text")
+            self.variable = kwargs.get("variable")
+            self._options = dict(kwargs)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def select(self) -> None:
+            self.variable.set(1)
+
+        def deselect(self) -> None:
+            self.variable.set(0)
+
     class Toplevel:
         # Test hook: when True, ``wait_window`` simulates an Escape / cancel
         # instead of pressing Return (used to cover both dialog paths).
@@ -131,6 +160,7 @@ class FakeTk:
             self._options = {}
             self._bindings: dict[str, object] = {}
             self.destroyed = False
+            self._clipboard = ""
             FakeTk.Toplevel.instances.append(self)
 
         def title(self, _value: str) -> None:
@@ -170,6 +200,12 @@ class FakeTk:
             escape = self._bindings.get("<Escape>")
             if escape is not None:
                 escape(None)
+
+        def clipboard_clear(self) -> None:
+            self._clipboard = ""
+
+        def clipboard_append(self, text: str) -> None:
+            self._clipboard += text
 
     class Entry:
         def __init__(self, parent, **kwargs):
@@ -229,6 +265,66 @@ class FakeTtk:
 
         def pack(self, *_args, **_kwargs) -> None:
             self.packed = True
+
+    class Treeview:
+        instances: list["FakeTtk.Treeview"] = []
+
+        def __init__(self, _parent, **kwargs):
+            self._options = dict(kwargs)
+            self._items: dict[str, dict[str, object]] = {}
+            self._bindings: dict[str, object] = {}
+            self._headings: dict[str, object] = {}
+            self.packed = False
+            FakeTtk.Treeview.instances.append(self)
+
+        def heading(self, column: str, **kwargs) -> None:
+            self._headings[column] = dict(kwargs)
+
+        def column(self, _column: str, **_kwargs) -> None:
+            pass
+
+        def tag_configure(self, _tag: str, **_kwargs) -> None:
+            pass
+
+        def configure(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+        def insert(self, parent: str, index: int, iid=None, text="", values=(), tags=(), **kwargs):
+            item_id = iid if iid is not None else f"item{len(self._items)}"
+            entry = {"parent": parent, "text": text, "values": list(values), "tags": list(tags)}
+            entry.update(kwargs)
+            entry.update({k: v for k, v in kwargs.items()})
+            self._items[item_id] = entry
+            return item_id
+
+        def item(self, iid: str, **kwargs):
+            """Get all options when no kwargs, else update the stored ones."""
+            if kwargs:
+                self._items[iid].update(kwargs)
+            return dict(self._items[iid])
+
+        def get_children(self, iid: str = "") -> list[str]:
+            return [
+                item_id
+                for item_id, entry in self._items.items()
+                if entry.get("parent") == iid
+            ]
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def identify(self, _region: str, _x: int, _y: int) -> str:
+            return "tree"
+
+        def identify_row(self, _y: int) -> str | None:
+            return next(iter(self._items), None)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+
+        def set(self, iid: str, column: str, value: object) -> None:
+            entry = self._items[iid]
+            entry["values"][int(column)] = value
 
 
 class FakeRoot:

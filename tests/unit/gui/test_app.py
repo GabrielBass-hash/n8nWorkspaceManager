@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, WorkspaceState
+from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui.display import GitRowStatus
 
@@ -288,8 +288,17 @@ def test_watermark_plus_is_centered(app) -> None:
 
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
-    labels = [label for label, _ in app.app._menu._items if label]
-    assert labels == ["Ouvrir n8n", "Ouvrir le dossier", "Configurer Git…", "Supprimer"]
+        labels = [label for label, _ in app.app._menu._items if label]
+        assert labels == [
+            "Ouvrir n8n",
+            "Ouvrir le dossier",
+            "Configurer Git…",
+            "Configurer les tests GitHub Actions…",
+            "Gérer les credentials CI…",
+            "Ouvrir les Actions GitHub…",
+            "Désactiver les tests CI",
+            "Supprimer",
+        ]
 
 
 def test_delete_per_row_confirms_then_removes_workspace(app) -> None:
@@ -590,3 +599,99 @@ def test_canvas_wheel_bindings_cover_canvas_and_list(app) -> None:
 
 def test_scrollregion_is_refreshed_after_row_rebuild(app) -> None:
     assert app.app._list_canvas._options.get("scrollregion") is not None
+
+def _stopped(app):
+    return app.manager.list.return_value[1]
+
+
+def test_ci_chip_palette_tracks_config_and_selection(app, tmp_path) -> None:
+    from n8n_launcher.gui.theme import CHIP_ACTIVE, CHIP_NEUTRAL, CHIP_WARN
+
+    stopped = _stopped(app)
+    (tmp_path / "Stopped" / "n8nPipelines").mkdir(parents=True)
+    (tmp_path / "Stopped" / "n8nPipelines" / "manual.json").write_text(
+        '{"name": "M", "nodes": [{"name": "Bouton", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1}], "connections": {}, "settings": {}}',
+        encoding="utf-8",
+    )
+    app.app.refresh()
+    assert row_chip_colors(app, "ws-stopped", "ci_chip") == CHIP_NEUTRAL
+
+    stopped.git = GitConfig(ci_enabled=True)  # enabled but nothing selected
+    app.app.refresh()
+    assert row_chip_colors(app, "ws-stopped", "ci_chip") == CHIP_WARN
+
+    selection = tmp_path / "Stopped" / ".n8n-tests" / "tests.json"
+    selection.parent.mkdir(parents=True)
+    selection.write_text('{"selected": ["n8nPipelines/manual.json"]}', encoding="utf-8")
+    app.app.refresh()
+    assert row_chip_colors(app, "ws-stopped", "ci_chip") == CHIP_ACTIVE
+
+
+def test_configure_ci_enables_then_persists_selection(app) -> None:
+    stopped = _stopped(app)
+    app.app._select_row(stopped.id)
+
+    with patch(
+        "n8n_launcher.gui.app.ci_edit.prompt_ci_workflows",
+        return_value=({"n8nPipelines/a.json"}, True),
+    ) as prompt:
+        app.app.configure_ci_selected()
+        app.app._drain_events()
+
+    app.manager.enable_ci.assert_called_once_with(stopped)
+    prompt.assert_called_once()
+    app.manager.save_ci_selection.assert_called_once_with(
+        stopped, {"n8nPipelines/a.json"}, push=True
+    )
+
+
+def test_configure_ci_opens_dialog_directly_when_already_enabled(app) -> None:
+    stopped = _stopped(app)
+    stopped.git = GitConfig(ci_enabled=True)
+    app.app._select_row(stopped.id)
+
+    with patch("n8n_launcher.gui.app.ci_edit.prompt_ci_workflows", return_value=None) as prompt:
+        app.app.configure_ci_selected()
+        app.app._drain_events()
+
+    app.manager.enable_ci.assert_not_called()
+    prompt.assert_called_once()
+    app.manager.save_ci_selection.assert_not_called()
+
+
+def test_disable_ci_selected_requires_confirmation(app) -> None:
+    stopped = _stopped(app)
+    stopped.git = GitConfig(ci_enabled=True)
+    app.app._select_row(stopped.id)
+
+    app.mocks.messagebox._yesno = False
+    app.app.disable_ci_selected()
+    app.manager.disable_ci.assert_not_called()
+
+    app.mocks.messagebox._yesno = True
+    app.app.disable_ci_selected()
+    app.app._drain_events()
+
+    app.manager.disable_ci.assert_called_once_with(stopped)
+
+
+def test_open_ci_actions_opens_github_actions_page(app) -> None:
+    stopped = _stopped(app)
+    app.manager.git_remote_url.return_value = "https://github.com/owner/repo.git"
+    app.app._select_row(stopped.id)
+
+    with patch("n8n_launcher.gui.app.open_url") as open_url:
+        app.app.open_ci_actions()
+
+    open_url.assert_called_once_with("https://github.com/owner/repo/actions")
+
+
+def test_open_ci_actions_warns_without_github_remote(app) -> None:
+    stopped = _stopped(app)
+    app.manager.git_remote_url.return_value = "https://gitlab.com/owner/repo.git"
+    app.app._select_row(stopped.id)
+    app.app._drain_events()
+
+    app.app.open_ci_actions()
+
+    assert "Aucun dépôt distant GitHub" in app.mocks.messagebox.warnings[0]

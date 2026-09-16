@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from dataclasses import replace
@@ -36,6 +37,7 @@ from ..n8n.api import N8nApiClient, N8nApiError
 from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
+from . import ci
 
 
 logger = logging.getLogger(__name__)
@@ -241,23 +243,34 @@ class WorkspaceManager:
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             return
         message = f"n8n-launcher: sync workflows [{datetime.now().isoformat(timespec='seconds')}]"
+        self._commit_and_push(workspace, message, push=push)
+
+    def _commit_and_push(self, workspace: Workspace, message: str, *, push: bool = True) -> bool:
+        """Stage everything, commit with *message*, and push when requested.
+
+        Mirrors ``sync_git``'s semantics: git failures never raise — they
+        degrade to the ``git_push_failed`` flag that the UI chip surfaces.
+        Returns True when a commit was actually created.
+        """
+        committed = False
         try:
             git_add(workspace.workflows_dir)
             committed = git_commit(workspace.workflows_dir, message)
         except GitError as exc:
             logger.warning("git stage/commit failed for %s: %s", workspace.name, exc)
             self._set_git_push_failed(workspace, True)
-            return
+            return committed
         if committed:
-            logger.info("Committed workflow changes for %s", workspace.name)
+            logger.info("Committed for %s: %s", workspace.name, message)
         if push and (committed or git_has_unpushed_commits(workspace.workflows_dir)):
             try:
                 git_push(workspace.workflows_dir)
             except GitError as exc:
                 logger.warning("git push failed for %s: %s", workspace.name, exc)
                 self._set_git_push_failed(workspace, True)
-                return
+                return committed
             self._set_git_push_failed(workspace, False)
+        return committed
 
     def _set_git_push_failed(self, workspace: Workspace, failed: bool) -> None:
         """Persist the push-failed flag (and mirror it on the in-memory object)."""
@@ -352,6 +365,124 @@ class WorkspaceManager:
         workspace.git_push_failed = False
         self.store.save(config)
         logger.info("Configured git for %s", workspace.name)
+
+    def enable_ci(self, workspace: Workspace) -> Workspace:
+        """Generate the CI harness in the workspace repository and enable CI.
+
+        Requires a real git repository with a GitHub remote: without one there
+        is nowhere for a GitHub Actions workflow to run. The persisted
+        selection (``tests.json``) is preserved across disable/re-enable
+        cycles instead of being reset.
+        """
+        if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
+            raise WorkspaceError(
+                "Les tests GitHub Actions nécessitent un dépôt Git (configurez Git d'abord)."
+            )
+        if ci.github_repo_path(self.git_remote_url(workspace)) is None:
+            raise WorkspaceError(
+                "Les tests GitHub Actions nécessitent un dépôt distant GitHub "
+                "(ex. https://github.com/utilisateur/repo.git)."
+            )
+        files = ci.render_harness(workspace.n8n_version)
+        selection = ci.selection_path(workspace.workflows_dir)
+        for rel, content in files.items():
+            if rel == f"{ci.CI_DIR}/{ci.SELECTION_FILE}":
+                if not selection.exists():
+                    selection.parent.mkdir(parents=True, exist_ok=True)
+                    selection.write_text(content, encoding="utf-8")
+                continue
+            target = workspace.workflows_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = replace(workspace.git, ci_enabled=True)
+        config.workspaces[config.workspaces.index(workspace)] = workspace
+        self.store.save(config)
+        self._commit_and_push(workspace, "n8n-launcher: activer les tests GitHub Actions")
+        logger.info("Enabled CI for %s", workspace.name)
+        return workspace
+
+    def disable_ci(self, workspace: Workspace) -> Workspace:
+        """Remove the generated CI harness while keeping the pipeline selection."""
+        for rel in ci.DISABLE_FILES:
+            target = workspace.workflows_dir / rel
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove %s: %s", target, exc)
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = replace(workspace.git, ci_enabled=False)
+        config.workspaces[config.workspaces.index(workspace)] = workspace
+        self.store.save(config)
+        self._commit_and_push(workspace, "n8n-launcher: désactiver les tests GitHub Actions")
+        logger.info("Disabled CI for %s", workspace.name)
+        return workspace
+
+    def set_ci_credentials(
+        self, workspace: Workspace, credentials: list[dict[str, Any]]
+    ) -> Workspace:
+        """Record the metadata of the credentials included in the CI secret.
+
+        Only ``name`` and ``type`` are persisted — never the values. The
+        values themselves live in the ``N8N_CI_CREDENTIALS`` GitHub secret,
+        which is why this call never touches the repository.
+        """
+        clean = [
+            {"name": item.get("name"), "type": item.get("type")} for item in credentials
+        ]
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = replace(workspace.git, ci_credentials=clean)
+        config.workspaces[config.workspaces.index(workspace)] = workspace
+        self.store.save(config)
+        logger.info("Recorded %d CI credential(s) for %s", len(clean), workspace.name)
+        return workspace
+
+    def save_ci_selection(
+        self, workspace: Workspace, selected: set[str], *, push: bool = False
+    ) -> Workspace:
+        """Persist the pipeline selection and optionally commit/push it."""
+        ci.write_selection(workspace.workflows_dir, set(selected))
+        if push:
+            self._commit_and_push(
+                workspace, "n8n-launcher: mettre à jour les tests GitHub Actions"
+            )
+        return workspace
+
+    def ci_credentials_payload(
+        self, workspace: Workspace, selected: list[dict[str, Any]]
+    ) -> str:
+        """Build the JSON pasted as the ``N8N_CI_CREDENTIALS`` GitHub secret.
+
+        Reads the credential values live from the workspace's n8n instance
+        (the public list endpoint never exposes ``data``) and returns a JSON
+        document of ``{name, type, data}`` items. The workspace must have an
+        API key for the values to be readable.
+        """
+        if not workspace.api_key:
+            raise WorkspaceError(
+                "Le workspace doit avoir été démarré une fois pour exporter ses credentials."
+            )
+        api = self.api_factory(workspace, workspace.api_key)
+        wanted = {(item.get("name"), item.get("type")) for item in selected}
+        listed = api.list_credentials()
+        found: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in listed:
+            key = (item.get("name"), item.get("type"))
+            if key in wanted and key not in found:
+                found[key] = item
+        missing = wanted - set(found)
+        if missing:
+            names = ", ".join(f"{name} ({ctype})" for name, ctype in sorted(missing))
+            raise WorkspaceError(f"Credentials introuvables dans n8n : {names}")
+        payload: list[dict[str, Any]] = []
+        for (name, ctype), item in found.items():
+            detail = api.get_credential(str(item["id"]))
+            payload.append({"name": name, "type": ctype, "data": detail.get("data") or {}})
+        return json.dumps(payload, indent=2, ensure_ascii=False)
 
     def start(self, workspace_id: str) -> Workspace:
         """Write Compose, bring the stack up, and apply managed migrations."""
