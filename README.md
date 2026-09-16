@@ -18,6 +18,34 @@ Findings from the integration spikes, baked into the code:
 - `docker compose ps --format json` is validated by the integration suite to derive per-service state.
 - Browser app mode uses the `--app` flag of Chrome/Edge/Brave/Chromium when one is installed, and falls back to `webbrowser.open`. Flag construction is unit-tested; real flags are exercised on the three-OS e2e pass.
 
+## GitHub Actions CI for pipelines
+
+Each workspace that has Git enabled with a **GitHub** remote can also run its
+exported pipelines as GitHub Actions tests, configured entirely from the GUI:
+
+- **Enabling** (`Configurer les tests GitHub Actions…`) generates three
+  files in the workspace repo — `.github/workflows/n8n-ci.yml`,
+  `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed
+  selection file `.n8n-tests/tests.json`. Every generated file carries the
+  marker *« n8n-launcher : généré — ne pas modifier à la main »*. The changes
+  are committed and pushed on enable.
+- **Selection**: the pipeline tree dialog only lets you tick *complete*
+  pipelines that can be started without external input: a manual trigger, a
+  schedule trigger, or a webhook/chat trigger pinned in the editor (pinData).
+  Every non-pinned node's credentials must also be covered by the credentials
+  you record locally. Ineligible pipelines are greyed out with the reason.
+- **Credentials**: values are read once, live from the running workspace's n8n
+  instance, and copied to the clipboard as a JSON document to paste into the
+  GitHub Actions secret **`N8N_CI_CREDENTIALS`**. The launcher then keeps only
+  the name/type metadata, never the values.
+- **What the workflow does**: a `validate` job checks the exports statically
+  (JSON shape, duplicate names, selection consistency), then a `test` job runs
+  the real pipelines in a throwaway `docker` n8n container, imported via the
+  public API, using the pinned image `docker.n8n.io/n8nio/n8n:<workspace
+  version>` (overridable with the `N8N_IMAGE` repository variable).
+- **Disabling** removes only the generated harness files and keeps
+  `tests.json`, so the selection survives a disable/enable cycle.
+
 ## Development
 
 Requires Python 3.12 or newer.

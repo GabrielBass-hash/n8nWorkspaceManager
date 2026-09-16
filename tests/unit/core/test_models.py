@@ -103,6 +103,26 @@ def test_git_config_round_trip() -> None:
     assert GitConfig.from_dict(config.to_dict()) == config
 
 
+def test_git_config_round_trip_keeps_ci_fields() -> None:
+    config = GitConfig(
+        enabled=True,
+        remote_url="https://example.test/repo.git",
+        ci_enabled=True,
+        ci_credentials=[{"name": "API", "type": "httpRequest"}],
+    )
+
+    assert GitConfig.from_dict(config.to_dict()) == config
+
+
+def test_git_config_defaults_ci_fields_on_legacy_dict() -> None:
+    # Legacy configs carry no CI metadata; they degrade to empty.
+    restored = GitConfig.from_dict({"enabled": True})
+
+    assert restored == GitConfig(enabled=True)
+    assert restored.ci_enabled is False
+    assert restored.ci_credentials == []
+
+
 def test_git_config_defaults_from_empty_dict() -> None:
     restored = GitConfig.from_dict({})
 

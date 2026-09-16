@@ -6,6 +6,7 @@ The public surface is re-exported here so consumers can import from
 
 from .manager import (
     GitError,
+    ensure_gitignore,
     git_add,
     git_add_remote,
     git_clone,
@@ -18,11 +19,13 @@ from .manager import (
     git_pull,
     git_push,
     git_remote_url,
+    git_remove_remote,
     git_set_remote_url,
 )
 
 __all__ = [
     "GitError",
+    "ensure_gitignore",
     "git_add",
     "git_add_remote",
     "git_clone",
@@ -35,5 +38,6 @@ __all__ = [
     "git_pull",
     "git_push",
     "git_remote_url",
+    "git_remove_remote",
     "git_set_remote_url",
 ]

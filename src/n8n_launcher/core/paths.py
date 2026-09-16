@@ -34,6 +34,11 @@ def compose_file(workspace_id: str) -> Path:
     return workspace_runtime_dir(workspace_id) / "compose.yml"
 
 
+def browser_app_dir(workspace_id: str) -> Path:
+    """Return the isolated browser profile dir used for a workspace app window."""
+    return config_dir() / "browser" / workspace_id
+
+
 def updates_dir() -> Path:
     """Return the staging directory for downloaded update artifacts and helpers."""
     return config_dir() / "updates"

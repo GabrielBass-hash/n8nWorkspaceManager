@@ -17,9 +17,12 @@ import requests
 
 from ..core.config import ConfigStore
 from ..core.models import Workspace, WorkspaceState
+from ..core.paths import browser_app_dir
 from ..docker.manager import DockerManager
-from ..platform.browser import open_app
+from ..platform.browser import open_app, open_url
+from ..workspaces import ci
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
+from . import ci_edit
 from . import display
 from .close import CloseController
 from .dialogs import (
@@ -27,14 +30,15 @@ from .dialogs import (
     default_creation_db,
     prompt_create_dir,
     prompt_create_plan,
+    prompt_db_config,
     prompt_git_remote,
 )
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
-    ACCENT_HOVER,
     APP_BACKGROUND,
     BORDER,
+    BORDER_STRONG,
     CHIP_ACTIVE,
     CHIP_INACTIVE,
     CHIP_NEUTRAL,
@@ -46,12 +50,8 @@ from .theme import (
     FONT_SUBTITLE,
     FONT_TITLE,
     FONT_WATERMARK,
-    ROW_DELETE_ACTIVE,
-    ROW_DELETE_BG,
-    ROW_DELETE_FG,
     ROW_SELECTED_BG,
     STATE_POLL_MS,
-    STATUS_STYLE,
     SURFACE,
     SURFACE_HOVER,
     TEXT_MUTED,
@@ -62,6 +62,23 @@ from .theme import (
 from .update_flow import UpdateController
 
 
+def open_n8n_app(url: str, profile_dir: Path) -> None:
+    """Open n8n in an isolated app-mode browser window for a workspace."""
+    open_app(url, profile_dir=profile_dir)
+
+
+def _api_router_mounted(response: requests.Response) -> bool:
+    """Return True when the response proves the n8n public API router is up.
+
+    n8n serves ``/api/v1/*`` with 404 while its HTTP app is still warm
+    restarting after boot. 200/401/403 mean the router is mounted and reacting
+    (401 merely flags a missing or unusable API key). Unit-test fakes expose
+    only ``.ok``; an ok response is treated as mounted.
+    """
+    status = getattr(response, "status_code", 200 if response.ok else 404)
+    return status in (200, 401, 403)
+
+
 class LauncherApp:
     def __init__(
         self,
@@ -70,7 +87,7 @@ class LauncherApp:
         docker: DockerManager,
         *,
         root: tk.Tk | None = None,
-        browser_opener: Callable[[str], None] = open_app,
+        browser_opener: Callable[[str, Path], None] = open_n8n_app,
     ) -> None:
         self.config_store = config_store
         self.workspace_manager = workspace_manager
@@ -136,15 +153,6 @@ class LauncherApp:
                 padding=(14, 8),
             )
             style.map("TButton", background=[("active", SURFACE_HOVER)])
-            style.configure(
-                "Accent.TButton",
-                background=ACCENT,
-                foreground="#ffffff",
-                bordercolor=ACCENT,
-                focuscolor=ACCENT,
-                padding=(16, 8),
-            )
-            style.map("Accent.TButton", background=[("active", ACCENT_ACTIVE)])
         except Exception:
             pass
 
@@ -176,14 +184,14 @@ class LauncherApp:
 
     def _build_ui(self) -> None:
         accent_bar = tk.Frame(self.root, bg=ACCENT, height=4)
-        accent_bar.pack(fill="x")
+        accent_bar.pack(fill="x", side="top")
         try:
             accent_bar.pack_propagate(False)
         except Exception:
             pass
 
         header = ttk.Frame(self.root, padding=(18, 14, 18, 10))
-        header.pack(fill="x")
+        header.pack(fill="x", side="top")
         title = tk.Label(
             header,
             text="n8n Launcher",
@@ -192,7 +200,7 @@ class LauncherApp:
             font=FONT_TITLE,
             anchor="w",
         )
-        title.pack(fill="x")
+        title.pack(side="left", fill="x", expand=True)
         self._subtitle = tk.Label(
             header,
             text="",
@@ -201,14 +209,41 @@ class LauncherApp:
             font=FONT_SUBTITLE,
             anchor="w",
         )
-        self._subtitle.pack(fill="x")
+        self._subtitle.pack(side="left", fill="x")
+
+        status_border = tk.Frame(self.root, bg=BORDER_STRONG, height=1)
+        status_border.pack(fill="x", side="bottom")
+        self._status_label = tk.Label(
+            self.root,
+            text="",
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_STATUS,
+            anchor="w",
+            padx=20,
+            pady=6,
+        )
+        self._status_label.pack(fill="x", side="bottom")
 
         card = tk.Frame(self.root, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
-        card.pack(fill="both", expand=True, padx=18, pady=(8, 10))
-        self.workspace_list = tk.Frame(card, bg=SURFACE)
-        self.workspace_list.pack(fill="both", expand=True, padx=8, pady=8)
+        card.pack(fill="both", expand=True, padx=18, pady=(8, 16))
+        self._list_canvas = tk.Canvas(card, bg=SURFACE, highlightthickness=0)
+        self._list_canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        self.workspace_list = tk.Frame(self._list_canvas, bg=SURFACE)
+        self._list_window = self._list_canvas.create_window(
+            0, 0, window=self.workspace_list, anchor="nw"
+        )
         self.workspace_list.bind("<Return>", lambda _event: self.launch_selected())
         self.workspace_list.bind("<Button-1>", self._on_empty_area_click)
+
+        # Scrolling with the mouse wheel only (no visible scrollbar): bindings
+        # on the list also fire for wheel events over its child rows, so both
+        # the frame and the surrounding canvas are covered.
+        for widget in (self._list_canvas, self.workspace_list):
+            widget.bind("<MouseWheel>", self._on_mousewheel)
+            widget.bind("<Button-4>", self._on_wheel_linux)
+            widget.bind("<Button-5>", self._on_wheel_linux)
+        self._list_canvas.bind("<Configure>", self._on_canvas_resize)
 
         watermark = tk.Label(
             self.workspace_list,
@@ -225,24 +260,46 @@ class LauncherApp:
         self._watermark = watermark
         watermark.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
 
-        self._status_label = tk.Label(
-            self.root,
-            text="",
-            bg=APP_BACKGROUND,
-            fg=TEXT_MUTED,
-            font=FONT_STATUS,
-            anchor="w",
-            padx=20,
-        )
-        self._status_label.pack(fill="x", side="bottom")
-
         self._menu = tk.Menu(self.root, tearoff=0)
         self._menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
         self._menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
         self._menu.add_separator()
         self._menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
+        self._menu.add_command(
+            label="Configurer les tests GitHub Actions…",
+            command=self.configure_ci_selected,
+        )
+        self._menu.add_command(
+            label="Gérer les credentials CI…",
+            command=self.configure_ci_credentials_selected,
+        )
+        self._menu.add_command(
+            label="Ouvrir les Actions GitHub…",
+            command=self.open_ci_actions,
+        )
+        self._menu.add_command(
+            label="Désactiver les tests CI",
+            command=self.disable_ci_selected,
+        )
         self._menu.add_separator()
         self._menu.add_command(label="Supprimer", command=self._delete_selected)
+
+    def _on_mousewheel(self, event) -> None:
+        """Scroll the list on Windows/macOS wheel deltas."""
+        self._list_canvas.yview_scroll(-int(event.delta) // 120, "units")
+
+    def _on_wheel_linux(self, event) -> None:
+        """Scroll the list on Linux wheel buttons (4 = up, 5 = down)."""
+        direction = -1 if getattr(event, "num", 0) == 4 else 1
+        self._list_canvas.yview_scroll(direction, "units")
+
+    def _on_canvas_resize(self, event) -> None:
+        """Keep the inner list frame as wide as the canvas."""
+        self._list_canvas.itemconfigure(self._list_window, width=event.width)
+
+    def _update_scrollregion(self) -> None:
+        """Refresh the scrollable bounds after rows are rebuilt."""
+        self._list_canvas.config(scrollregion=self._list_canvas.bbox("all"))
 
     def _build_row(self, workspace: Workspace) -> tuple[tk.Frame, tk.Label]:
         if workspace.id == self._selected_id:
@@ -257,7 +314,7 @@ class LauncherApp:
             highlightthickness=1,
             highlightbackground=border,
         )
-        frame.pack(fill="x", pady=3, padx=2)
+        frame.pack(fill="x", pady=4, padx=3)
 
         name_label = tk.Label(
             frame,
@@ -287,76 +344,74 @@ class LauncherApp:
             action_cursor = "arrow"
             action_bg = BORDER
             action_fg = TEXT_MUTED
+            action_active = SURFACE_HOVER
         elif workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
+            # The primary action gets the accent color so the main CTA stands out.
             action_text = "Démarrer"
             action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
             action_cursor = "hand2"
-            action_bg = BORDER
-            action_fg = TEXT_PRIMARY
+            action_bg = ACCENT
+            action_fg = "#ffffff"
+            action_active = ACCENT_ACTIVE
         else:
             action_text = "Arrêter"
             action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
             action_cursor = "hand2"
             action_bg = BORDER
             action_fg = TEXT_PRIMARY
+            action_active = SURFACE_HOVER
         action_button = tk.Button(
             frame,
             text=action_text,
             font=FONT_PILL,
             bg=action_bg,
             fg=action_fg,
-            activebackground=SURFACE_HOVER,
+            activebackground=action_active,
             activeforeground=TEXT_PRIMARY,
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            padx=8,
-            pady=2,
+            padx=10,
+            pady=3,
             cursor=action_cursor,
             command=action_command,
         )
         action_button.pack(side="right", padx=(6, 0))
-
-        delete_button = tk.Button(
-            frame,
-            text="×",
-            font=FONT_TITLE,
-            bg=ROW_DELETE_BG,
-            fg=ROW_DELETE_FG,
-            activebackground=ROW_DELETE_ACTIVE,
-            activeforeground="#ffffff",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            padx=6,
-            pady=1,
-            cursor="hand2",
-            command=lambda wid=workspace.id: self.delete_workspace(wid),
-        )
-        delete_button.pack(side="right", padx=(6, 8), pady=6)
 
         port_chip = self._chip(
             frame, text=f":{workspace.port}", palette=CHIP_NEUTRAL
         )
         port_chip.pack(side="right", padx=(6, 0))
 
-        status_palette = STATUS_STYLE.get(
-            workspace.state, STATUS_STYLE[WorkspaceState.STOPPED]
-        )
-        status_label = self._chip(
-            frame, text=state_label(workspace.state), palette=status_palette
-        )
-        status_label.pack(side="right", padx=(6, 0))
-
         db_palette = CHIP_ACTIVE if display.db_connected(workspace) else CHIP_INACTIVE
         db_chip = self._chip(frame, text=display.db_label(workspace), palette=db_palette)
         db_chip.pack(side="right", padx=(6, 0))
+        db_chip.configure(cursor="hand2")
+        db_chip.bind(
+            "<Button-1>", lambda _event, wid=workspace.id: self._on_db_chip_click(wid)
+        )
+        self._attach_tooltip(
+            db_chip,
+            "Base PostgreSQL locale gérée" if display.db_connected(workspace) else "Aucune base de données",
+        )
 
         git_chip = self._chip(
             frame, text=display.git_row_label(git_status), palette=self._git_chip_palette(git_status)
         )
         git_chip.pack(side="right", padx=(6, 0))
+        git_chip.configure(cursor="hand2")
+        git_chip.bind(
+            "<Button-1>", lambda _event, wid=workspace.id: self._on_git_chip_click(wid)
+        )
         self._attach_tooltip(git_chip, git_status.tooltip)
+
+        ci_chip = self._chip(frame, text="CI", palette=self._ci_chip_palette(workspace))
+        ci_chip.pack(side="right", padx=(6, 0))
+        ci_chip.configure(cursor="hand2")
+        ci_chip.bind(
+            "<Button-1>", lambda _event, wid=workspace.id: self._on_ci_chip_click(wid)
+        )
+        self._attach_tooltip(ci_chip, display.ci_tooltip(workspace))
 
         pipelines = display.pipelines_count(workspace.workflows_dir)
         pipelines_chip = self._chip(
@@ -390,12 +445,11 @@ class LauncherApp:
             pass
 
         frame.name_label = name_label
-        frame.status_label = status_label
         frame.db_chip = db_chip
         frame.git_chip = git_chip
+        frame.ci_chip = ci_chip
         frame.port_chip = port_chip
         frame.pipelines_chip = pipelines_chip
-        frame.delete_button = delete_button
         frame.action_button = action_button
         frame.dirty_dot = dirty_dot
         return frame, name_label
@@ -426,6 +480,17 @@ class LauncherApp:
         if not status.is_repo or status.push_failed:
             return CHIP_INACTIVE
         if status.dirty or status.diverged:
+            return CHIP_WARN
+        return CHIP_ACTIVE
+
+    @staticmethod
+    def _ci_chip_palette(workspace: Workspace) -> tuple[str, str]:
+        """Color the CI chip: neutral when off, warn when on but nothing runs."""
+        if not workspace.git.ci_enabled:
+            return CHIP_NEUTRAL
+        provided = ci.provided_credentials(workspace.git.ci_credentials)
+        counts = ci.ci_counts(workspace.workflows_dir, provided)
+        if counts["selected"] == 0 or counts["selected_eligible"] < counts["selected"]:
             return CHIP_WARN
         return CHIP_ACTIVE
 
@@ -505,6 +570,7 @@ class LauncherApp:
                 self._subtitle.config(text="Aucun workflow — cliquez pour en créer un")
             else:
                 self._subtitle.config(text=f"{count} workflow{'s' if count != 1 else ''}")
+        self._update_scrollregion()
 
     def _set_row_background(self, workspace_id: str, *, hover: bool = False) -> None:
         frame = self._rows.get(workspace_id, (None, None))[0]
@@ -659,6 +725,151 @@ class LauncherApp:
             ),
         )
 
+    def _on_git_chip_click(self, workspace_id: str) -> None:
+        """Clicking the git chip opens Git configuration for that workspace."""
+        if self._closing:
+            return
+        self._select_row(workspace_id)
+        self.configure_git_selected()
+
+    def _on_ci_chip_click(self, workspace_id: str) -> None:
+        """Clicking the CI chip opens the CI test configuration dialog."""
+        if self._closing:
+            return
+        self._select_row(workspace_id)
+        self.configure_ci_selected()
+
+    def configure_ci_selected(self) -> None:
+        """Enable CI if needed, then open the pipeline selection dialog."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        if not display.ci_enabled(workspace):
+            self._enable_ci_selected(workspace)
+        else:
+            self._show_ci_dialog(workspace)
+
+    def _enable_ci_selected(self, workspace: Workspace) -> None:
+        """Generate the CI harness (async) then let the user pick pipelines."""
+        def action() -> None:
+            self.workspace_manager.enable_ci(workspace)
+
+        def on_success() -> None:
+            self.refresh()
+            current = self._reload_workspace(workspace.id)
+            if current is not None:
+                self._show_ci_dialog(current)
+
+        self._run_async(action, on_success=on_success)
+
+    def _show_ci_dialog(self, workspace: Workspace) -> None:
+        """Open the pipeline tree; persist the result through the manager."""
+        result = ci_edit.prompt_ci_workflows(self.root, workspace)
+        if result is None:
+            return
+        selected, push = result
+        self._run_async(
+            lambda: self.workspace_manager.save_ci_selection(
+                workspace, selected, push=push
+            ),
+            on_success=lambda: self.set_status(
+                f"Sélection des tests CI enregistrée pour « {workspace.name} »."
+            ),
+        )
+
+    def configure_ci_credentials_selected(self) -> None:
+        """Open the credentials dialog (requires a running workspace)."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        ci_edit.prompt_ci_credentials(self.root, self.workspace_manager, workspace)
+        self.refresh()
+
+    def open_ci_actions(self) -> None:
+        """Open the GitHub Actions page of the workspace's repository."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        remote = self.workspace_manager.git_remote_url(workspace)
+        repo_path = ci.github_repo_path(remote) if remote else None
+        if repo_path is None:
+            messagebox.showwarning(
+                "n8n Launcher",
+                "Aucun dépôt distant GitHub configuré pour ce workspace.",
+                parent=self.root,
+            )
+            return
+        open_url(ci.actions_url(repo_path))
+
+    def disable_ci_selected(self) -> None:
+        """Disable CI for the selected workspace, keeping its selection."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        if not display.ci_enabled(workspace):
+            messagebox.showinfo(
+                "n8n Launcher",
+                "Les tests GitHub Actions ne sont pas activés pour ce workspace.",
+                parent=self.root,
+            )
+            return
+        confirmed = messagebox.askyesno(
+            "Désactiver les tests CI",
+            "Désactiver les tests GitHub Actions ?\n"
+            "La sélection de pipelines (tests.json) sera conservée.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        self._run_async(
+            lambda: self.workspace_manager.disable_ci(workspace),
+            on_success=lambda: self.set_status(
+                f"Tests GitHub Actions désactivés pour « {workspace.name} »."
+            ),
+        )
+
+    def _reload_workspace(self, workspace_id: str) -> Workspace | None:
+        """Return the freshest persisted version of a workspace (or None)."""
+        return next(
+            (item for item in self.workspace_manager.list() if item.id == workspace_id),
+            None,
+        )
+
+    def _on_db_chip_click(self, workspace_id: str) -> None:
+        """Clicking the DB chip opens database configuration for that workspace."""
+        if self._closing:
+            return
+        self._select_row(workspace_id)
+        self.configure_db_selected()
+
+    def configure_db_selected(self) -> None:
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        db_config = prompt_db_config(self.root, workspace.db)
+        if db_config is None:
+            return
+
+        def action() -> None:
+            self.workspace_manager.configure_db(workspace, db_config)
+
+        self._run_async(
+            action,
+            on_success=lambda: self.set_status(
+                f"Base de données configurée pour « {workspace.name} »."
+            ),
+        )
+
     def launch_selected(self) -> None:
         if self._closing or self._launching:
             return
@@ -683,7 +894,7 @@ class LauncherApp:
 
         def on_success() -> None:
             self.refresh()
-            self.browser_opener(url)
+            self.browser_opener(url, browser_app_dir(workspace.id))
 
         self._run_async(
             action,
@@ -732,15 +943,33 @@ class LauncherApp:
     def _wait_until_healthy(
         self, port: int, *, interval: float = 2.0, timeout: float = 120.0
     ) -> None:
+        """Wait until n8n is usable, not just listening.
+
+        ``/healthz`` turns 200 long before n8n is ready: right after boot n8n
+        performs an internal warm restart during which every route answers 404
+        (transient observed on n8n 2.33.x). Polling ``/api/v1/workflows`` until
+        the router responds with a "mounted" status (200/401/403) closes that
+        window, so the owner bootstrap and workflow import that follow never
+        land on a spurious 404.
+        """
         deadline = time.monotonic() + timeout
         url = f"http://127.0.0.1:{port}/healthz"
+        api_url = f"http://127.0.0.1:{port}/api/v1/workflows"
         while True:
             try:
                 response = requests.get(url, timeout=2.0)
-                if response.ok:
-                    return
+                healthy = response.ok
             except requests.RequestException:
-                pass
+                healthy = False
+            if healthy:
+                try:
+                    api_response = requests.get(api_url, timeout=2.0)
+                except requests.RequestException:
+                    api_response = None
+                # 200/401/403: the public API router is mounted and answering
+                # (401 simply means this request carried no usable key).
+                if api_response is not None and _api_router_mounted(api_response):
+                    return
             if time.monotonic() >= deadline:
                 raise RuntimeError(
                     f"n8n did not become ready on {url} within {timeout:.0f}s"

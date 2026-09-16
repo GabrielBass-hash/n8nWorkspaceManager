@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from dataclasses import replace
@@ -18,6 +19,7 @@ from ..docker.compose import write_compose
 from ..docker.manager import DockerManager, DockerError, parse_compose_status
 from ..git import (
     GitError,
+    ensure_gitignore,
     git_add,
     git_add_remote,
     git_commit,
@@ -28,12 +30,14 @@ from ..git import (
     git_pull,
     git_push,
     git_remote_url,
+    git_remove_remote,
     git_set_remote_url,
 )
 from ..n8n.api import N8nApiClient, N8nApiError
 from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
+from . import ci
 
 
 logger = logging.getLogger(__name__)
@@ -164,7 +168,7 @@ class WorkspaceManager:
         if unknown:
             raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
         updated = replace(current, **changes)
-        if "workflows_dir" in changes or "port" in changes:
+        if any(key in changes for key in ("workflows_dir", "port", "db")):
             updated.restart_required = True
         config.workspaces[config.workspaces.index(current)] = updated
         self.store.save(config)
@@ -232,23 +236,41 @@ class WorkspaceManager:
 
         Called automatically when an n8n instance is stopped (exported
         workflows are committed and pushed so the repository tracks the last
-        known state).
+        known state). Git failures never raise: they degrade to the
+        ``git_push_failed`` flag that the chip surfaces, so the close sequence
+        is never blocked by repository problems.
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             return
         message = f"n8n-launcher: sync workflows [{datetime.now().isoformat(timespec='seconds')}]"
-        git_add(workspace.workflows_dir)
-        committed = git_commit(workspace.workflows_dir, message)
+        self._commit_and_push(workspace, message, push=push)
+
+    def _commit_and_push(self, workspace: Workspace, message: str, *, push: bool = True) -> bool:
+        """Stage everything, commit with *message*, and push when requested.
+
+        Mirrors ``sync_git``'s semantics: git failures never raise — they
+        degrade to the ``git_push_failed`` flag that the UI chip surfaces.
+        Returns True when a commit was actually created.
+        """
+        committed = False
+        try:
+            git_add(workspace.workflows_dir)
+            committed = git_commit(workspace.workflows_dir, message)
+        except GitError as exc:
+            logger.warning("git stage/commit failed for %s: %s", workspace.name, exc)
+            self._set_git_push_failed(workspace, True)
+            return committed
         if committed:
-            logger.info("Committed workflow changes for %s", workspace.name)
+            logger.info("Committed for %s: %s", workspace.name, message)
         if push and (committed or git_has_unpushed_commits(workspace.workflows_dir)):
             try:
                 git_push(workspace.workflows_dir)
             except GitError as exc:
                 logger.warning("git push failed for %s: %s", workspace.name, exc)
                 self._set_git_push_failed(workspace, True)
-                return
+                return committed
             self._set_git_push_failed(workspace, False)
+        return committed
 
     def _set_git_push_failed(self, workspace: Workspace, failed: bool) -> None:
         """Persist the push-failed flag (and mirror it on the in-memory object)."""
@@ -262,11 +284,16 @@ class WorkspaceManager:
         """Initialize a git repository in the workspace folder."""
         if not git_is_repo(workspace.workflows_dir):
             git_init(workspace.workflows_dir)
+        ensure_gitignore(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
             else:
                 git_add_remote(workspace.workflows_dir, "origin", remote_url)
+        elif git_has_remote(workspace.workflows_dir):
+            # Clearing the URL must really detach the repo, otherwise the stale
+            # origin would keep being pushed to while the UI shows no remote.
+            git_remove_remote(workspace.workflows_dir, "origin")
         config = self.store.load()
         workspace = self._find(config, workspace.id)
         workspace.git = GitConfig(enabled=True, remote_url=remote_url)
@@ -279,19 +306,183 @@ class WorkspaceManager:
             return None
         return git_remote_url(workspace.workflows_dir)
 
+    def configure_db(self, workspace: Workspace, db: DbConfig) -> Workspace:
+        """Switch or update the workspace database configuration.
+
+        Enabling a ``MANAGED`` DB on a workspace that has none scaffolds the
+        ``db/`` layout (migrations dir + schema) so the start flow can detect
+        and apply migrations on the next launch. Missing credentials are
+        filled with the usual defaults / a fresh random password.
+
+        The identity (name/user/password) of an already-managed database is
+        immutable: the Postgres role and the n8n credential were created with
+        the current values, so swapping them here would orphan both until the
+        next ``ALTER ROLE`` — which ``ensure()`` never performs. To change the
+        identity, switch the workspace back to ``NONE`` and re-enable
+        ``MANAGED``, which regenerates everything.
+        """
+        if db.mode is DbMode.MANAGED:
+            if workspace.db.mode is DbMode.MANAGED:
+                same_identity = (
+                    (db.database_name or None) == workspace.db.database_name
+                    and (db.username or None) == workspace.db.username
+                    and db.password == workspace.db.password
+                )
+                if same_identity:
+                    return workspace
+                db = replace(
+                    db,
+                    database_name=workspace.db.database_name,
+                    username=workspace.db.username,
+                    password=workspace.db.password,
+                )
+                logger.warning(
+                    "Ignoring DB identity change for managed workspace %s",
+                    workspace.name,
+                )
+            else:
+                db.database_name = db.database_name or "data"
+                db.username = db.username or "n8ndata"
+                db.password = db.password or secrets.token_hex(16)
+                self._scaffold(workspace.workflows_dir, db)
+        return self.update(workspace.id, db=db)
+
     def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
-        """Attach or update a remote for an existing git repository."""
+        """Attach, update or detach the remote of an existing git repository."""
         config = self.store.load()
         workspace = self._find(config, workspace.id)
+        ensure_gitignore(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
             else:
                 git_add_remote(workspace.workflows_dir, "origin", remote_url)
+        elif git_has_remote(workspace.workflows_dir):
+            # Detach for real: an empty URL must not leave a stale origin that
+            # keeps being pushed to behind the launcher's back.
+            git_remove_remote(workspace.workflows_dir, "origin")
         workspace.git = GitConfig(enabled=True, remote_url=remote_url)
         workspace.git_push_failed = False
         self.store.save(config)
         logger.info("Configured git for %s", workspace.name)
+
+    def enable_ci(self, workspace: Workspace) -> Workspace:
+        """Generate the CI harness in the workspace repository and enable CI.
+
+        Requires a real git repository with a GitHub remote: without one there
+        is nowhere for a GitHub Actions workflow to run. The persisted
+        selection (``tests.json``) is preserved across disable/re-enable
+        cycles instead of being reset.
+        """
+        if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
+            raise WorkspaceError(
+                "Les tests GitHub Actions nécessitent un dépôt Git (configurez Git d'abord)."
+            )
+        if ci.github_repo_path(self.git_remote_url(workspace)) is None:
+            raise WorkspaceError(
+                "Les tests GitHub Actions nécessitent un dépôt distant GitHub "
+                "(ex. https://github.com/utilisateur/repo.git)."
+            )
+        files = ci.render_harness(workspace.n8n_version)
+        selection = ci.selection_path(workspace.workflows_dir)
+        for rel, content in files.items():
+            if rel == f"{ci.CI_DIR}/{ci.SELECTION_FILE}":
+                if not selection.exists():
+                    selection.parent.mkdir(parents=True, exist_ok=True)
+                    selection.write_text(content, encoding="utf-8")
+                continue
+            target = workspace.workflows_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = replace(workspace.git, ci_enabled=True)
+        config.workspaces[config.workspaces.index(workspace)] = workspace
+        self.store.save(config)
+        self._commit_and_push(workspace, "n8n-launcher: activer les tests GitHub Actions")
+        logger.info("Enabled CI for %s", workspace.name)
+        return workspace
+
+    def disable_ci(self, workspace: Workspace) -> Workspace:
+        """Remove the generated CI harness while keeping the pipeline selection."""
+        for rel in ci.DISABLE_FILES:
+            target = workspace.workflows_dir / rel
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove %s: %s", target, exc)
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = replace(workspace.git, ci_enabled=False)
+        config.workspaces[config.workspaces.index(workspace)] = workspace
+        self.store.save(config)
+        self._commit_and_push(workspace, "n8n-launcher: désactiver les tests GitHub Actions")
+        logger.info("Disabled CI for %s", workspace.name)
+        return workspace
+
+    def set_ci_credentials(
+        self, workspace: Workspace, credentials: list[dict[str, Any]]
+    ) -> Workspace:
+        """Record the metadata of the credentials included in the CI secret.
+
+        Only ``name`` and ``type`` are persisted — never the values. The
+        values themselves live in the ``N8N_CI_CREDENTIALS`` GitHub secret,
+        which is why this call never touches the repository.
+        """
+        clean = [
+            {"name": item.get("name"), "type": item.get("type")} for item in credentials
+        ]
+        config = self.store.load()
+        workspace = self._find(config, workspace.id)
+        workspace.git = replace(workspace.git, ci_credentials=clean)
+        config.workspaces[config.workspaces.index(workspace)] = workspace
+        self.store.save(config)
+        logger.info("Recorded %d CI credential(s) for %s", len(clean), workspace.name)
+        return workspace
+
+    def save_ci_selection(
+        self, workspace: Workspace, selected: set[str], *, push: bool = False
+    ) -> Workspace:
+        """Persist the pipeline selection and optionally commit/push it."""
+        ci.write_selection(workspace.workflows_dir, set(selected))
+        if push:
+            self._commit_and_push(
+                workspace, "n8n-launcher: mettre à jour les tests GitHub Actions"
+            )
+        return workspace
+
+    def ci_credentials_payload(
+        self, workspace: Workspace, selected: list[dict[str, Any]]
+    ) -> str:
+        """Build the JSON pasted as the ``N8N_CI_CREDENTIALS`` GitHub secret.
+
+        Reads the credential values live from the workspace's n8n instance
+        (the public list endpoint never exposes ``data``) and returns a JSON
+        document of ``{name, type, data}`` items. The workspace must have an
+        API key for the values to be readable.
+        """
+        if not workspace.api_key:
+            raise WorkspaceError(
+                "Le workspace doit avoir été démarré une fois pour exporter ses credentials."
+            )
+        api = self.api_factory(workspace, workspace.api_key)
+        wanted = {(item.get("name"), item.get("type")) for item in selected}
+        listed = api.list_credentials()
+        found: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in listed:
+            key = (item.get("name"), item.get("type"))
+            if key in wanted and key not in found:
+                found[key] = item
+        missing = wanted - set(found)
+        if missing:
+            names = ", ".join(f"{name} ({ctype})" for name, ctype in sorted(missing))
+            raise WorkspaceError(f"Credentials introuvables dans n8n : {names}")
+        payload: list[dict[str, Any]] = []
+        for (name, ctype), item in found.items():
+            detail = api.get_credential(str(item["id"]))
+            payload.append({"name": name, "type": ctype, "data": detail.get("data") or {}})
+        return json.dumps(payload, indent=2, ensure_ascii=False)
 
     def start(self, workspace_id: str) -> Workspace:
         """Write Compose, bring the stack up, and apply managed migrations."""

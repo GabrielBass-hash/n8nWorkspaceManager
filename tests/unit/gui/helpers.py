@@ -14,15 +14,20 @@ class FakeTk:
 
     class Frame:
         def __init__(self, _parent, **kwargs):
+            self._parent = _parent
             self.children: list[object] = []
             self._options = dict(kwargs)
             self.destroyed = False
             self._bindings: dict[str, object] = {}
 
         def pack(self, *_args, **_kwargs) -> None:
-            pass
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
 
         def config(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+        def configure(self, **kwargs) -> None:
             self._options.update(kwargs)
 
         def destroy(self) -> None:
@@ -48,6 +53,9 @@ class FakeTk:
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
 
+        def configure(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
 
@@ -67,6 +75,160 @@ class FakeTk:
 
         def pack(self, *_args, **_kwargs) -> None:
             self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+    class Canvas:
+        def __init__(self, _parent, **kwargs):
+            self._options = dict(kwargs)
+            self._bindings: dict[str, object] = {}
+            self._window_id = 0
+            self._items: list[object] = []
+            self.scrolled = 0
+
+        def pack(self, *_args, **_kwargs) -> None:
+            pass
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def create_window(self, _x: int, _y: int, **kwargs) -> int:
+            self._window_id += 1
+            self._window_kwargs = dict(kwargs)
+            self._items.append(kwargs.get("window"))
+            return self._window_id
+
+        def itemconfigure(self, _item_id, **kwargs) -> None:
+            self._item_kwargs = dict(kwargs)
+
+        def yview_scroll(self, _n: int, _what: str) -> None:
+            self.scrolled += 1
+
+        def bbox(self, _tag: str):
+            return (0, 0, 800, 600)
+
+        def config(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+    class StringVar:
+        def __init__(self, value=""):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value) -> None:
+            self._value = value
+
+    class IntVar:
+        def __init__(self, value=0):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value) -> None:
+            self._value = value
+
+    class Checkbutton:
+        def __init__(self, parent, **kwargs):
+            self._parent = parent
+            self.text = kwargs.get("text")
+            self.variable = kwargs.get("variable")
+            self._options = dict(kwargs)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def select(self) -> None:
+            self.variable.set(1)
+
+        def deselect(self) -> None:
+            self.variable.set(0)
+
+    class Toplevel:
+        # Test hook: when True, ``wait_window`` simulates an Escape / cancel
+        # instead of pressing Return (used to cover both dialog paths).
+        cancel_on_wait = False
+        # Every created dialog is recorded so tests can inspect widgets after
+        # ``wait_window`` has driven the submit/cancel callback.
+        instances: list["FakeTk.Toplevel"] = []
+
+        def __init__(self, _parent, **_kwargs):
+            self.children: list[object] = []
+            self._options = {}
+            self._bindings: dict[str, object] = {}
+            self.destroyed = False
+            self._clipboard = ""
+            FakeTk.Toplevel.instances.append(self)
+
+        def title(self, _value: str) -> None:
+            pass
+
+        def configure(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+        def resizable(self, *_args) -> None:
+            pass
+
+        def transient(self, _root) -> None:
+            pass
+
+        def grab_set(self) -> None:
+            pass
+
+        def update_idletasks(self) -> None:
+            pass
+
+        def geometry(self, value: str) -> None:
+            self._geometry = value
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+        def wait_window(self) -> None:
+            """Drive the dialog: act as if the user pressed Return, or Escape."""
+            for child in self.children:
+                handler = getattr(child, "_bindings", {}).get("<Return>")
+                if handler is not None and not self.cancel_on_wait:
+                    handler(None)
+                    return
+            escape = self._bindings.get("<Escape>")
+            if escape is not None:
+                escape(None)
+
+        def clipboard_clear(self) -> None:
+            self._clipboard = ""
+
+        def clipboard_append(self, text: str) -> None:
+            self._clipboard += text
+
+    class Entry:
+        def __init__(self, parent, **kwargs):
+            self._parent = parent
+            self._options = dict(kwargs)
+            self._bindings: dict[str, object] = {}
+
+        def pack(self, *_args, **_kwargs) -> None:
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def focus_set(self) -> None:
+            self._focused = True
+
+    class Radiobutton:
+        def __init__(self, parent, **kwargs):
+            self._parent = parent
+            self._options = dict(kwargs)
+
+        def pack(self, *_args, **_kwargs) -> None:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
@@ -103,6 +265,66 @@ class FakeTtk:
 
         def pack(self, *_args, **_kwargs) -> None:
             self.packed = True
+
+    class Treeview:
+        instances: list["FakeTtk.Treeview"] = []
+
+        def __init__(self, _parent, **kwargs):
+            self._options = dict(kwargs)
+            self._items: dict[str, dict[str, object]] = {}
+            self._bindings: dict[str, object] = {}
+            self._headings: dict[str, object] = {}
+            self.packed = False
+            FakeTtk.Treeview.instances.append(self)
+
+        def heading(self, column: str, **kwargs) -> None:
+            self._headings[column] = dict(kwargs)
+
+        def column(self, _column: str, **_kwargs) -> None:
+            pass
+
+        def tag_configure(self, _tag: str, **_kwargs) -> None:
+            pass
+
+        def configure(self, **kwargs) -> None:
+            self._options.update(kwargs)
+
+        def insert(self, parent: str, index: int, iid=None, text="", values=(), tags=(), **kwargs):
+            item_id = iid if iid is not None else f"item{len(self._items)}"
+            entry = {"parent": parent, "text": text, "values": list(values), "tags": list(tags)}
+            entry.update(kwargs)
+            entry.update({k: v for k, v in kwargs.items()})
+            self._items[item_id] = entry
+            return item_id
+
+        def item(self, iid: str, **kwargs):
+            """Get all options when no kwargs, else update the stored ones."""
+            if kwargs:
+                self._items[iid].update(kwargs)
+            return dict(self._items[iid])
+
+        def get_children(self, iid: str = "") -> list[str]:
+            return [
+                item_id
+                for item_id, entry in self._items.items()
+                if entry.get("parent") == iid
+            ]
+
+        def bind(self, sequence: str, handler) -> None:
+            self._bindings[sequence] = handler
+
+        def identify(self, _region: str, _x: int, _y: int) -> str:
+            return "tree"
+
+        def identify_row(self, _y: int) -> str | None:
+            return next(iter(self._items), None)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+
+        def set(self, iid: str, column: str, value: object) -> None:
+            entry = self._items[iid]
+            entry["values"][int(column)] = value
 
 
 class FakeRoot:
@@ -224,24 +446,8 @@ def row_label(app, workspace_id: str) -> FakeTk.Label:
     return app.app._rows[workspace_id][1]
 
 
-def row_delete_button(app, workspace_id: str):
-    frame = app.app._rows[workspace_id][0]
-    for child in frame.children:
-        if isinstance(child, FakeTk.Button) and child.text == "×":
-            return child
-    raise AssertionError(f"no delete button in row {workspace_id}")
-
-
 def row_text(app, workspace_id: str) -> str:
     return row_label(app, workspace_id)._options["text"]
-
-
-def row_status_label(app, workspace_id: str):
-    return app.app._rows[workspace_id][0].status_label
-
-
-def row_status_text(app, workspace_id: str) -> str:
-    return row_status_label(app, workspace_id)._options["text"]
 
 
 def row_chip(app, workspace_id: str, attr: str):

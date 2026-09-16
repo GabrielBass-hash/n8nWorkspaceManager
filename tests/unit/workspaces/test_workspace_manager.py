@@ -1,10 +1,11 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, GitConfig, WorkspaceState
+from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
 from n8n_launcher.docker.manager import ComposeStatus, DockerError
 from n8n_launcher.git import GitError
 from n8n_launcher.n8n.api import N8nApiError
@@ -499,6 +500,52 @@ def test_sync_git_swallows_push_failure_and_flags_workspace(tmp_path: Path) -> N
     assert store.load().workspaces[0].git_push_failed is True
 
 
+def test_sync_git_swallows_stage_failure_and_flags_workspace(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True)
+    store.save(config)
+    workspace.git = GitConfig(enabled=True)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_add", side_effect=GitError("stage boom")),
+        patch("n8n_launcher.workspaces.manager.git_commit") as commit,
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+    ):
+        launcher.sync_git(workspace)  # must not raise and must not block close
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    assert workspace.git_push_failed is True
+    assert store.load().workspaces[0].git_push_failed is True
+
+
+def test_sync_git_swallows_commit_failure_and_flags_workspace(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True)
+    store.save(config)
+    workspace.git = GitConfig(enabled=True)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_add"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_commit",
+            side_effect=GitError("commit boom"),
+        ),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+    ):
+        launcher.sync_git(workspace)  # must not raise and must not block close
+
+    push.assert_not_called()
+    assert workspace.git_push_failed is True
+    assert store.load().workspaces[0].git_push_failed is True
+
+
 def test_sync_git_clears_push_failed_after_success(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
@@ -532,17 +579,40 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_init") as init,
+        patch("n8n_launcher.workspaces.manager.ensure_gitignore") as ensure_ignore,
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_add_remote") as add_remote,
     ):
         launcher.git_init_workspace(workspace, remote_url="https://example.test/repo.git")
 
     init.assert_called_once_with(workspace.workflows_dir)
+    ensure_ignore.assert_called_once_with(workspace.workflows_dir)
     add_remote.assert_called_once_with(workspace.workflows_dir, "origin", "https://example.test/repo.git")
     stored = store.load().workspaces[0]
     assert stored.git.enabled is True
     assert stored.git.remote_url == "https://example.test/repo.git"
     assert stored.git_push_failed is False
+
+
+def test_git_init_workspace_detaches_remote_when_url_cleared(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True) as is_repo,
+        patch("n8n_launcher.workspaces.manager.git_init") as init,
+        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove_remote,
+    ):
+        launcher.git_init_workspace(workspace, remote_url=None)
+
+    is_repo.assert_called_once()
+    init.assert_not_called()
+    remove_remote.assert_called_once_with(workspace.workflows_dir, "origin")
+    stored = store.load().workspaces[0]
+    assert stored.git.enabled is True
+    assert stored.git.remote_url is None
 
 
 def test_git_init_workspace_reuses_existing_repo(tmp_path: Path) -> None:
@@ -571,6 +641,7 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     store.save(config)
 
     with (
+        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url") as set_url,
     ):
@@ -581,6 +652,114 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     assert stored.git.enabled is True
     assert stored.git.remote_url == "https://example.test/other.git"
     assert stored.git_push_failed is False
+
+
+def test_configure_git_detaches_remote_when_url_cleared(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True, remote_url="https://example.test/repo.git")
+    config.workspaces[0].git_push_failed = True
+    store.save(config)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove_remote,
+    ):
+        launcher.configure_git(workspace, remote_url=None)
+
+    remove_remote.assert_called_once_with(workspace.workflows_dir, "origin")
+    stored = store.load().workspaces[0]
+    assert stored.git.enabled is True
+    assert stored.git.remote_url is None
+    assert stored.git_push_failed is False
+
+
+def test_configure_db_switches_to_managed_and_scaffolds(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    assert not (workspace.workflows_dir / "db").exists()
+
+    updated = launcher.configure_db(
+        workspace, DbConfig(DbMode.MANAGED, database_name="data", username="n8ndata", password="pw")
+    )
+
+    assert (workspace.workflows_dir / "db" / "migrations").is_dir()
+    assert (workspace.workflows_dir / "db" / "schema.sql").is_file()
+    stored = store.load().workspaces[0]
+    assert stored.db.mode is DbMode.MANAGED
+    assert stored.db.database_name == "data"
+    assert stored.db.password == "pw"
+    assert updated.restart_required is True
+
+
+def test_configure_db_fills_missing_managed_defaults(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    launcher.configure_db(workspace, DbConfig(DbMode.MANAGED))
+
+    stored = store.load().workspaces[0]
+    assert stored.db.database_name == "data"
+    assert stored.db.username == "n8ndata"
+    assert len(stored.db.password) >= 16
+
+
+def test_configure_db_disables_managed(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = launcher.create(
+        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
+    )
+
+    updated = launcher.configure_db(workspace, DbConfig(DbMode.NONE))
+
+    assert store.load().workspaces[0].db.mode is DbMode.NONE
+    assert updated.restart_required is True
+
+
+def test_configure_db_keeps_identity_of_existing_managed_db(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = launcher.create(
+        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
+    )
+    original = store.load().workspaces[0].db
+
+    # A new password/name/user on an already-started managed DB would orphan
+    # the Postgres role and the n8n credential — the values must stay put.
+    updated = launcher.configure_db(
+        workspace,
+        DbConfig(DbMode.MANAGED, database_name="other", username="other", password="hacked-pass"),
+    )
+
+    stored = store.load().workspaces[0].db
+    assert stored.database_name == original.database_name
+    assert stored.username == original.username
+    assert stored.password == original.password
+    assert updated.db == stored
+
+
+def test_configure_db_managed_noop_when_identity_unchanged(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = launcher.create(
+        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
+    )
+    original = store.load().workspaces[0]
+
+    # Re-saving the same identity must not flip restart_required.
+    updated = launcher.configure_db(
+        workspace,
+        DbConfig(
+            DbMode.MANAGED,
+            database_name=original.db.database_name or "data",
+            username=original.db.username or "n8ndata",
+            password=original.db.password,
+        ),
+    )
+
+    assert updated.state is original.state
+    assert updated.restart_required is False
+    assert store.load().workspaces[0].db == original.db
 
 
 def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> None:
@@ -630,3 +809,200 @@ def test_ensure_running_skips_pull_when_git_disabled(tmp_path: Path) -> None:
         launcher.ensure_running(launcher.list()[0].id)
 
     pull.assert_not_called()
+
+
+def github_workspace(launcher, store, tmp_path: Path, port: int = 5701) -> Workspace:
+    """Create a workspace persisted with git + GitHub remote enabled."""
+    workspace = create_none(launcher, tmp_path, port=port)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(
+        enabled=True, remote_url="https://github.com/owner/repo.git"
+    )
+    store.save(config)
+    return launcher.list()[0]
+
+
+def test_enable_ci_writes_harness_and_commits(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="https://github.com/owner/repo.git"),
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
+        enabled = launcher.enable_ci(workspace)
+
+    assert enabled.git.ci_enabled is True
+    assert (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").is_file()
+    assert (workspace.workflows_dir / ".n8n-tests" / "runner.py").is_file()
+    assert (workspace.workflows_dir / ".n8n-tests" / "validate.py").is_file()
+    assert (workspace.workflows_dir / ".n8n-tests" / "tests.json").is_file()
+    workflow = (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").read_text(encoding="utf-8")
+    assert "n8n-launcher : généré" in workflow
+    assert "N8N_CI_CREDENTIALS" in workflow
+    commit.assert_called_once()
+    assert store.load().workspaces[0].git.ci_enabled is True
+
+
+def test_enable_ci_requires_git_repo(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
+        with pytest.raises(WorkspaceError, match="dépôt Git"):
+            launcher.enable_ci(workspace)
+
+    commit.assert_not_called()
+    assert store.load().workspaces[0].git.ci_enabled is False
+
+
+def test_enable_ci_requires_github_remote(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True, remote_url="git@gitlab.com:u/r.git")
+    store.save(config)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="git@gitlab.com:u/r.git"),
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
+        with pytest.raises(WorkspaceError, match="GitHub"):
+            launcher.enable_ci(workspace)
+
+    commit.assert_not_called()
+
+
+def test_enable_ci_preserves_existing_selection(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+    selection = workspace.workflows_dir / ".n8n-tests" / "tests.json"
+    selection.parent.mkdir(parents=True)
+    selection.write_text('{"selected": ["n8nPipelines/keep.json"]}', encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="https://github.com/owner/repo.git"),
+        patch.object(launcher, "_commit_and_push"),
+    ):
+        launcher.enable_ci(workspace)
+
+    assert '"n8nPipelines/keep.json"' in selection.read_text(encoding="utf-8")
+
+
+def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="https://github.com/owner/repo.git"),
+        patch.object(launcher, "_commit_and_push"),
+    ):
+        launcher.enable_ci(workspace)
+    selection = workspace.workflows_dir / ".n8n-tests" / "tests.json"
+    selection.write_text('{"selected": ["n8nPipelines/keep.json"]}', encoding="utf-8")
+
+    with patch.object(launcher, "_commit_and_push") as commit:
+        disabled = launcher.disable_ci(launcher.list()[0])
+
+    assert disabled.git.ci_enabled is False
+    assert not (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").exists()
+    assert not (workspace.workflows_dir / ".n8n-tests" / "runner.py").exists()
+    assert not (workspace.workflows_dir / ".n8n-tests" / "validate.py").exists()
+    assert selection.exists()
+    commit.assert_called_once()
+
+
+def test_save_ci_selection_persists_without_push(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with patch.object(launcher, "_commit_and_push") as commit:
+        updated = launcher.save_ci_selection(workspace, {"n8nPipelines/a.json"})
+
+    selection = (workspace.workflows_dir / ".n8n-tests" / "tests.json").read_text(encoding="utf-8")
+    assert '"n8nPipelines/a.json"' in selection
+    commit.assert_not_called()
+    assert updated is not None
+
+
+def test_save_ci_selection_pushes_when_requested(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with patch.object(launcher, "_commit_and_push") as commit:
+        launcher.save_ci_selection(workspace, {"n8nPipelines/a.json"}, push=True)
+
+    commit.assert_called_once_with(
+        workspace, "n8n-launcher: mettre à jour les tests GitHub Actions"
+    )
+
+
+def test_set_ci_credentials_records_metadata_only(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    launcher.set_ci_credentials(
+        workspace, [{"name": "API", "type": "httpRequest", "data": {"password": "sekret"}}]
+    )
+
+    stored = store.load().workspaces[0]
+    assert stored.git.ci_credentials == [{"name": "API", "type": "httpRequest"}]
+    assert "sekret" not in str(stored.git.ci_credentials)
+
+
+def test_ci_credentials_payload_reads_values_from_api(tmp_path: Path) -> None:
+    fake_api = MagicMock()
+    fake_api.list_credentials.return_value = [
+        {"id": "c1", "name": "API", "type": "httpRequest"}
+    ]
+    fake_api.get_credential.return_value = {
+        "id": "c1", "name": "API", "type": "httpRequest", "data": {"user": "u", "password": "p"}
+    }
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    launcher = WorkspaceManager(
+        store, MagicMock(), api_factory=MagicMock(return_value=fake_api)
+    )
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].api_key = "key"
+    store.save(config)
+
+    payload = launcher.ci_credentials_payload(
+        launcher.list()[0], [{"name": "API", "type": "httpRequest"}]
+    )
+
+    assert json.loads(payload) == [
+        {"name": "API", "type": "httpRequest", "data": {"user": "u", "password": "p"}}
+    ]
+
+
+def test_ci_credentials_payload_requires_api_key(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with pytest.raises(WorkspaceError, match="démarré"):
+        launcher.ci_credentials_payload(workspace, [{"name": "API", "type": "httpRequest"}])
+
+
+def test_ci_credentials_payload_reports_missing(tmp_path: Path) -> None:
+    fake_api = MagicMock()
+    fake_api.list_credentials.return_value = [{"id": "c1", "name": "Other", "type": "postgres"}]
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    launcher = WorkspaceManager(store, MagicMock(), api_factory=MagicMock(return_value=fake_api))
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].api_key = "key"
+    store.save(config)
+
+    with pytest.raises(WorkspaceError, match="introuvables"):
+        launcher.ci_credentials_payload(
+            launcher.list()[0], [{"name": "API", "type": "httpRequest"}]
+        )

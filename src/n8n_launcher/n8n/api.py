@@ -70,6 +70,14 @@ class N8nApiClient:
             return list(payload)
         return list(payload.get("data", []))
 
+    def get_credential(self, credential_id: str) -> dict[str, Any]:
+        """Return a single credential, including its secret ``data``.
+
+        The public list endpoint deliberately omits the decrypted ``data``; the
+        CI credentials flow needs it, so it is fetched per credential here.
+        """
+        return self._request("GET", f"/credentials/{credential_id}")
+
     def create_credential(self, credential: dict[str, Any]) -> dict[str, Any]:
         """Create a new credential."""
         return self._request("POST", "/credentials", json=credential)

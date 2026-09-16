@@ -33,8 +33,14 @@ class MigrationRunner:
             return
         target = data_db_target(workspace)
         assert target is not None
+        # A plain LOGIN role owning its database is enough for schema/migration
+        # work. TimescaleDB nevertheless requires a SUPERUSER to run
+        # ``CREATE EXTENSION timescaledb``, so keep the privilege in that case.
+        privileges = "LOGIN SUPERUSER" if workspace.postgres_preload_timescaledb else "LOGIN"
         role_module = (
-            "SELECT format('CREATE ROLE %I LOGIN SUPERUSER PASSWORD %L', "
+            "SELECT format('CREATE ROLE %I "
+            + privileges
+            + " PASSWORD %L', "
             + _sql_literal(target.user)
             + ", "
             + _sql_literal(target.password)

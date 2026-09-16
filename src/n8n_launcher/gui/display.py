@@ -14,6 +14,7 @@ from ..git import (
     git_is_repo,
     git_remote_url,
 )
+from ..workspaces import ci
 
 
 def git_repo_status(workflows_dir: Path) -> bool:
@@ -60,6 +61,7 @@ class GitRowStatus:
     diverged: bool = False
     push_failed: bool = False
     remote_url: str | None = None
+    ci_enabled: bool = False
 
     @property
     def tooltip(self) -> str:
@@ -72,6 +74,8 @@ class GitRowStatus:
             lines.append("Commits à pousser vers le dépôt distant")
         if self.push_failed:
             lines.append("Le dernier push a échoué")
+        if self.ci_enabled:
+            lines.append("Tests GitHub Actions activés")
         return "\n".join(lines) if lines else "Dépôt Git initialisé (aucun dépôt distant)"
 
 
@@ -87,6 +91,7 @@ def git_row_status(workspace: Workspace) -> GitRowStatus:
         diverged=has_remote and git_has_unpushed_commits(folder),
         push_failed=workspace.git_push_failed,
         remote_url=git_remote_url(folder) if has_remote else None,
+        ci_enabled=workspace.git.ci_enabled,
     )
 
 
@@ -108,3 +113,25 @@ def format_row(workspace: Workspace) -> str:
         f"| db {db_label(workspace)} | git {git_label(workspace)} "
         f"| n8nPipelines {pipelines_count(workspace.workflows_dir)}"
     )
+
+
+def ci_enabled(workspace: Workspace) -> bool:
+    """Return True when the workspace's GitHub Actions tests are enabled."""
+    return workspace.git.ci_enabled
+
+
+def ci_tooltip(workspace: Workspace) -> str:
+    """Return the CI chip tooltip with live selection counters."""
+    if not workspace.git.ci_enabled:
+        return "Tests GitHub Actions désactivés (cliquez pour configurer)"
+    provided = ci.provided_credentials(workspace.git.ci_credentials)
+    counts = ci.ci_counts(workspace.workflows_dir, provided)
+    lines = [
+        "Tests GitHub Actions activés :",
+        f"{counts['selected']} pipeline(s) sélectionnée(s) sur {counts['eligible']} testable(s)",
+    ]
+    if not counts["eligible"]:
+        lines.append("Aucune pipeline testable (déclencheurs ou credentials manquants)")
+    elif counts["selected_eligible"] < counts["selected"]:
+        lines.append("Certaines pipelines sélectionnées ne sont plus testables")
+    return "\n".join(lines)
