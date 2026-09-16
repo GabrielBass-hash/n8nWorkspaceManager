@@ -65,6 +65,18 @@ def open_n8n_app(url: str, profile_dir: Path) -> None:
     open_app(url, profile_dir=profile_dir)
 
 
+def _api_router_mounted(response: requests.Response) -> bool:
+    """Return True when the response proves the n8n public API router is up.
+
+    n8n serves ``/api/v1/*`` with 404 while its HTTP app is still warm
+    restarting after boot. 200/401/403 mean the router is mounted and reacting
+    (401 merely flags a missing or unusable API key). Unit-test fakes expose
+    only ``.ok``; an ok response is treated as mounted.
+    """
+    status = getattr(response, "status_code", 200 if response.ok else 404)
+    return status in (200, 401, 403)
+
+
 class LauncherApp:
     def __init__(
         self,
@@ -782,15 +794,33 @@ class LauncherApp:
     def _wait_until_healthy(
         self, port: int, *, interval: float = 2.0, timeout: float = 120.0
     ) -> None:
+        """Wait until n8n is usable, not just listening.
+
+        ``/healthz`` turns 200 long before n8n is ready: right after boot n8n
+        performs an internal warm restart during which every route answers 404
+        (transient observed on n8n 2.33.x). Polling ``/api/v1/workflows`` until
+        the router responds with a "mounted" status (200/401/403) closes that
+        window, so the owner bootstrap and workflow import that follow never
+        land on a spurious 404.
+        """
         deadline = time.monotonic() + timeout
         url = f"http://127.0.0.1:{port}/healthz"
+        api_url = f"http://127.0.0.1:{port}/api/v1/workflows"
         while True:
             try:
                 response = requests.get(url, timeout=2.0)
-                if response.ok:
-                    return
+                healthy = response.ok
             except requests.RequestException:
-                pass
+                healthy = False
+            if healthy:
+                try:
+                    api_response = requests.get(api_url, timeout=2.0)
+                except requests.RequestException:
+                    api_response = None
+                # 200/401/403: the public API router is mounted and answering
+                # (401 simply means this request carried no usable key).
+                if api_response is not None and _api_router_mounted(api_response):
+                    return
             if time.monotonic() >= deadline:
                 raise RuntimeError(
                     f"n8n did not become ready on {url} within {timeout:.0f}s"

@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
@@ -213,6 +215,50 @@ def test_launch_reports_health_timeout(app, gui_mocks) -> None:
 
     app.browser.assert_not_called()
     assert "did not become ready" in app.mocks.messagebox.errors[0]
+
+
+def test_wait_until_healthy_waits_through_api_404_window(app, gui_mocks) -> None:
+    # n8n answers /healthz with 200 long before it is usable: right after boot
+    # it warm-restarts and serves 404 on every route. The wait must keep
+    # polling the public API until the router is mounted again.
+    api_hits = {"count": 0}
+
+    def fake_get(url, *_args, **_kwargs):
+        if url.endswith("/healthz"):
+            return SimpleNamespace(ok=True)
+        api_hits["count"] += 1
+        if api_hits["count"] < 3:
+            return SimpleNamespace(ok=True, status_code=404)
+        return SimpleNamespace(ok=True, status_code=401)
+
+    with patch("n8n_launcher.gui.app.requests.get", side_effect=fake_get):
+        app.app._wait_until_healthy(5678)
+
+    assert api_hits["count"] >= 3
+
+
+def test_wait_until_healthy_times_out_when_router_stuck_on_404(app, gui_mocks) -> None:
+    def fake_get(url, *_args, **_kwargs):
+        if url.endswith("/healthz"):
+            return SimpleNamespace(ok=True)
+        return SimpleNamespace(ok=True, status_code=404)
+
+    with (
+        patch("n8n_launcher.gui.app.requests.get", side_effect=fake_get),
+        patch("n8n_launcher.gui.app.time.monotonic", side_effect=[0, 1, 300]),
+    ):
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            app.app._wait_until_healthy(5678)
+
+
+def test_wait_until_healthy_accepts_mounted_router(app, gui_mocks) -> None:
+    def fake_get(url, *_args, **_kwargs):
+        if url.endswith("/healthz"):
+            return SimpleNamespace(ok=True)
+        return SimpleNamespace(ok=True, status_code=200)
+
+    with patch("n8n_launcher.gui.app.requests.get", side_effect=fake_get):
+        app.app._wait_until_healthy(5678)
 
 
 def test_open_workflows_uses_xdg_open_on_linux(app, tmp_path) -> None:
