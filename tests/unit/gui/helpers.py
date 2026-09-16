@@ -122,12 +122,16 @@ class FakeTk:
         # Test hook: when True, ``wait_window`` simulates an Escape / cancel
         # instead of pressing Return (used to cover both dialog paths).
         cancel_on_wait = False
+        # Every created dialog is recorded so tests can inspect widgets after
+        # ``wait_window`` has driven the submit/cancel callback.
+        instances: list["FakeTk.Toplevel"] = []
 
         def __init__(self, _parent, **_kwargs):
             self.children: list[object] = []
             self._options = {}
             self._bindings: dict[str, object] = {}
             self.destroyed = False
+            FakeTk.Toplevel.instances.append(self)
 
         def title(self, _value: str) -> None:
             pass

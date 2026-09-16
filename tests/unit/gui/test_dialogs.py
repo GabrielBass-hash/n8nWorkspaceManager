@@ -285,6 +285,26 @@ def test_prompt_db_config_returns_submitted_managed_config(gui_mocks) -> None:
     assert result == expected
 
 
+def test_prompt_db_config_locks_identity_for_existing_managed(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+    expected = DbConfig(
+        DbMode.MANAGED, database_name="data", username="n8ndata", password="oldpass"
+    )
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk):
+        result = prompt_db_config(FakeRoot(), expected)
+
+    dialog = gui_mocks.tk.Toplevel.instances[0]
+    gui_entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+    assert len(gui_entries) == 3
+    assert all(entry._options.get("state") == "disabled" for entry in gui_entries)
+
+    gui_buttons = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Button)]
+    generate = next(button for button in gui_buttons if "Régénérer" in (button.text or ""))
+    assert generate._options.get("state") == "disabled"
+    assert result == expected
+
+
 def test_prompt_db_config_escape_returns_none(gui_mocks) -> None:
     toplevel = gui_mocks.tk.Toplevel
     saved = toplevel.cancel_on_wait

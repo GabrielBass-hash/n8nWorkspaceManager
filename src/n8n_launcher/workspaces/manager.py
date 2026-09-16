@@ -18,6 +18,7 @@ from ..docker.compose import write_compose
 from ..docker.manager import DockerManager, DockerError, parse_compose_status
 from ..git import (
     GitError,
+    ensure_gitignore,
     git_add,
     git_add_remote,
     git_commit,
@@ -28,6 +29,7 @@ from ..git import (
     git_pull,
     git_push,
     git_remote_url,
+    git_remove_remote,
     git_set_remote_url,
 )
 from ..n8n.api import N8nApiClient, N8nApiError
@@ -232,13 +234,20 @@ class WorkspaceManager:
 
         Called automatically when an n8n instance is stopped (exported
         workflows are committed and pushed so the repository tracks the last
-        known state).
+        known state). Git failures never raise: they degrade to the
+        ``git_push_failed`` flag that the chip surfaces, so the close sequence
+        is never blocked by repository problems.
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             return
         message = f"n8n-launcher: sync workflows [{datetime.now().isoformat(timespec='seconds')}]"
-        git_add(workspace.workflows_dir)
-        committed = git_commit(workspace.workflows_dir, message)
+        try:
+            git_add(workspace.workflows_dir)
+            committed = git_commit(workspace.workflows_dir, message)
+        except GitError as exc:
+            logger.warning("git stage/commit failed for %s: %s", workspace.name, exc)
+            self._set_git_push_failed(workspace, True)
+            return
         if committed:
             logger.info("Committed workflow changes for %s", workspace.name)
         if push and (committed or git_has_unpushed_commits(workspace.workflows_dir)):
@@ -262,11 +271,16 @@ class WorkspaceManager:
         """Initialize a git repository in the workspace folder."""
         if not git_is_repo(workspace.workflows_dir):
             git_init(workspace.workflows_dir)
+        ensure_gitignore(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
             else:
                 git_add_remote(workspace.workflows_dir, "origin", remote_url)
+        elif git_has_remote(workspace.workflows_dir):
+            # Clearing the URL must really detach the repo, otherwise the stale
+            # origin would keep being pushed to while the UI shows no remote.
+            git_remove_remote(workspace.workflows_dir, "origin")
         config = self.store.load()
         workspace = self._find(config, workspace.id)
         workspace.git = GitConfig(enabled=True, remote_url=remote_url)
@@ -286,24 +300,54 @@ class WorkspaceManager:
         ``db/`` layout (migrations dir + schema) so the start flow can detect
         and apply migrations on the next launch. Missing credentials are
         filled with the usual defaults / a fresh random password.
+
+        The identity (name/user/password) of an already-managed database is
+        immutable: the Postgres role and the n8n credential were created with
+        the current values, so swapping them here would orphan both until the
+        next ``ALTER ROLE`` — which ``ensure()`` never performs. To change the
+        identity, switch the workspace back to ``NONE`` and re-enable
+        ``MANAGED``, which regenerates everything.
         """
         if db.mode is DbMode.MANAGED:
-            db.database_name = db.database_name or "data"
-            db.username = db.username or "n8ndata"
-            db.password = db.password or secrets.token_hex(16)
-            if workspace.db.mode is not DbMode.MANAGED:
+            if workspace.db.mode is DbMode.MANAGED:
+                same_identity = (
+                    (db.database_name or None) == workspace.db.database_name
+                    and (db.username or None) == workspace.db.username
+                    and db.password == workspace.db.password
+                )
+                if same_identity:
+                    return workspace
+                db = replace(
+                    db,
+                    database_name=workspace.db.database_name,
+                    username=workspace.db.username,
+                    password=workspace.db.password,
+                )
+                logger.warning(
+                    "Ignoring DB identity change for managed workspace %s",
+                    workspace.name,
+                )
+            else:
+                db.database_name = db.database_name or "data"
+                db.username = db.username or "n8ndata"
+                db.password = db.password or secrets.token_hex(16)
                 self._scaffold(workspace.workflows_dir, db)
         return self.update(workspace.id, db=db)
 
     def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
-        """Attach or update a remote for an existing git repository."""
+        """Attach, update or detach the remote of an existing git repository."""
         config = self.store.load()
         workspace = self._find(config, workspace.id)
+        ensure_gitignore(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
             else:
                 git_add_remote(workspace.workflows_dir, "origin", remote_url)
+        elif git_has_remote(workspace.workflows_dir):
+            # Detach for real: an empty URL must not leave a stale origin that
+            # keeps being pushed to behind the launcher's back.
+            git_remove_remote(workspace.workflows_dir, "origin")
         workspace.git = GitConfig(enabled=True, remote_url=remote_url)
         workspace.git_push_failed = False
         self.store.save(config)
