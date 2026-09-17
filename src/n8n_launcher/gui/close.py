@@ -88,10 +88,12 @@ class CloseController:
     def _warn_push_failed(self, workspace: Workspace) -> None:
         if self._is_closed():
             return
+        # The flag is also raised by stage/commit failures, so word the message
+        # generically instead of claiming the push itself failed.
         messagebox.showwarning(
             "Synchronisation Git",
-            f"Les workflows de « {workspace.name} » ont été sauvegardés, mais le push\n"
-            "vers le dépôt distant a échoué (connexion ? permissions ?).\n"
+            f"Les workflows de « {workspace.name} » ont été sauvegardés, mais la\n"
+            "synchronisation vers le dépôt distant a échoué (connexion ? permissions ?).\n"
             "Les changements restent commités localement.",
             parent=self._root,
         )

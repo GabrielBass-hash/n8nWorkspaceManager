@@ -382,7 +382,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Compter les pipelines sélectionnées
+        id: selection
+        run: |
+          count=$(python -c "import json;print(len(json.load(open('.n8n-tests/tests.json', encoding='utf-8'))['selected']))" 2>/dev/null || echo 0)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
       - name: Lancer le runner de tests n8n
+        # Une sélection vide (aucun test coché) ne lance rien : le job passe
+        # « vert » sans démarrer de conteneur, au lieu d'exécuter l'ancienne
+        # sélection encore présente sur GitHub.
+        if: steps.selection.outputs.count != '0'
         env:
           N8N_IMAGE: ${{ vars.N8N_IMAGE }}
           N8N_CI_CREDENTIALS: ${{ secrets.N8N_CI_CREDENTIALS }}

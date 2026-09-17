@@ -111,6 +111,27 @@ def test_prompt_ci_workflows_save_returns_selection_and_push(tmp_path) -> None:
     assert result == ({"n8nPipelines/manual.json"}, True)
 
 
+def test_prompt_ci_workflows_save_asks_push_even_when_empty(tmp_path) -> None:
+    """Clearing every pipeline must still offer pushing the empty selection."""
+    root = tmp_path / "ws"
+    (root / "n8nPipelines").mkdir(parents=True)
+    (root / "n8nPipelines" / "manual.json").write_text(_MANUAL, encoding="utf-8")
+    workspace = make_workspace(tmp_path, "CI", 5678)
+    workspace.workflows_dir = root
+
+    tk_fake = _ReturnTk()
+    _ReturnTk.Toplevel.press_return = True
+    try:
+        with _patch_ci_editor(tk_fake) as (_, _, messagebox):
+            messagebox.askyesno.return_value = True
+            result = prompt_ci_workflows(FakeRoot(), workspace)
+    finally:
+        _ReturnTk.Toplevel.press_return = False
+
+    assert result == (set(), True)
+    messagebox.askyesno.assert_called_once()
+
+
 def test_prompt_ci_workflows_greys_ineligible_and_toggles(tmp_path) -> None:
     root = tmp_path / "ws"
     (root / "n8nPipelines").mkdir(parents=True)

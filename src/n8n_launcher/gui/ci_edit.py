@@ -210,14 +210,15 @@ def prompt_ci_workflows(
         update_caption()
 
     def save() -> None:
-        push = False
-        if selection:
-            push = messagebox.askyesno(
-                "Pousser maintenant ?",
-                "Pousser ces changements vers GitHub maintenant ?\n"
-                "Sinon ils seront inclus au prochain poussage (fermeture du workspace).",
-                parent=dialog,
-            )
+        # Demander le push même pour une sélection vide : sans cela, « Tout
+        # décocher » restait local et GitHub continuait d'exécuter l'ancienne
+        # sélection au prochain poussage.
+        push = messagebox.askyesno(
+            "Pousser maintenant ?",
+            "Pousser ces changements vers GitHub maintenant ?\n"
+            "Sinon ils seront inclus au prochain poussage (fermeture du workspace).",
+            parent=dialog,
+        )
         nonlocal result
         result = (set(selection), push)
         dialog.destroy()

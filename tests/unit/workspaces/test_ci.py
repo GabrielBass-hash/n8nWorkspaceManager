@@ -302,6 +302,14 @@ def test_rendered_workflow_wires_secret_and_var() -> None:
     assert "python .n8n-tests/runner.py" in workflow
 
 
+def test_rendered_workflow_skips_test_job_when_empty_selection() -> None:
+    workflow = ci.render_harness("2.35.0")[ci.WORKFLOW_FILE]
+
+    assert "Compter les pipelines sélectionnées" in workflow
+    assert "steps.selection.outputs.count != '0'" in workflow
+    assert "python .n8n-tests/runner.py" in workflow
+
+
 def test_rendered_scripts_compile_and_validate_static_exports(tmp_path: Path) -> None:
     rendered = ci.render_harness("2.35.0")
     root = tmp_path / "ws"

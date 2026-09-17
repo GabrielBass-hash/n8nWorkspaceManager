@@ -593,7 +593,44 @@ class LauncherApp:
         if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
             self._launch_workspace(workspace)
         else:
-            self._run_async(lambda: self.workspace_manager.stop(workspace_id))
+            self._stop_with_sync(workspace)
+
+    def _stop_with_sync(self, workspace: Workspace) -> None:
+        """Export + Git-sync a workspace, then stop it (row-stop path).
+
+        Mirrors the close sequence so a manual stop also persists the latest
+        n8n state to the repository; without this, closing the app afterwards
+        skipped the already-stopped workspace and the export was lost.
+        """
+        workspace_id = workspace.id
+        self.set_status(f"Arrêt de « {workspace.name} » — synchronisation…")
+
+        def action() -> None:
+            self.workspace_manager.stop_with_sync(workspace_id)
+
+        def on_stopped() -> None:
+            # Re-read the persisted flag: the object captured above predates the
+            # git operations and would otherwise show a stale value.
+            current = next(
+                (
+                    item
+                    for item in self.workspace_manager.list()
+                    if item.id == workspace_id
+                ),
+                None,
+            )
+            if current is not None and current.git_push_failed:
+                messagebox.showwarning(
+                    "Synchronisation Git",
+                    f"Les workflows de « {current.name} » ont été synchronisés, mais le push\n"
+                    "vers le dépôt distant a échoué (connexion ? permissions ?).\n"
+                    "Les changements restent commités localement.",
+                    parent=self.root,
+                )
+            self.set_status(f"« {workspace.name} » arrêté.")
+            self.refresh()
+
+        self._run_async(action, on_success=on_stopped)
 
     def refresh(self) -> None:
         if self._closed:

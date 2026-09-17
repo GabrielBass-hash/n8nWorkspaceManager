@@ -12,7 +12,7 @@ from typing import Callable
 from uuid import uuid4
 
 from ..core.config import ConfigStore
-from ..core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
+from ..core.models import AppConfig, DbConfig, DbMode, Workspace, WorkspaceState
 from ..core.paths import compose_file
 from ..database import MigrationRunner, configure_db_credential, detect_migrations
 from ..docker.compose import write_compose
@@ -296,7 +296,10 @@ class WorkspaceManager:
             git_remove_remote(workspace.workflows_dir, "origin")
         config = self.store.load()
         workspace = self._find(config, workspace.id)
-        workspace.git = GitConfig(enabled=True, remote_url=remote_url)
+        # Keep the existing CI metadata: reconfiguring the remote must not
+        # silently turn the GitHub Actions workflow "off" in the app while the
+        # tracked workflow file keeps running on every push.
+        workspace.git = replace(workspace.git, enabled=True, remote_url=remote_url)
         workspace.git_push_failed = False
         self.store.save(config)
 
@@ -361,7 +364,10 @@ class WorkspaceManager:
             # Detach for real: an empty URL must not leave a stale origin that
             # keeps being pushed to behind the launcher's back.
             git_remove_remote(workspace.workflows_dir, "origin")
-        workspace.git = GitConfig(enabled=True, remote_url=remote_url)
+        # Keep CI metadata (enabled state + credential names) intact: toggling
+        # the remote must not desync the tracked GitHub Actions workflow from
+        # what the app believes is configured.
+        workspace.git = replace(workspace.git, enabled=True, remote_url=remote_url)
         workspace.git_push_failed = False
         self.store.save(config)
         logger.info("Configured git for %s", workspace.name)
@@ -513,6 +519,30 @@ class WorkspaceManager:
         workspace.restart_required = False
         self.store.save(config)
         return workspace
+
+    def stop_with_sync(self, workspace_id: str) -> Workspace:
+        """Stop a workspace after exporting and Git-syncing its workflows.
+
+        Mirrors the GUI close sequence (``CloseController._sync``) so that
+        stopping a single workspace from its row button also persists the
+        latest n8n state to the repository — without this, manual stops left
+        exported changes committed only when the whole app was closed. Exports
+        run best-effort: a failure is logged as a warning and never blocks the
+        stop itself.
+        """
+        workspace = self._find(self.store.load(), workspace_id)
+        if workspace.state is WorkspaceState.RUNNING and workspace.api_key:
+            try:
+                pipelines_dir = workspace.workflows_dir / "n8nPipelines"
+                SyncRunner(
+                    self.api_factory(workspace, workspace.api_key), pipelines_dir
+                ).export_all()
+            except Exception as exc:
+                logger.warning(
+                    "Export before stop failed for %s: %s", workspace.name, exc
+                )
+            self.sync_git(workspace, push=True)
+        return self.stop(workspace_id)
 
     def stop(self, workspace_id: str) -> Workspace:
         """Stop a workspace, skipping ``docker down`` when already stopped."""
