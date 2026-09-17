@@ -8,7 +8,7 @@ import secrets
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from uuid import uuid4
 
 from ..core.config import ConfigStore
@@ -308,6 +308,24 @@ class WorkspaceManager:
         if not git_is_repo(workspace.workflows_dir):
             return None
         return git_remote_url(workspace.workflows_dir)
+
+    def github_token(self) -> str | None:
+        """Return the persisted GitHub token override, or ``None``.
+
+        Empty in the normal case: the token is resolved from the OS Git
+        credential helper / ``gh`` CLI, so nothing is configured by hand.
+        """
+        try:
+            return self.store.load().github_token
+        except Exception:
+            return None
+
+    def set_github_token(self, token: str | None) -> None:
+        """Persist (or clear, when falsy) the GitHub token override."""
+        config = self.store.load()
+        config.github_token = token or None
+        self.store.save(config)
+        logger.info("Updated the stored GitHub token override")
 
     def configure_db(self, workspace: Workspace, db: DbConfig) -> Workspace:
         """Switch or update the workspace database configuration.

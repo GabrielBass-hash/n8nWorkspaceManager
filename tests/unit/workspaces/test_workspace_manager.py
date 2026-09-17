@@ -1121,3 +1121,31 @@ def test_ci_credentials_payload_reports_missing(tmp_path: Path) -> None:
         launcher.ci_credentials_payload(
             launcher.list()[0], [{"name": "API", "type": "httpRequest"}]
         )
+
+
+def test_github_token_defaults_to_none(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+
+    assert launcher.github_token() is None
+
+
+def test_set_github_token_persists_and_clears(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+
+    launcher.set_github_token("ghp_remembered")
+    assert launcher.github_token() == "ghp_remembered"
+    assert store.load().github_token == "ghp_remembered"
+
+    launcher.set_github_token(None)
+    assert launcher.github_token() is None
+    assert store.load().github_token is None
+
+
+def test_set_github_token_treats_empty_string_as_clear(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+
+    launcher.set_github_token("ghp_remembered")
+    launcher.set_github_token("")
+
+    assert store.load().github_token is None
+

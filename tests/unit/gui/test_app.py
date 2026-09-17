@@ -9,6 +9,7 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui.display import GitRowStatus
+from n8n_launcher.gui.dialogs import GitHubTokenPlan
 
 from helpers import (  # noqa: E402
     ACTIVE_CHIP,
@@ -297,6 +298,7 @@ def test_context_menu_has_launch_folder_and_delete(app) -> None:
             "Gérer les credentials CI…",
             "Ouvrir les Actions GitHub…",
             "Désactiver les tests CI",
+            "Configurer le token GitHub…",
             "Supprimer",
         ]
 
@@ -710,3 +712,97 @@ def test_open_ci_actions_warns_without_github_remote(app) -> None:
     app.app.open_ci_actions()
 
     assert "Aucun dépôt distant GitHub" in app.mocks.messagebox.warnings[0]
+
+
+# --- GitHub token resolution (resolved silently, prompted only as fallback) --
+
+
+def test_ensure_ci_token_resolves_and_caches_without_prompting(app) -> None:
+    app.manager.github_token.return_value = None
+
+    with patch(
+        "n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_auto"
+    ) as resolve, patch("n8n_launcher.gui.app.prompt_github_token") as prompt:
+        assert app.app._ensure_ci_token() == "ghp_auto"
+        assert app.app._ensure_ci_token() == "ghp_auto"
+
+    resolve.assert_called_once_with(None)
+    prompt.assert_not_called()
+
+
+def test_ensure_ci_token_returns_none_when_unresolved(app) -> None:
+    app.manager.github_token.return_value = None
+
+    with patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None):
+        assert app.app._ensure_ci_token() is None
+
+
+def test_refresh_ci_runs_prompts_as_last_resort_and_remembers(app) -> None:
+    stopped = _stopped(app)
+    app.manager.github_token.return_value = None
+    panel = MagicMock()
+
+    with patch(
+        "n8n_launcher.gui.app.auth.resolve_github_token", return_value=None
+    ), patch(
+        "n8n_launcher.gui.app.prompt_github_token",
+        return_value=GitHubTokenPlan(token="ghp_typed", remember=True),
+    ) as prompt, patch.object(
+        app.app, "_build_ci_runs_snapshot", return_value="snapshot"
+    ):
+        app.app._refresh_ci_runs(stopped, panel)
+
+    prompt.assert_called_once()
+    app.manager.set_github_token.assert_called_once_with("ghp_typed")
+    assert app.app._ci_token == "ghp_typed"
+
+
+def test_refresh_ci_runs_does_not_reprompt_after_cancel(app) -> None:
+    stopped = _stopped(app)
+    app.manager.github_token.return_value = None
+    panel = MagicMock()
+
+    with patch(
+        "n8n_launcher.gui.app.auth.resolve_github_token", return_value=None
+    ), patch("n8n_launcher.gui.app.prompt_github_token", return_value=None) as prompt:
+        app.app._refresh_ci_runs(stopped, panel)
+        app.app._refresh_ci_runs(stopped, panel)
+
+    prompt.assert_called_once()
+
+
+def test_configure_github_token_updates_and_persists_when_ticked(app) -> None:
+    with patch(
+        "n8n_launcher.gui.app.prompt_github_token",
+        return_value=GitHubTokenPlan(token="ghp_new", remember=True),
+    ):
+        app.app.configure_github_token()
+
+    assert app.app._ci_token == "ghp_new"
+    app.manager.set_github_token.assert_called_once_with("ghp_new")
+    assert "mis à jour" in app.app._status_label._options["text"]
+
+
+def test_configure_github_token_keeps_in_memory_when_not_ticked(app) -> None:
+    with patch(
+        "n8n_launcher.gui.app.prompt_github_token",
+        return_value=GitHubTokenPlan(token="ghp_new", remember=False),
+    ):
+        app.app.configure_github_token()
+
+    assert app.app._ci_token == "ghp_new"
+    app.manager.set_github_token.assert_not_called()
+
+
+def test_prompt_github_and_configure_prefills_resolved_token(app) -> None:
+    stopped = _stopped(app)
+
+    with patch(
+        "n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_auto"
+    ), patch(
+        "n8n_launcher.gui.app.prompt_github_create", return_value=None
+    ) as prompt:
+        app.app._prompt_github_and_configure(stopped)
+
+    prompt.assert_called_once_with(app.app.root, stopped.name, token="ghp_auto")
+

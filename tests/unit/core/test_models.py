@@ -97,6 +97,29 @@ def test_app_config_round_trip(tmp_path: Path) -> None:
     assert AppConfig.from_dict(config.to_dict()) == config
 
 
+def test_app_config_round_trip_keeps_github_token(tmp_path: Path) -> None:
+    config = AppConfig(
+        owner_email="owner@example.test",
+        owner_password="secret",
+        work_dir=tmp_path,
+        workspaces=[],
+        github_token="ghp_remembered",
+    )
+
+    assert AppConfig.from_dict(config.to_dict()) == config
+
+
+def test_app_config_without_github_token_defaults_to_none(tmp_path: Path) -> None:
+    legacy = {
+        "owner_email": "owner@example.test",
+        "owner_password": "secret",
+        "work_dir": str(tmp_path),
+        "workspaces": [],
+    }
+
+    assert AppConfig.from_dict(legacy).github_token is None
+
+
 def test_git_config_round_trip() -> None:
     config = GitConfig(enabled=True, remote_url="https://example.test/repo.git", branch="main")
 

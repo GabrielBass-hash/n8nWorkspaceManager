@@ -8,16 +8,17 @@ from n8n_launcher.core.models import AppConfig, DbConfig, DbMode
 from n8n_launcher.gui import CreatePlan, LauncherApp
 from n8n_launcher.gui.dialogs import (
     GitHubCreatePlan,
+    GitHubTokenPlan,
     GitConfigChoice,
-    _github_token_from_cli,
     _repo_name_from,
     default_creation_db,
     prompt_ask_string,
     prompt_db_config,
     prompt_github_create,
+    prompt_github_token,
 )
 
-from helpers import FakeRoot, make_workspace  # noqa: E402
+from helpers import FakeRoot, FakeTk, make_workspace  # noqa: E402
 from helpers import row_chip_text, row_text  # noqa: E402
 from n8n_launcher.workspaces.manager import WorkspaceManager
 
@@ -349,22 +350,6 @@ def test_repo_name_from_sanitizes_workspace_name() -> None:
     assert _repo_name_from("!!!") == "workspace"
 
 
-def test_github_token_from_cli_uses_gh(gui_mocks) -> None:
-    result = types.SimpleNamespace(returncode=0, stdout="ghp_fake123\n")
-    with patch("n8n_launcher.gui.dialogs.shutil.which", return_value="/usr/bin/gh"), patch(
-        "n8n_launcher.gui.dialogs.subprocess.run", return_value=result
-    ) as run:
-        token = _github_token_from_cli()
-
-    assert token == "ghp_fake123"
-    assert run.call_args.args[0] == ["gh", "auth", "token"]
-
-
-def test_github_token_from_cli_empty_without_gh(gui_mocks) -> None:
-    with patch("n8n_launcher.gui.dialogs.shutil.which", return_value=None):
-        assert _github_token_from_cli() == ""
-
-
 def test_prompt_github_create_requires_name_and_token(gui_mocks) -> None:
     gui_mocks.tk.Toplevel.instances.clear()
     with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk), patch(
@@ -374,6 +359,26 @@ def test_prompt_github_create_requires_name_and_token(gui_mocks) -> None:
 
     assert result is None
     assert gui_mocks.messagebox.warnings
+
+
+def test_prompt_github_create_prefills_token(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [
+            child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)
+        ]
+        assert entries[1]._options["textvariable"].get() == "ghp_resolved"
+        entries[0]._bindings["<Return>"](None)
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk), patch(
+        "n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk
+    ), patch.object(FakeTk.Toplevel, "wait_window", drive):
+        result = prompt_github_create(FakeRoot(), "Mon Workspace", token="ghp_resolved")
+
+    assert result == GitHubCreatePlan(
+        name="mon-workspace", private=True, token="ghp_resolved"
+    )
 
 
 # --- GitHub repo creation wired into app flows -------------------------------
@@ -498,3 +503,82 @@ def test_configure_git_github_cancel_is_noop(app) -> None:
     client.assert_not_called()
     app.manager.configure_git.assert_not_called()
     app.manager.git_init_workspace.assert_not_called()
+
+
+# --- GitHub token dialog (runs view) ----------------------------------------
+
+
+def _token_entry(dialog, gui_mocks):
+    return next(child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry))
+
+
+def _paste_button(dialog, gui_mocks):
+    return next(
+        button
+        for button in dialog.children
+        if isinstance(button, gui_mocks.ttk.Button) and "Coller" in (button.text or "")
+    )
+
+
+def _remember_check(dialog, gui_mocks):
+    return next(
+        child for child in dialog.children if isinstance(child, gui_mocks.tk.Checkbutton)
+    )
+
+
+def test_prompt_github_token_pastes_and_returns_token(gui_mocks) -> None:
+    def drive(dialog) -> None:
+        entry = _token_entry(dialog, gui_mocks)
+        dialog._clipboard = "ghp_pasted"
+        _paste_button(dialog, gui_mocks).command()
+        entry._bindings["<Return>"](None)
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk), patch(
+        "n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk
+    ), patch.object(FakeTk.Toplevel, "wait_window", drive):
+        result = prompt_github_token(FakeRoot())
+
+    assert result == GitHubTokenPlan(token="ghp_pasted", remember=False)
+
+
+def test_prompt_github_token_remember_flag(gui_mocks) -> None:
+    def drive(dialog) -> None:
+        entry = _token_entry(dialog, gui_mocks)
+        dialog._clipboard = "ghp_pasted"
+        _paste_button(dialog, gui_mocks).command()
+        _remember_check(dialog, gui_mocks).select()
+        entry._bindings["<Return>"](None)
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk), patch(
+        "n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk
+    ), patch.object(FakeTk.Toplevel, "wait_window", drive):
+        result = prompt_github_token(FakeRoot())
+
+    assert result == GitHubTokenPlan(token="ghp_pasted", remember=True)
+
+
+def test_prompt_github_token_empty_paste_returns_none(gui_mocks) -> None:
+    def drive(dialog) -> None:
+        entry = _token_entry(dialog, gui_mocks)
+        dialog._clipboard = "   "
+        _paste_button(dialog, gui_mocks).command()
+        entry._bindings["<Return>"](None)
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk), patch(
+        "n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk
+    ), patch.object(FakeTk.Toplevel, "wait_window", drive):
+        result = prompt_github_token(FakeRoot())
+
+    assert result is None
+
+
+def test_prompt_github_token_cancel_returns_none(gui_mocks) -> None:
+    def drive(dialog) -> None:
+        dialog._bindings["<Escape>"](None)
+
+    with patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk), patch(
+        "n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk
+    ), patch.object(FakeTk.Toplevel, "wait_window", drive):
+        result = prompt_github_token(FakeRoot())
+
+    assert result is None

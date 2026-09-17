@@ -145,6 +145,10 @@ class AppConfig:
     owner_password: str
     work_dir: Path
     workspaces: list[Workspace] = field(default_factory=list)
+    # Optional GitHub PAT override. Left empty in the normal case: the token is
+    # resolved from the OS Git credential helper (the one ``git push`` uses) or
+    # the ``gh`` CLI, and only stored here when the user ticks "Se souvenir".
+    github_token: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict."""
@@ -153,6 +157,7 @@ class AppConfig:
             "owner_password": self.owner_password,
             "work_dir": str(self.work_dir),
             "workspaces": [workspace.to_dict() for workspace in self.workspaces],
+            "github_token": self.github_token,
         }
 
     @classmethod
@@ -163,4 +168,5 @@ class AppConfig:
             owner_password=data["owner_password"],
             work_dir=Path(data["work_dir"]),
             workspaces=[Workspace.from_dict(item) for item in data.get("workspaces", [])],
+            github_token=data.get("github_token"),
         )

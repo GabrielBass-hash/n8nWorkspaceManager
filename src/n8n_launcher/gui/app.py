@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Callable
+from typing import Any, Callable
 
 import requests
 
@@ -20,12 +20,15 @@ from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
 from ..docker.manager import DockerManager
 from ..git.manager import git_seed_remote
-from ..github.api import GitHubClient
+from ..github import auth
+from ..github.api import GitHubClient, GitHubError
 from ..platform.browser import open_app, open_url
 from ..workspaces import ci
+from ..workspaces import ci_runs
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
 from . import ci_edit
 from . import display
+from .ci_runs import RunsPanel
 from .close import CloseController
 from .dialogs import (
     CreatePlan,
@@ -34,6 +37,7 @@ from .dialogs import (
     prompt_create_plan,
     prompt_db_config,
     prompt_git_config,
+    prompt_github_token,
 )
 from .dialogs import GitHubCreatePlan, prompt_github_create, prompt_git_remote
 from .theme import (
@@ -110,6 +114,14 @@ class LauncherApp:
         self._status_label: tk.Label | None = None
         self._subtitle: tk.Label | None = None
         self._menu: tk.Menu | None = None
+        # GitHub token for the REST calls (Actions runs, repo creation). It is
+        # resolved silently from the OS Git credential helper / ``gh`` CLI — no
+        # manual configuration — and only prompted for as a last resort. The
+        # runs cache is keyed by workspace id so reopening the CI dialog shows
+        # the last fetched snapshot instantly.
+        self._ci_token: str | None = None
+        self._ci_token_declined = False
+        self._ci_runs_cache: dict[str, ci_runs.RunsSnapshot] = {}
         self._apply_theme()
         self._configure_root()
         self._build_ui()
@@ -343,6 +355,10 @@ class LauncherApp:
         self._menu.add_command(
             label="Désactiver les tests CI",
             command=self.disable_ci_selected,
+        )
+        self._menu.add_command(
+            label="Configurer le token GitHub…",
+            command=self.configure_github_token,
         )
         self._menu.add_separator()
         self._menu.add_command(label="Supprimer", command=self._delete_selected)
@@ -772,8 +788,11 @@ class LauncherApp:
         github_plan = None
         if plan.git_enabled and plan.github_create:
             # A cancelled token dialog degrades to a local-only git repo; the
-            # workspace is still created.
-            github_plan = prompt_github_create(self.root, plan.name)
+            # workspace is still created. The token is prefilled from the
+            # resolved Git/gh credential so the user just confirms.
+            github_plan = prompt_github_create(
+                self.root, plan.name, token=self._ensure_ci_token()
+            )
 
         def action() -> None:
             workspace = self.workspace_manager.create(
@@ -831,7 +850,9 @@ class LauncherApp:
 
     def _prompt_github_and_configure(self, workspace: Workspace) -> None:
         """Ask for GitHub creation settings, then create the repo in a thread."""
-        plan = prompt_github_create(self.root, workspace.name)
+        plan = prompt_github_create(
+            self.root, workspace.name, token=self._ensure_ci_token()
+        )
         if plan is None:
             return
 
@@ -849,8 +870,8 @@ class LauncherApp:
         """Create a repository on GitHub and wire it as the workspace remote.
 
         Runs off the main thread (network + git). The token is used only for
-        the GitHub API call and one seed push; it is never persisted. Returns
-        the created remote URL.
+        the GitHub API call and one seed push; this flow never writes it to the
+        config. Returns the created remote URL.
         """
         client = GitHubClient(plan.token)
         remote_url = client.create_repo(
@@ -906,7 +927,27 @@ class LauncherApp:
 
     def _show_ci_dialog(self, workspace: Workspace) -> None:
         """Open the pipeline tree; persist the result through the manager."""
-        result = ci_edit.prompt_ci_workflows(self.root, workspace)
+        runs_source: Callable[[], ci_runs.RunsSnapshot] | None = None
+        runs_refresh: Callable[[RunsPanel], None] | None = None
+        runs_open: Callable[[ci_runs.RunSummary], None] | None = None
+        runs_run: Callable[[RunsPanel], None] | None = None
+        remote = self.workspace_manager.git_remote_url(workspace)
+        if isinstance(remote, str) and remote and ci.github_repo_path(remote):
+            # Only a GitHub remote can expose Actions runs; other remotes keep
+            # the single-pane dialog.
+            runs_source = self._ci_runs_source(workspace)
+            runs_refresh = self._ci_runs_refresh(workspace)
+            runs_open = self._ci_runs_open()
+            runs_run = self._ci_runs_run_cb(workspace)
+
+        result = ci_edit.prompt_ci_workflows(
+            self.root,
+            workspace,
+            runs_source=runs_source,
+            runs_refresh=runs_refresh,
+            runs_open=runs_open,
+            runs_run=runs_run,
+        )
         if result is None:
             return
         selected, push = result
@@ -917,6 +958,231 @@ class LauncherApp:
             on_success=lambda: self.set_status(
                 f"Sélection des tests CI enregistrée pour « {workspace.name} »."
             ),
+        )
+
+    def _ci_runs_source(
+        self, workspace: Workspace
+    ) -> Callable[[], ci_runs.RunsSnapshot]:
+        """Return a synchronous, I/O-free closure over the cached snapshot."""
+
+        def source() -> ci_runs.RunsSnapshot:
+            return self._ci_runs_cache.get(workspace.id, ci_runs.RunsSnapshot(""))
+
+        return source
+
+    def _ci_runs_refresh(
+        self, workspace: Workspace
+    ) -> Callable[[RunsPanel], None]:
+        """Bind the panel to a background refresh for the given workspace."""
+        return lambda panel: self._refresh_ci_runs(workspace, panel)
+
+    def _ci_runs_open(self) -> Callable[[ci_runs.RunSummary], None]:
+        """Return a callback opening a run's GitHub page in the browser."""
+
+        def open_run(run: ci_runs.RunSummary) -> None:
+            if run.url:
+                open_url(run.url)
+
+        return open_run
+
+    def _ci_runs_run_cb(
+        self, workspace: Workspace
+    ) -> Callable[[RunsPanel], None]:
+        """Bind the panel's "Lancer la CI" button to the dispatch flow."""
+        return lambda panel: self._ci_runs_run(workspace, panel)
+
+    def _ci_latest_branch(self, workspace: Workspace) -> str:
+        """Branch of the most recent cached run, else ``main`` as a fallback."""
+        snapshot = self._ci_runs_cache.get(workspace.id)
+        if snapshot and snapshot.runs and snapshot.runs[0].branch:
+            return snapshot.runs[0].branch
+        return "main"
+
+    def _ci_runs_run(self, workspace: Workspace, panel: RunsPanel) -> None:
+        """Trigger the CI workflow on a chosen ref, then refresh the panel.
+
+        The ref is asked on the main thread (prefilled with the latest run's
+        branch) and the ``workflow_dispatch`` call runs in a background thread
+        so the dialog never freezes; the panel is refreshed once GitHub has
+        accepted the dispatch.
+        """
+        if self._closing:
+            return
+        remote = self.workspace_manager.git_remote_url(workspace)
+        repo_path = ci.github_repo_path(remote) if remote else None
+        if repo_path is None:
+            messagebox.showwarning(
+                "n8n Launcher",
+                "Aucun dépôt distant GitHub configuré pour ce workspace.",
+                parent=self.root,
+            )
+            return
+        token = self._ci_token_for_ui()
+        if token is None:
+            return
+        ref = ci_edit.prompt_run_ci(
+            self.root, ci.WORKFLOW_FILE, self._ci_latest_branch(workspace)
+        )
+        if ref is None:
+            return
+
+        def worker() -> None:
+            try:
+                GitHubClient(token).dispatch_workflow(
+                    repo_path, ci.WORKFLOW_FILE, ref=ref
+                )
+            except GitHubError as exc:
+                # Bind the message before scheduling: the ``except`` variable is
+                # cleared once the block exits, before the queue is drained.
+                message = f"Impossible de lancer la CI : {exc}"
+
+                def notify_error() -> None:
+                    messagebox.showerror(
+                        "n8n Launcher", message, parent=self.root
+                    )
+
+                self.events.put((notify_error, None))
+                return
+            self.events.put(
+                (lambda: self.set_status(f"CI lancée sur « {ref} »."), None)
+            )
+            self.events.put(
+                (lambda: self._refresh_ci_runs(workspace, panel), None)
+            )
+
+        threading.Thread(
+            target=worker, name="n8n-launcher-ci-dispatch", daemon=True
+        ).start()
+
+    def _ensure_ci_token(self) -> str | None:
+        """Return a usable GitHub token, resolving it silently when possible.
+
+        The token comes from the OS Git credential helper (the very credential
+        ``git push`` uses) or the ``gh`` CLI, then from an optional override
+        remembered earlier in the config. Nothing has to be configured by hand.
+        """
+        if self._ci_token:
+            return self._ci_token
+        token = auth.resolve_github_token(self.workspace_manager.github_token())
+        if token:
+            self._ci_token = token
+        return token
+
+    def _ci_token_for_ui(self) -> str | None:
+        """Resolve a token for a UI action, prompting once as a last resort.
+
+        Only when Git/``gh`` and the remembered override are all empty does
+        this ask the user (and remember the token if they tick the box). A
+        cancel is recorded so the same session is not nagged on every action.
+        """
+        token = self._ensure_ci_token()
+        if token is not None:
+            return token
+        if self._ci_token_declined:
+            return None
+        plan = prompt_github_token(self.root)
+        if plan is None:
+            self._ci_token_declined = True
+            return None
+        self._ci_token = plan.token
+        if plan.remember:
+            self.workspace_manager.set_github_token(plan.token)
+        return plan.token
+
+    def _refresh_ci_runs(self, workspace: Workspace, panel: RunsPanel) -> None:
+        """Fetch GitHub runs off-thread, then apply the snapshot on the main thread.
+
+        The token is resolved automatically and cached in memory; it is only
+        asked for (once per session, and only to remember it if the user wants)
+        when no Git/``gh`` credential is available. The worker never touches
+        Tk: it hands the rendered snapshot back through the event queue, whose
+        drain runs ``panel.apply`` on the main thread.
+        """
+        token = self._ci_token_for_ui()
+        if token is None:
+            return
+
+        def worker() -> None:
+            snapshot = self._build_ci_runs_snapshot(workspace)
+            self._ci_runs_cache[workspace.id] = snapshot
+            self.events.put((lambda: panel.apply(snapshot), None))
+
+        threading.Thread(
+            target=worker, name="n8n-launcher-ci-runs", daemon=True
+        ).start()
+
+    def configure_github_token(self) -> None:
+        """Let the user replace the GitHub token used for the API calls.
+
+        Optional escape hatch: the token is normally resolved from Git/``gh``,
+        but this sets (and, when ticked, remembers once) an explicit override.
+        """
+        plan = prompt_github_token(self.root)
+        if plan is None:
+            return
+        self._ci_token = plan.token
+        self._ci_token_declined = False
+        if plan.remember:
+            self.workspace_manager.set_github_token(plan.token)
+        self._ci_runs_cache.clear()
+        self.set_status("Token GitHub mis à jour.")
+
+    def _build_ci_runs_snapshot(self, workspace: Workspace) -> ci_runs.RunsSnapshot:
+        """Fetch runs/jobs/logs and normalise them into a snapshot (worker-thread safe).
+
+        Every failure is turned into a snapshot ``error`` so the panel renders a
+        readable message instead of the worker dying. Only the five most recent
+        runs have their jobs and logs fetched: that keeps the API budget (and
+        the wait) bounded while the panel still lists every recent run.
+        """
+        remote = self.workspace_manager.git_remote_url(workspace)
+        repo_path = ci.github_repo_path(remote) if remote else None
+        if repo_path is None:
+            return ci_runs.compose_snapshot(
+                repo_path="",
+                runs=[],
+                error="Aucun dépôt GitHub configuré pour ce workspace.",
+            )
+        token = self._ci_token
+        if not token:
+            return ci_runs.compose_snapshot(
+                repo_path=repo_path, runs=[], error="Token GitHub manquant."
+            )
+        client = GitHubClient(token)
+        try:
+            runs = client.list_workflow_runs(repo_path)
+        except GitHubError as exc:
+            return ci_runs.compose_snapshot(
+                repo_path=repo_path, runs=[], error=str(exc)
+            )
+
+        raw_jobs: dict[int, list[dict[str, Any]]] = {}
+        pipelines: dict[int, list[ci_runs.PipelineResult]] = {}
+        for run in runs[:5]:
+            run_id = int(run.get("id") or 0)
+            if not run_id:
+                continue
+            try:
+                jobs = client.list_run_jobs(repo_path, run_id)
+            except GitHubError:
+                continue
+            raw_jobs[run_id] = jobs
+            for job in jobs:
+                job_id = int(job.get("id") or 0)
+                if not job_id or job.get("status") != "completed":
+                    continue
+                try:
+                    log_text = client.fetch_job_logs(repo_path, job_id)
+                except GitHubError:
+                    continue
+                parsed = ci_runs.parse_pipeline_lines(log_text)
+                if parsed:
+                    pipelines[job_id] = parsed
+        return ci_runs.compose_snapshot(
+            repo_path=repo_path,
+            runs=runs,
+            raw_jobs=raw_jobs,
+            pipelines=pipelines,
         )
 
     def configure_ci_credentials_selected(self) -> None:
