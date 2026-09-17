@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "n8n-launcher"
 
-version = "2.0.02"
+version = "2.0.03"
 
 description = "Cross-platform desktop launcher for isolated n8n workspaces"
 requires-python = ">=3.12"
