@@ -130,6 +130,16 @@ class FakeTk:
         def set(self, value) -> None:
             self._value = value
 
+    class BooleanVar:
+        def __init__(self, value=False):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value) -> None:
+            self._value = value
+
     class Checkbutton:
         def __init__(self, parent, **kwargs):
             self._parent = parent

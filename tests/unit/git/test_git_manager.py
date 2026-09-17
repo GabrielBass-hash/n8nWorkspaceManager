@@ -431,3 +431,53 @@ def test_git_is_repo_false_on_os_error(tmp_path: Path) -> None:
         side_effect=PermissionError(13, "Permission denied"),
     ):
         assert git_is_repo(tmp_path) is False
+
+
+def test_git_seed_remote_commits_unborn_branch_then_pushes_with_token(tmp_path: Path) -> None:
+    from n8n_launcher.git.manager import git_seed_remote
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["git", "symbolic-ref"]:
+            return completed(0, "main\n")
+        if command[:2] == ["git", "rev-parse"]:
+            return completed(128, "", "fatal: ambiguous argument")
+        if command[:2] == ["git", "config"] and "--get" in command:
+            return completed(0, "id\n")
+        return completed()
+
+    with patch("n8n_launcher.git.manager.subprocess.run", side_effect=fake_run) as run:
+        git_seed_remote(tmp_path, "https://github.com/octo/repo.git", "tok")
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["git", "add", "-A"] in calls
+    assert ["git", "commit", "--allow-empty", "-m", "n8n-launcher: initial"] in calls
+    push = next(c for c in calls if c[:2] == ["git", "push"])
+    assert push == ["git", "push", "https://tok@github.com/octo/repo.git", "main"]
+
+
+def test_git_seed_remote_skips_commit_when_head_exists(tmp_path: Path) -> None:
+    from n8n_launcher.git.manager import git_seed_remote
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["git", "symbolic-ref"]:
+            return completed(0, "main\n")
+        if command[:2] == ["git", "rev-parse"]:
+            return completed(0, "abc123\n")
+        return completed()
+
+    with patch("n8n_launcher.git.manager.subprocess.run", side_effect=fake_run) as run:
+        git_seed_remote(tmp_path, "https://github.com/octo/repo.git", "tok")
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["git", "add", "-A"] not in calls
+    assert not any(c[:2] == ["git", "commit"] for c in calls)
+
+
+def test_tokenized_remote_embeds_token_only_for_one_call() -> None:
+    from n8n_launcher.git.manager import _tokenized_remote
+
+    assert _tokenized_remote("https://github.com/octo/repo.git", "tok") == (
+        "https://tok@github.com/octo/repo.git"
+    )
+    with pytest.raises(GitError):
+        _tokenized_remote("git@github.com:octo/repo.git", "tok")

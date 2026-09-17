@@ -635,18 +635,26 @@ def wait_ready(http: Http) -> None:
         time.sleep(2.0)
 
 
-def login(http: Http) -> None:
+def login(http: Http) -> str:
     code, body = http.request(
         "POST",
         "/rest/login",
         {"emailOrLdapLoginId": OWNER_EMAIL, "password": OWNER_PASSWORD},
     )
-    token = bool(isinstance(body, dict) and body.get("data", {}).get("token"))
-    if code not in (200, 201) or not (token or http.cookies):
+    if code not in (200, 201) or not isinstance(body, dict):
         raise RuntimeError(f"connexion au propriétaire impossible (HTTP {code}) : {body}")
+    token = body.get("data", {}).get("token")
+    if not token:
+        raise RuntimeError(f"connexion au propriétaire sans jeton (HTTP {code}) : {body}")
+    return str(token)
 
 
-def create_api_key(http: Http) -> str:
+def _rest_headers(token: str) -> dict[str, str]:
+    \"\"\"En-têtes d'authentification pour les endpoints internes /rest de n8n.\"\"\"
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+
+def create_api_key(http: Http, token: str) -> str:
     code, body = http.request(
         "POST",
         "/rest/api-keys",
@@ -661,6 +669,7 @@ def create_api_key(http: Http) -> str:
             ],
             "expiresAt": 0,
         },
+        headers=_rest_headers(token),
     )
     if not isinstance(body, dict):
         raise RuntimeError(f"n8n n'a pas répondu en JSON pour la clé API (HTTP {code})")
@@ -800,9 +809,11 @@ def run_payload(export: dict):
     return None, None
 
 
-def trigger_run(http: Http, workflow_id: str, payload: dict) -> str | None:
+def trigger_run(http: Http, workflow_id: str, payload: dict, token: str) -> str | None:
     \"\"\"Lance le run ; renvoie l'id d'exécution ou None si en attente webhook.\"\"\"
-    code, body = http.request("POST", f"/rest/workflows/{workflow_id}/run", payload)
+    code, body = http.request(
+        "POST", f"/rest/workflows/{workflow_id}/run", payload, headers=_rest_headers(token)
+    )
     if not isinstance(body, dict):
         raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
     if body.get("waitingForWebhook"):
@@ -825,11 +836,13 @@ def _execution_detail(data: Any) -> str:
     return f"dernier nœud : {node}" if node else ""
 
 
-def wait_execution(http: Http, execution_id: str):
+def wait_execution(http: Http, execution_id: str, token: str):
     \"\"\"Sonde une exécution ; renvoie (statut, détail).\"\"\"
     deadline = time.monotonic() + RUN_TIMEOUT
     while True:
-        code, body = http.request("GET", f"/rest/executions/{execution_id}")
+        code, body = http.request(
+            "GET", f"/rest/executions/{execution_id}", headers=_rest_headers(token)
+        )
         if not isinstance(body, dict):
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"n8n n'a pas renvoyé l'exécution {execution_id} (HTTP {code})")
@@ -925,8 +938,8 @@ def main():
         ) from exc
     try:
         wait_ready(http)
-        login(http)
-        api_key = create_api_key(http)
+        token = login(http)
+        api_key = create_api_key(http, token)
         mapping = import_workflows(http, api_key)
         configure_credentials(http, api_key)
 
@@ -938,11 +951,11 @@ def main():
             _, payload = run_payload(export)
             if payload is None:
                 raise RuntimeError(f"pipeline « {rel} » n'a aucun déclencheur exécutable")
-            execution_id = trigger_run(http, mapping[rel], payload)
+            execution_id = trigger_run(http, mapping[rel], payload, token)
             if execution_id is None:
                 results.append((rel, "waiting"))
                 continue
-            status, detail = wait_execution(http, execution_id)
+            status, detail = wait_execution(http, execution_id, token)
             results.append((rel, status))
             suffix = f" ({detail})" if detail else ""
             _verbose(f"{rel} : {status}{suffix}")

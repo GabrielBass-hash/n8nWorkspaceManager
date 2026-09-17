@@ -19,6 +19,8 @@ from ..core.config import ConfigStore
 from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
 from ..docker.manager import DockerManager
+from ..git.manager import git_seed_remote
+from ..github.api import GitHubClient
 from ..platform.browser import open_app, open_url
 from ..workspaces import ci
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
@@ -31,8 +33,9 @@ from .dialogs import (
     prompt_create_dir,
     prompt_create_plan,
     prompt_db_config,
-    prompt_git_remote,
+    prompt_git_config,
 )
+from .dialogs import GitHubCreatePlan, prompt_github_create, prompt_git_remote
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
@@ -766,14 +769,23 @@ class LauncherApp:
 
     def _create_from_plan(self, plan: CreatePlan, workflows_dir: Path) -> None:
         """Create the workspace from a creation plan, initializing git if asked."""
+        github_plan = None
+        if plan.git_enabled and plan.github_create:
+            # A cancelled token dialog degrades to a local-only git repo; the
+            # workspace is still created.
+            github_plan = prompt_github_create(self.root, plan.name)
+
         def action() -> None:
             workspace = self.workspace_manager.create(
                 plan.name.strip(), workflows_dir, db=plan.db
             )
             if plan.git_enabled:
-                self.workspace_manager.git_init_workspace(
-                    workspace, remote_url=plan.git_url or None
-                )
+                if github_plan is not None:
+                    self._create_github_and_configure(workspace, github_plan)
+                else:
+                    self.workspace_manager.git_init_workspace(
+                        workspace, remote_url=plan.git_url or None
+                    )
 
         self._run_async(
             action,
@@ -787,18 +799,27 @@ class LauncherApp:
         if workspace is None:
             return
         current_remote = self.workspace_manager.git_remote_url(workspace)
-        remote_url = prompt_git_remote(self.root, workspace.name, current_remote)
-        if remote_url is None:
-            return
+        if current_remote is None:
+            choice = prompt_git_config(self.root, workspace.name)
+            if choice is None:
+                return
+            if choice.create_github:
+                self._prompt_github_and_configure(workspace)
+                return
+            remote_url = choice.remote_url
+        else:
+            remote_url = prompt_git_remote(self.root, workspace.name, current_remote)
+            if remote_url is None:
+                return
 
         def action() -> None:
             if display.git_repo_status(workspace.workflows_dir):
                 self.workspace_manager.configure_git(
-                    workspace, remote_url=remote_url.strip() or None
+                    workspace, remote_url=remote_url.strip() if remote_url else None
                 )
             else:
                 self.workspace_manager.git_init_workspace(
-                    workspace, remote_url=remote_url.strip() or None
+                    workspace, remote_url=remote_url.strip() if remote_url else None
                 )
 
         self._run_async(
@@ -807,6 +828,42 @@ class LauncherApp:
                 f"Git configuré pour « {workspace.name} »."
             ),
         )
+
+    def _prompt_github_and_configure(self, workspace: Workspace) -> None:
+        """Ask for GitHub creation settings, then create the repo in a thread."""
+        plan = prompt_github_create(self.root, workspace.name)
+        if plan is None:
+            return
+
+        def action() -> None:
+            self._create_github_and_configure(workspace, plan)
+
+        self._run_async(
+            action,
+            on_success=lambda: self.set_status(
+                f"Dépôt GitHub configuré pour « {workspace.name} »."
+            ),
+        )
+
+    def _create_github_and_configure(self, workspace: Workspace, plan: GitHubCreatePlan) -> str:
+        """Create a repository on GitHub and wire it as the workspace remote.
+
+        Runs off the main thread (network + git). The token is used only for
+        the GitHub API call and one seed push; it is never persisted. Returns
+        the created remote URL.
+        """
+        client = GitHubClient(plan.token)
+        remote_url = client.create_repo(
+            plan.name.strip(),
+            private=plan.private,
+            description=f"Workspace n8n « {workspace.name} »",
+        )
+        if display.git_repo_status(workspace.workflows_dir):
+            self.workspace_manager.configure_git(workspace, remote_url=remote_url)
+        else:
+            self.workspace_manager.git_init_workspace(workspace, remote_url=remote_url)
+        git_seed_remote(workspace.workflows_dir, remote_url, plan.token)
+        return remote_url
 
     def _on_git_chip_click(self, workspace_id: str) -> None:
         """Clicking the git chip opens Git configuration for that workspace."""
