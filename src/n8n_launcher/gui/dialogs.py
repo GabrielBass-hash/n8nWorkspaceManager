@@ -6,20 +6,17 @@ import secrets
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 
 from ..core.models import DbConfig, DbMode
 from ..database import has_db_layout
 from .theme import (
     ACCENT,
-    ACCENT_ACTIVE,
     ACCENT_HOVER,
     APP_BACKGROUND,
-    BORDER,
     FONT_META,
     FONT_SUBTITLE,
     SURFACE,
-    SURFACE_HOVER,
     TEXT_MUTED,
     TEXT_PRIMARY,
 )
@@ -192,18 +189,10 @@ def prompt_create_plan(
 
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Annuler",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
+        style="Secondary.TButton",
         command=dialog.destroy,
     ).pack(side="right")
 
@@ -226,18 +215,10 @@ def prompt_create_plan(
     dialog.bind("<Escape>", lambda _event: dialog.destroy())
     _finish_dialog_setup(dialog, root, focus=name_entry)
 
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Créer",
-        bg=ACCENT,
-        fg="#ffffff",
-        activebackground=ACCENT_ACTIVE,
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        padx=16,
-        pady=6,
-        cursor="hand2",
+        style="Accent.TButton",
         command=submit,
     ).pack(side="right", padx=(8, 0))
 
@@ -293,32 +274,16 @@ def prompt_ask_string(
     def cancel(_event=None) -> None:
         dialog.destroy()
 
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Annuler",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
+        style="Secondary.TButton",
         command=cancel,
     ).pack(side="right")
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Valider",
-        bg=ACCENT,
-        fg="#ffffff",
-        activebackground=ACCENT_ACTIVE,
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        padx=16,
-        pady=6,
-        cursor="hand2",
+        style="Accent.TButton",
         command=submit,
     ).pack(side="right", padx=(8, 0))
 
@@ -426,18 +391,10 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     def generate_password() -> None:
         pass_var.set(secrets.token_hex(16))
 
-    tk.Button(
+    ttk.Button(
         dialog,
         text="Régénérer le mot de passe",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=12,
-        pady=4,
-        cursor="hand2",
+        style="Secondary.TButton",
         state="disabled" if locked else "normal",
         command=generate_password,
     ).pack(anchor="w", padx=18, pady=(0, 12))
@@ -461,32 +418,16 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     def cancel(_event=None) -> None:
         dialog.destroy()
 
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Annuler",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
+        style="Secondary.TButton",
         command=cancel,
     ).pack(side="right")
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Valider",
-        bg=ACCENT,
-        fg="#ffffff",
-        activebackground=ACCENT_ACTIVE,
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        padx=16,
-        pady=6,
-        cursor="hand2",
+        style="Accent.TButton",
         command=submit,
     ).pack(side="right", padx=(8, 0))
 

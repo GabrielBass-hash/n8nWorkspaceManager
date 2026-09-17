@@ -53,6 +53,7 @@ from .theme import (
     ROW_SELECTED_BG,
     STATE_POLL_MS,
     SURFACE,
+    SURFACE_ACTIVE,
     SURFACE_HOVER,
     TEXT_MUTED,
     TEXT_PRIMARY,
@@ -144,15 +145,74 @@ class LauncherApp:
             style.theme_use("clam")
             style.configure(".", font=FONT_META, background=APP_BACKGROUND)
             style.configure("TFrame", background=APP_BACKGROUND)
+
+            # Primary CTA (Démarrer, Créer, Valider)
             style.configure(
-                "TButton",
+                "Accent.TButton",
+                background=ACCENT,
+                foreground="#ffffff",
+                bordercolor=ACCENT,
+                focuscolor=ACCENT,
+                font=FONT_PILL,
+                padding=(10, 3),
+            )
+            style.map(
+                "Accent.TButton",
+                background=[("active", ACCENT_ACTIVE), ("disabled", BORDER)],
+                foreground=[("disabled", TEXT_MUTED)],
+            )
+
+            # Secondary / neutral buttons (Arrêter, Annuler, etc.)
+            style.configure(
+                "Secondary.TButton",
                 background=BORDER,
                 foreground=TEXT_PRIMARY,
                 bordercolor=BORDER,
                 focuscolor=BORDER,
-                padding=(14, 8),
+                font=FONT_PILL,
+                padding=(10, 3),
             )
-            style.map("TButton", background=[("active", SURFACE_HOVER)])
+            style.map(
+                "Secondary.TButton",
+                background=[("active", SURFACE_HOVER), ("disabled", SURFACE)],
+                foreground=[("disabled", TEXT_MUTED)],
+            )
+
+            # Surface button (CI "Enregistrer")
+            style.configure(
+                "Surface.TButton",
+                background=SURFACE_HOVER,
+                foreground=TEXT_PRIMARY,
+                bordercolor=BORDER,
+                focuscolor=SURFACE_HOVER,
+                font=FONT_PILL,
+                padding=(10, 4),
+            )
+            style.map(
+                "Surface.TButton",
+                background=[("active", SURFACE_ACTIVE)],
+            )
+
+            # Treeview — dark background for CI dialogs
+            style.configure(
+                "Treeview",
+                background=SURFACE,
+                fieldbackground=SURFACE,
+                foreground=TEXT_PRIMARY,
+                bordercolor=BORDER,
+                font=FONT_META,
+            )
+            style.configure(
+                "Treeview.Heading",
+                background=BORDER,
+                foreground=TEXT_PRIMARY,
+                font=FONT_META,
+            )
+            style.map(
+                "Treeview",
+                background=[("selected", ROW_SELECTED_BG)],
+                foreground=[("selected", TEXT_PRIMARY)],
+            )
         except Exception:
             pass
 
@@ -341,39 +401,25 @@ class LauncherApp:
         if workspace.id == self._launching:
             action_text = "Démarrage…"
             action_command = None
-            action_cursor = "arrow"
-            action_bg = BORDER
-            action_fg = TEXT_MUTED
-            action_active = SURFACE_HOVER
+            action_state = "disabled"
         elif workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
-            # The primary action gets the accent color so the main CTA stands out.
+            # The primary action gets the accent style so the main CTA stands out.
             action_text = "Démarrer"
             action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
-            action_cursor = "hand2"
-            action_bg = ACCENT
-            action_fg = "#ffffff"
-            action_active = ACCENT_ACTIVE
+            action_state = "normal"
         else:
             action_text = "Arrêter"
             action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
-            action_cursor = "hand2"
-            action_bg = BORDER
-            action_fg = TEXT_PRIMARY
-            action_active = SURFACE_HOVER
-        action_button = tk.Button(
+            action_state = "normal"
+        action_button = ttk.Button(
             frame,
             text=action_text,
-            font=FONT_PILL,
-            bg=action_bg,
-            fg=action_fg,
-            activebackground=action_active,
-            activeforeground=TEXT_PRIMARY,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            padx=10,
-            pady=3,
-            cursor=action_cursor,
+            style="Accent.TButton"
+            if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR)
+            and workspace.id != self._launching
+            else "Secondary.TButton",
+            cursor="arrow" if action_state == "disabled" else "hand2",
+            state=action_state,
             command=action_command,
         )
         action_button.pack(side="right", padx=(6, 0))

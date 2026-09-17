@@ -167,7 +167,7 @@ def test_prompt_ci_credentials_copies_json_then_records_metadata(tmp_path) -> No
 
     dialog = tk_fake.Toplevel.instances[-1]
     children = list(flat_children(dialog))
-    buttons = [child for child in children if isinstance(child, tk_fake.Button)]
+    buttons = [child for child in children if isinstance(child, FakeTtk.Button)]
     copy = next(button for button in buttons if "Copier le JSON" in (button.text or ""))
     copy.command()
 
@@ -228,7 +228,7 @@ def test_prompt_ci_credentials_excludes_unticked_from_payload(tmp_path) -> None:
     copy = next(
         button
         for button in flat_children(dialog)
-        if isinstance(button, tk_fake.Button) and "Copier le JSON" in (button.text or "")
+        if isinstance(button, FakeTtk.Button) and "Copier le JSON" in (button.text or "")
     )
     copy.command()
 

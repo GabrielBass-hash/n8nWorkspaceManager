@@ -567,14 +567,14 @@ def test_stopped_row_uses_accent_start_button(app) -> None:
     app.app.refresh()
     btn = row_action_button(app, "ws-stopped")
     assert btn.text == "Démarrer"
-    assert btn._options["bg"] == "#3b82f6"
+    assert btn.style == "Accent.TButton"
 
 
 def test_running_row_uses_neutral_stop_button(app) -> None:
     app.app.refresh()
     btn = row_action_button(app, "ws-running")
     assert btn.text == "Arrêter"
-    assert btn._options["bg"] == "#334155"
+    assert btn.style == "Secondary.TButton"
 
 
 def test_list_scrolls_on_mousewheel(app) -> None:
