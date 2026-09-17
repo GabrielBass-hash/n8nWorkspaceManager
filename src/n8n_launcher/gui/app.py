@@ -19,6 +19,8 @@ from ..core.config import ConfigStore
 from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
 from ..docker.manager import DockerManager
+from ..git.manager import git_seed_remote
+from ..github.api import GitHubClient
 from ..platform.browser import open_app, open_url
 from ..workspaces import ci
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
@@ -31,8 +33,9 @@ from .dialogs import (
     prompt_create_dir,
     prompt_create_plan,
     prompt_db_config,
-    prompt_git_remote,
+    prompt_git_config,
 )
+from .dialogs import GitHubCreatePlan, prompt_github_create, prompt_git_remote
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
@@ -53,6 +56,7 @@ from .theme import (
     ROW_SELECTED_BG,
     STATE_POLL_MS,
     SURFACE,
+    SURFACE_ACTIVE,
     SURFACE_HOVER,
     TEXT_MUTED,
     TEXT_PRIMARY,
@@ -144,15 +148,74 @@ class LauncherApp:
             style.theme_use("clam")
             style.configure(".", font=FONT_META, background=APP_BACKGROUND)
             style.configure("TFrame", background=APP_BACKGROUND)
+
+            # Primary CTA (Démarrer, Créer, Valider)
             style.configure(
-                "TButton",
+                "Accent.TButton",
+                background=ACCENT,
+                foreground="#ffffff",
+                bordercolor=ACCENT,
+                focuscolor=ACCENT,
+                font=FONT_PILL,
+                padding=(10, 3),
+            )
+            style.map(
+                "Accent.TButton",
+                background=[("active", ACCENT_ACTIVE), ("disabled", BORDER)],
+                foreground=[("disabled", TEXT_MUTED)],
+            )
+
+            # Secondary / neutral buttons (Arrêter, Annuler, etc.)
+            style.configure(
+                "Secondary.TButton",
                 background=BORDER,
                 foreground=TEXT_PRIMARY,
                 bordercolor=BORDER,
                 focuscolor=BORDER,
-                padding=(14, 8),
+                font=FONT_PILL,
+                padding=(10, 3),
             )
-            style.map("TButton", background=[("active", SURFACE_HOVER)])
+            style.map(
+                "Secondary.TButton",
+                background=[("active", SURFACE_HOVER), ("disabled", SURFACE)],
+                foreground=[("disabled", TEXT_MUTED)],
+            )
+
+            # Surface button (CI "Enregistrer")
+            style.configure(
+                "Surface.TButton",
+                background=SURFACE_HOVER,
+                foreground=TEXT_PRIMARY,
+                bordercolor=BORDER,
+                focuscolor=SURFACE_HOVER,
+                font=FONT_PILL,
+                padding=(10, 4),
+            )
+            style.map(
+                "Surface.TButton",
+                background=[("active", SURFACE_ACTIVE)],
+            )
+
+            # Treeview — dark background for CI dialogs
+            style.configure(
+                "Treeview",
+                background=SURFACE,
+                fieldbackground=SURFACE,
+                foreground=TEXT_PRIMARY,
+                bordercolor=BORDER,
+                font=FONT_META,
+            )
+            style.configure(
+                "Treeview.Heading",
+                background=BORDER,
+                foreground=TEXT_PRIMARY,
+                font=FONT_META,
+            )
+            style.map(
+                "Treeview",
+                background=[("selected", ROW_SELECTED_BG)],
+                foreground=[("selected", TEXT_PRIMARY)],
+            )
         except Exception:
             pass
 
@@ -341,39 +404,25 @@ class LauncherApp:
         if workspace.id == self._launching:
             action_text = "Démarrage…"
             action_command = None
-            action_cursor = "arrow"
-            action_bg = BORDER
-            action_fg = TEXT_MUTED
-            action_active = SURFACE_HOVER
+            action_state = "disabled"
         elif workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
-            # The primary action gets the accent color so the main CTA stands out.
+            # The primary action gets the accent style so the main CTA stands out.
             action_text = "Démarrer"
             action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
-            action_cursor = "hand2"
-            action_bg = ACCENT
-            action_fg = "#ffffff"
-            action_active = ACCENT_ACTIVE
+            action_state = "normal"
         else:
             action_text = "Arrêter"
             action_command = lambda wid=workspace.id: self.toggle_from_row(wid)
-            action_cursor = "hand2"
-            action_bg = BORDER
-            action_fg = TEXT_PRIMARY
-            action_active = SURFACE_HOVER
-        action_button = tk.Button(
+            action_state = "normal"
+        action_button = ttk.Button(
             frame,
             text=action_text,
-            font=FONT_PILL,
-            bg=action_bg,
-            fg=action_fg,
-            activebackground=action_active,
-            activeforeground=TEXT_PRIMARY,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            padx=10,
-            pady=3,
-            cursor=action_cursor,
+            style="Accent.TButton"
+            if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR)
+            and workspace.id != self._launching
+            else "Secondary.TButton",
+            cursor="arrow" if action_state == "disabled" else "hand2",
+            state=action_state,
             command=action_command,
         )
         action_button.pack(side="right", padx=(6, 0))
@@ -547,7 +596,44 @@ class LauncherApp:
         if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
             self._launch_workspace(workspace)
         else:
-            self._run_async(lambda: self.workspace_manager.stop(workspace_id))
+            self._stop_with_sync(workspace)
+
+    def _stop_with_sync(self, workspace: Workspace) -> None:
+        """Export + Git-sync a workspace, then stop it (row-stop path).
+
+        Mirrors the close sequence so a manual stop also persists the latest
+        n8n state to the repository; without this, closing the app afterwards
+        skipped the already-stopped workspace and the export was lost.
+        """
+        workspace_id = workspace.id
+        self.set_status(f"Arrêt de « {workspace.name} » — synchronisation…")
+
+        def action() -> None:
+            self.workspace_manager.stop_with_sync(workspace_id)
+
+        def on_stopped() -> None:
+            # Re-read the persisted flag: the object captured above predates the
+            # git operations and would otherwise show a stale value.
+            current = next(
+                (
+                    item
+                    for item in self.workspace_manager.list()
+                    if item.id == workspace_id
+                ),
+                None,
+            )
+            if current is not None and current.git_push_failed:
+                messagebox.showwarning(
+                    "Synchronisation Git",
+                    f"Les workflows de « {current.name} » ont été synchronisés, mais le push\n"
+                    "vers le dépôt distant a échoué (connexion ? permissions ?).\n"
+                    "Les changements restent commités localement.",
+                    parent=self.root,
+                )
+            self.set_status(f"« {workspace.name} » arrêté.")
+            self.refresh()
+
+        self._run_async(action, on_success=on_stopped)
 
     def refresh(self) -> None:
         if self._closed:
@@ -683,14 +769,23 @@ class LauncherApp:
 
     def _create_from_plan(self, plan: CreatePlan, workflows_dir: Path) -> None:
         """Create the workspace from a creation plan, initializing git if asked."""
+        github_plan = None
+        if plan.git_enabled and plan.github_create:
+            # A cancelled token dialog degrades to a local-only git repo; the
+            # workspace is still created.
+            github_plan = prompt_github_create(self.root, plan.name)
+
         def action() -> None:
             workspace = self.workspace_manager.create(
                 plan.name.strip(), workflows_dir, db=plan.db
             )
             if plan.git_enabled:
-                self.workspace_manager.git_init_workspace(
-                    workspace, remote_url=plan.git_url or None
-                )
+                if github_plan is not None:
+                    self._create_github_and_configure(workspace, github_plan)
+                else:
+                    self.workspace_manager.git_init_workspace(
+                        workspace, remote_url=plan.git_url or None
+                    )
 
         self._run_async(
             action,
@@ -704,18 +799,27 @@ class LauncherApp:
         if workspace is None:
             return
         current_remote = self.workspace_manager.git_remote_url(workspace)
-        remote_url = prompt_git_remote(self.root, workspace.name, current_remote)
-        if remote_url is None:
-            return
+        if current_remote is None:
+            choice = prompt_git_config(self.root, workspace.name)
+            if choice is None:
+                return
+            if choice.create_github:
+                self._prompt_github_and_configure(workspace)
+                return
+            remote_url = choice.remote_url
+        else:
+            remote_url = prompt_git_remote(self.root, workspace.name, current_remote)
+            if remote_url is None:
+                return
 
         def action() -> None:
             if display.git_repo_status(workspace.workflows_dir):
                 self.workspace_manager.configure_git(
-                    workspace, remote_url=remote_url.strip() or None
+                    workspace, remote_url=remote_url.strip() if remote_url else None
                 )
             else:
                 self.workspace_manager.git_init_workspace(
-                    workspace, remote_url=remote_url.strip() or None
+                    workspace, remote_url=remote_url.strip() if remote_url else None
                 )
 
         self._run_async(
@@ -724,6 +828,42 @@ class LauncherApp:
                 f"Git configuré pour « {workspace.name} »."
             ),
         )
+
+    def _prompt_github_and_configure(self, workspace: Workspace) -> None:
+        """Ask for GitHub creation settings, then create the repo in a thread."""
+        plan = prompt_github_create(self.root, workspace.name)
+        if plan is None:
+            return
+
+        def action() -> None:
+            self._create_github_and_configure(workspace, plan)
+
+        self._run_async(
+            action,
+            on_success=lambda: self.set_status(
+                f"Dépôt GitHub configuré pour « {workspace.name} »."
+            ),
+        )
+
+    def _create_github_and_configure(self, workspace: Workspace, plan: GitHubCreatePlan) -> str:
+        """Create a repository on GitHub and wire it as the workspace remote.
+
+        Runs off the main thread (network + git). The token is used only for
+        the GitHub API call and one seed push; it is never persisted. Returns
+        the created remote URL.
+        """
+        client = GitHubClient(plan.token)
+        remote_url = client.create_repo(
+            plan.name.strip(),
+            private=plan.private,
+            description=f"Workspace n8n « {workspace.name} »",
+        )
+        if display.git_repo_status(workspace.workflows_dir):
+            self.workspace_manager.configure_git(workspace, remote_url=remote_url)
+        else:
+            self.workspace_manager.git_init_workspace(workspace, remote_url=remote_url)
+        git_seed_remote(workspace.workflows_dir, remote_url, plan.token)
+        return remote_url
 
     def _on_git_chip_click(self, workspace_id: str) -> None:
         """Clicking the git chip opens Git configuration for that workspace."""

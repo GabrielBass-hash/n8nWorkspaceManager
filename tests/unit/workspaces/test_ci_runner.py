@@ -56,12 +56,18 @@ def write_selection(root: Path, selected: list[str]) -> None:
 class FakeHttp:
     """Replaces the generated Http client with canned (code, body) responses."""
 
-    def __init__(self, responses: dict[tuple[str, str], tuple[int, object]]):
+    def __init__(
+        self,
+        responses: dict[tuple[str, str], tuple[int, object]],
+        *,
+        cookies: tuple[str, ...] = (),
+    ):
         self.responses = responses
-        self.calls: list[tuple[str, str, object]] = []
+        self.calls: list[tuple[str, str, object, object]] = []
+        self.cookies = [type("Cookie", (), {"name": name})() for name in cookies]
 
     def request(self, method: str, path: str, payload=None, headers=None):
-        self.calls.append((method, path, payload))
+        self.calls.append((method, path, payload, headers))
         return self.responses.get((method, path), (200, {"data": []}))
 
 
@@ -205,6 +211,7 @@ def test_generated_runner_wait_execution_polls_to_finish(tmp_path: Path) -> None
 
     assert status == "success"
     assert "Pull" in detail
+    assert http.calls[0][3] is None  # auth par cookie de session, pas d'en-tête
 
 
 def test_generated_runner_wait_execution_treats_waiting_as_webhook(tmp_path: Path) -> None:
@@ -213,6 +220,7 @@ def test_generated_runner_wait_execution_treats_waiting_as_webhook(tmp_path: Pat
     http = FakeHttp({("GET", "/rest/executions/e1"): (200, {"data": {"status": "waiting"}})})
 
     assert runner.wait_execution(http, "e1")[0] == "waiting"
+    assert http.calls[0][3] is None
 
 
 def test_generated_runner_summarize_counts_failures(tmp_path: Path) -> None:
@@ -227,10 +235,75 @@ def test_generated_runner_trigger_run_returns_waiting_for_webhook(tmp_path: Path
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
     waiting_http = FakeHttp({("POST", "/rest/workflows/w1/run"): (200, {"waitingForWebhook": True})})
-    running_http = FakeHttp({("POST", "/rest/workflows/w1/run"): (200, {"executionId": "e9"})})
+    running_http = FakeHttp({("POST", "/rest/workflows/w1/run"): (200, {"data": {"executionId": "e9"}})})
 
     assert runner.trigger_run(waiting_http, "w1", {}) is None
     assert runner.trigger_run(running_http, "w1", {}) == "e9"
+    assert running_http.calls[0][3] is None
+
+
+def test_generated_runner_trigger_run_accepts_flat_execution_id(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    http = FakeHttp({("POST", "/rest/workflows/w1/run"): (200, {"executionId": "e7"})})
+
+    assert runner.trigger_run(http, "w1", {}) == "e7"
+
+
+def test_generated_runner_login_succeeds_with_cookie(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    http = FakeHttp(
+        {("POST", "/rest/login"): (200, {"data": {}})},
+        cookies=("n8n-auth",),
+    )
+
+    assert runner.login(http) is None
+    assert http.calls[0][2] == {
+        "emailOrLdapLoginId": runner.OWNER_EMAIL,
+        "password": runner.OWNER_PASSWORD,
+    }
+
+
+def test_generated_runner_login_accepts_body_token(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    http = FakeHttp({("POST", "/rest/login"): (200, {"data": {"token": "jwt-abc"}})})
+
+    assert runner.login(http) is None
+
+
+def test_generated_runner_login_without_session_raises(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    http = FakeHttp({("POST", "/rest/login"): (200, {"data": {}})})
+
+    with pytest.raises(RuntimeError, match="connexion au propriétaire impossible"):
+        runner.login(http)
+
+
+def test_generated_runner_create_api_key_uses_cookie_session(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    http = FakeHttp(
+        {("POST", "/rest/api-keys"): (200, {"data": {"rawApiKey": "n8n_key_1"}})}
+    )
+
+    secret = runner.create_api_key(http)
+
+    assert secret == "n8n_key_1"
+    assert http.calls[0][3] is None
+
+
+def test_generated_runner_template_uses_cookie_auth_over_http(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    source = (root / ci.RUNNER_FILE).read_text(encoding="utf-8")
+
+    # Le conteneur renonce au cookie « Secure » (rejeu en HTTP plain) et
+    # l'auth /rest repose sur la session : jamais d'en-tête Authorization.
+    assert "N8N_SECURE_COOKIE=false" in source
+    assert "Authorization" not in source
+    assert "_rest_headers" not in source
 
 
 def test_generated_runner_read_selection_limits_to_selected(tmp_path: Path) -> None:

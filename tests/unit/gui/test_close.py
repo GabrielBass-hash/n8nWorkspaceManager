@@ -81,7 +81,7 @@ def test_on_close_warns_when_push_failed_during_sync(app) -> None:
     app.app._drain_events()
 
     assert app.mocks.messagebox.warnings, "a push-failure warning should be shown"
-    assert "push" in app.mocks.messagebox.warnings[0].lower()
+    assert "synchronisation" in app.mocks.messagebox.warnings[0].lower()
     app.manager.stop.assert_has_calls([call("ws-running"), call("ws-stopped")])
     assert app.app.root.destroyed
 

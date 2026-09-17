@@ -1,25 +1,25 @@
-"""Modal forms for workspace creation and Git configuration."""
+"""Modal forms for workspace creation, Git configuration and GitHub setup."""
 
 from __future__ import annotations
 
+import re
 import secrets
+import shutil
+import subprocess
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, messagebox, ttk
 
 from ..core.models import DbConfig, DbMode
 from ..database import has_db_layout
 from .theme import (
     ACCENT,
-    ACCENT_ACTIVE,
     ACCENT_HOVER,
     APP_BACKGROUND,
-    BORDER,
     FONT_META,
     FONT_SUBTITLE,
     SURFACE,
-    SURFACE_HOVER,
     TEXT_MUTED,
     TEXT_PRIMARY,
 )
@@ -33,6 +33,24 @@ class CreatePlan:
     db: DbConfig
     git_enabled: bool = False
     git_url: str | None = None
+    github_create: bool = False
+
+
+@dataclass(frozen=True)
+class GitConfigChoice:
+    """Outcome of the git configuration dialog."""
+
+    create_github: bool = False
+    remote_url: str | None = None
+
+
+@dataclass(frozen=True)
+class GitHubCreatePlan:
+    """Choices for creating a new repository on GitHub."""
+
+    name: str
+    private: bool = True
+    token: str = ""
 
 
 def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk, *, focus=None) -> None:
@@ -188,22 +206,27 @@ def prompt_create_plan(
         insertbackground=TEXT_PRIMARY,
         relief="flat",
         font=FONT_META,
+    ).pack(fill="x", padx=18, pady=(0, 4))
+    github_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+        dialog,
+        text="Créer le dépôt distant sur GitHub (jeton demandé ensuite)",
+        variable=github_var,
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        activebackground=APP_BACKGROUND,
+        activeforeground=ACCENT_HOVER,
+        selectcolor=SURFACE,
+        highlightthickness=0,
+        font=FONT_META,
     ).pack(fill="x", padx=18, pady=(0, 12))
 
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Annuler",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
+        style="Secondary.TButton",
         command=dialog.destroy,
     ).pack(side="right")
 
@@ -217,8 +240,9 @@ def prompt_create_plan(
         result = CreatePlan(
             name=name_var.get().strip() or workflows_dir.name,
             db=db,
-            git_enabled=git_var.get(),
+            git_enabled=git_var.get() or github_var.get(),
             git_url=url_var.get().strip() or None,
+            github_create=github_var.get(),
         )
         dialog.destroy()
 
@@ -226,18 +250,10 @@ def prompt_create_plan(
     dialog.bind("<Escape>", lambda _event: dialog.destroy())
     _finish_dialog_setup(dialog, root, focus=name_entry)
 
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Créer",
-        bg=ACCENT,
-        fg="#ffffff",
-        activebackground=ACCENT_ACTIVE,
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        padx=16,
-        pady=6,
-        cursor="hand2",
+        style="Accent.TButton",
         command=submit,
     ).pack(side="right", padx=(8, 0))
 
@@ -293,32 +309,16 @@ def prompt_ask_string(
     def cancel(_event=None) -> None:
         dialog.destroy()
 
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Annuler",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
+        style="Secondary.TButton",
         command=cancel,
     ).pack(side="right")
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Valider",
-        bg=ACCENT,
-        fg="#ffffff",
-        activebackground=ACCENT_ACTIVE,
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        padx=16,
-        pady=6,
-        cursor="hand2",
+        style="Accent.TButton",
         command=submit,
     ).pack(side="right", padx=(8, 0))
 
@@ -426,18 +426,10 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     def generate_password() -> None:
         pass_var.set(secrets.token_hex(16))
 
-    tk.Button(
+    ttk.Button(
         dialog,
         text="Régénérer le mot de passe",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=12,
-        pady=4,
-        cursor="hand2",
+        style="Secondary.TButton",
         state="disabled" if locked else "normal",
         command=generate_password,
     ).pack(anchor="w", padx=18, pady=(0, 12))
@@ -461,32 +453,16 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     def cancel(_event=None) -> None:
         dialog.destroy()
 
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Annuler",
-        bg=BORDER,
-        fg=TEXT_PRIMARY,
-        activebackground=SURFACE_HOVER,
-        activeforeground=TEXT_PRIMARY,
-        relief="flat",
-        borderwidth=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
+        style="Secondary.TButton",
         command=cancel,
     ).pack(side="right")
-    tk.Button(
+    ttk.Button(
         buttons,
         text="Valider",
-        bg=ACCENT,
-        fg="#ffffff",
-        activebackground=ACCENT_ACTIVE,
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        padx=16,
-        pady=6,
-        cursor="hand2",
+        style="Accent.TButton",
         command=submit,
     ).pack(side="right", padx=(8, 0))
 
@@ -512,3 +488,241 @@ def prompt_git_remote(
         message,
         initial=current_remote or "",
     )
+
+
+def prompt_git_config(
+    root: tk.Tk, workspace_name: str
+) -> GitConfigChoice | None:
+    """Ask how to wire git for a workspace that has no remote yet.
+
+    Returns ``None`` when cancelled, a :class:`GitConfigChoice` carrying the
+    entered URL (or ``None`` for a purely local repo), or one with
+    ``create_github=True`` when the user asks to create the remote repository
+    from the app.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Configurer Git")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: GitConfigChoice | None = None
+
+    tk.Label(
+        dialog,
+        text=f"URL du dépôt distant pour « {workspace_name} »\n"
+        "Laisser vide pour un dépôt local uniquement :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+        justify="left",
+        wraplength=380,
+    ).pack(fill="x", padx=18, pady=(16, 8))
+    url_var = tk.StringVar(value="")
+    url_entry = tk.Entry(
+        dialog,
+        textvariable=url_var,
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    url_entry.pack(fill="x", padx=18, pady=(0, 16))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def create_github() -> None:
+        nonlocal result
+        result = GitConfigChoice(create_github=True)
+        dialog.destroy()
+
+    def submit(_event=None) -> None:
+        nonlocal result
+        result = GitConfigChoice(remote_url=url_var.get().strip() or None)
+        dialog.destroy()
+
+    def cancel(_event=None) -> None:
+        dialog.destroy()
+
+    ttk.Button(
+        buttons,
+        text="Créer sur GitHub…",
+        style="Secondary.TButton",
+        command=create_github,
+    ).pack(side="left")
+    ttk.Button(
+        buttons,
+        text="Annuler",
+        style="Secondary.TButton",
+        command=cancel,
+    ).pack(side="right")
+    ttk.Button(
+        buttons,
+        text="Valider",
+        style="Accent.TButton",
+        command=submit,
+    ).pack(side="right", padx=(8, 0))
+
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root, focus=url_entry)
+    dialog.wait_window()
+    return result
+
+
+def prompt_github_create(
+    root: tk.Tk, workspace_name: str
+) -> GitHubCreatePlan | None:
+    """Ask for a GitHub repository name, visibility and a personal access token.
+
+    Returns ``None`` when cancelled. The token is collected here but never
+    stored by the app: it is used once for the API call and one seed push.
+    A "Détecter via gh CLI" button fills the field from ``gh auth token``.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Nouveau dépôt GitHub")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: GitHubCreatePlan | None = None
+
+    tk.Label(
+        dialog,
+        text="Nom du dépôt sur GitHub :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+    ).pack(fill="x", padx=18, pady=(16, 2))
+    name_var = tk.StringVar(value=_repo_name_from(workspace_name))
+    name_entry = tk.Entry(
+        dialog,
+        textvariable=name_var,
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    name_entry.pack(fill="x", padx=18, pady=(0, 10))
+
+    visibility_var = tk.BooleanVar(value=True)
+    tk.Radiobutton(
+        dialog,
+        text="Privé",
+        variable=visibility_var,
+        value=True,
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        activebackground=APP_BACKGROUND,
+        activeforeground=ACCENT_HOVER,
+        selectcolor=SURFACE,
+        font=FONT_META,
+    ).pack(fill="x", padx=18)
+    tk.Radiobutton(
+        dialog,
+        text="Public",
+        variable=visibility_var,
+        value=False,
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        activebackground=APP_BACKGROUND,
+        activeforeground=ACCENT_HOVER,
+        selectcolor=SURFACE,
+        font=FONT_META,
+    ).pack(fill="x", padx=18, pady=(0, 10))
+
+    tk.Label(
+        dialog,
+        text="Token GitHub (PAT « repo » ou fine-grained avec Administration) :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_MUTED,
+        font=FONT_SUBTITLE,
+        anchor="w",
+        justify="left",
+        wraplength=380,
+    ).pack(fill="x", padx=18)
+    token_var = tk.StringVar(value="")
+    token_entry = tk.Entry(
+        dialog,
+        textvariable=token_var,
+        show="*",
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    token_entry.pack(fill="x", padx=18, pady=(4, 6))
+    ttk.Button(
+        dialog,
+        text="Détecter via gh CLI",
+        style="Secondary.TButton",
+        command=lambda: token_var.set(_github_token_from_cli()),
+    ).pack(fill="x", padx=18, pady=(0, 14))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def submit(_event=None) -> None:
+        nonlocal result
+        name = name_var.get().strip()
+        token = token_var.get().strip()
+        if not name:
+            messagebox.showwarning(
+                "Nouveau dépôt GitHub", "Le nom du dépôt ne peut pas être vide.", parent=dialog
+            )
+            return
+        if not token:
+            messagebox.showwarning(
+                "Nouveau dépôt GitHub",
+                "Le token d'accès GitHub est requis (bouton « Détecter via gh CLI » si "
+                "vous avez gh d'installé).",
+                parent=dialog,
+            )
+            return
+        result = GitHubCreatePlan(name=name, private=visibility_var.get(), token=token)
+        dialog.destroy()
+
+    def cancel(_event=None) -> None:
+        dialog.destroy()
+
+    ttk.Button(
+        buttons,
+        text="Annuler",
+        style="Secondary.TButton",
+        command=cancel,
+    ).pack(side="right")
+    ttk.Button(
+        buttons,
+        text="Créer",
+        style="Accent.TButton",
+        command=submit,
+    ).pack(side="right", padx=(8, 0))
+
+    name_entry.bind("<Return>", submit)
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root, focus=name_entry)
+    dialog.wait_window()
+    return result
+
+
+def _repo_name_from(workspace_name: str) -> str:
+    """Derive a GitHub-usable repository name from a workspace name."""
+    lowered = workspace_name.lower().strip()
+    cleaned = re.sub(r"[^a-z0-9_.-]+", "-", lowered)
+    return cleaned.strip(".-_ ") or "workspace"
+
+
+def _github_token_from_cli() -> str:
+    """Return a GitHub token via ``gh auth token``, or an empty string."""
+    if shutil.which("gh") is None:
+        return ""
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""

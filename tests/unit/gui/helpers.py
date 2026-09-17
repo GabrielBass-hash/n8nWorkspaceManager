@@ -130,6 +130,16 @@ class FakeTk:
         def set(self, value) -> None:
             self._value = value
 
+    class BooleanVar:
+        def __init__(self, value=False):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value) -> None:
+            self._value = value
+
     class Checkbutton:
         def __init__(self, parent, **kwargs):
             self._parent = parent
@@ -258,13 +268,19 @@ class FakeTtk:
         instances: list["FakeTtk.Button"] = []
 
         def __init__(self, _parent, **kwargs):
+            self._parent = _parent
             self.text = kwargs.pop("text", None)
             self.command = kwargs.pop("command", None)
+            self.style = kwargs.pop("style", None)
+            self.state = kwargs.pop("state", "normal")
+            self._options = dict(kwargs)
             self.packed = False
             FakeTtk.Button.instances.append(self)
 
         def pack(self, *_args, **_kwargs) -> None:
             self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
 
     class Treeview:
         instances: list["FakeTtk.Treeview"] = []

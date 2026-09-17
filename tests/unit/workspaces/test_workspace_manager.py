@@ -569,6 +569,72 @@ def test_sync_git_clears_push_failed_after_success(tmp_path: Path) -> None:
     assert store.load().workspaces[0].git_push_failed is False
 
 
+def _running_git_workspace(launcher, store, tmp_path: Path) -> Workspace:
+    """Persist a workspace as RUNNING with an API key and git enabled."""
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True)
+    config.workspaces[0].state = WorkspaceState.RUNNING
+    config.workspaces[0].api_key = "key-1"
+    store.save(config)
+    return launcher.list()[0]
+
+
+def test_stop_with_sync_exports_and_syncs_before_stop(tmp_path: Path) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = _running_git_workspace(launcher, store, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.SyncRunner") as run,
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch.object(launcher, "sync_git") as sync,
+    ):
+        launcher.stop_with_sync(workspace.id)
+
+    run.return_value.export_all.assert_called_once_with()
+    sync.assert_called_once()
+    assert sync.call_args.args[0].id == workspace.id
+    assert sync.call_args.kwargs == {"push": True}
+    docker.down.assert_called_once()
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
+def test_stop_with_sync_export_failure_does_not_block_stop(tmp_path: Path) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = _running_git_workspace(launcher, store, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.SyncRunner") as run,
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch.object(launcher, "sync_git") as sync,
+    ):
+        run.return_value.export_all.side_effect = RuntimeError("sync boom")
+        launcher.stop_with_sync(workspace.id)  # must not raise
+
+    sync.assert_called_once()
+    docker.down.assert_called_once()
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
+def test_stop_with_sync_skips_export_when_not_running(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.SyncRunner") as run,
+        patch.object(launcher, "sync_git") as sync,
+    ):
+        launcher.stop_with_sync(workspace.id)
+
+    run.assert_not_called()
+    sync.assert_not_called()
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
 def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
@@ -674,6 +740,55 @@ def test_configure_git_detaches_remote_when_url_cleared(tmp_path: Path) -> None:
     assert stored.git.enabled is True
     assert stored.git.remote_url is None
     assert stored.git_push_failed is False
+
+
+def test_git_init_workspace_preserves_ci_metadata(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(
+        ci_enabled=True,
+        ci_credentials=[{"name": "API", "type": "httpRequest"}],
+    )
+    store.save(config)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
+        patch("n8n_launcher.workspaces.manager.git_init"),
+        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
+        patch("n8n_launcher.workspaces.manager.git_add_remote"),
+    ):
+        launcher.git_init_workspace(workspace, remote_url="https://example.test/repo.git")
+
+    stored = store.load().workspaces[0]
+    assert stored.git.ci_enabled is True
+    assert stored.git.ci_credentials == [{"name": "API", "type": "httpRequest"}]
+    assert stored.git.remote_url == "https://example.test/repo.git"
+
+
+def test_configure_git_preserves_ci_metadata(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].git = GitConfig(
+        enabled=True,
+        ci_enabled=True,
+        ci_credentials=[{"name": "API", "type": "httpRequest"}],
+    )
+    store.save(config)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_set_remote_url"),
+    ):
+        launcher.configure_git(workspace, remote_url="https://example.test/other.git")
+
+    stored = store.load().workspaces[0]
+    assert stored.git.ci_enabled is True
+    assert stored.git.ci_credentials == [{"name": "API", "type": "httpRequest"}]
+    assert stored.git.remote_url == "https://example.test/other.git"
 
 
 def test_configure_db_switches_to_managed_and_scaffolds(tmp_path: Path) -> None:

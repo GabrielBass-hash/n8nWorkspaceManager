@@ -477,12 +477,27 @@ def test_empty_state_hint_disappears_when_workspaces_exist(app) -> None:
     assert app.app._subtitle._options["text"] == "2 workflows"
 
 
-def test_row_stop_button_stops_workspace(app) -> None:
+def test_row_stop_button_syncs_then_stops_workspace(app) -> None:
     row_action_button(app, "ws-running").command()
     app.app._drain_events()
 
-    app.manager.stop.assert_called_once_with("ws-running")
+    app.manager.stop_with_sync.assert_called_once_with("ws-running")
     app.manager.ensure_running.assert_not_called()
+
+
+def test_row_stop_warns_when_push_failed_during_sync(app) -> None:
+    running = app.manager.list.return_value[0]
+
+    def fail_sync(_workspace_id):
+        running.git_push_failed = True
+        return None
+
+    app.manager.stop_with_sync.side_effect = fail_sync
+    row_action_button(app, "ws-running").command()
+    app.app._drain_events()
+
+    assert app.mocks.messagebox.warnings, "a push-failure warning should be shown"
+    assert "push" in app.mocks.messagebox.warnings[0].lower()
 
 
 def test_row_start_button_launches_and_opens(app) -> None:
@@ -567,14 +582,14 @@ def test_stopped_row_uses_accent_start_button(app) -> None:
     app.app.refresh()
     btn = row_action_button(app, "ws-stopped")
     assert btn.text == "Démarrer"
-    assert btn._options["bg"] == "#3b82f6"
+    assert btn.style == "Accent.TButton"
 
 
 def test_running_row_uses_neutral_stop_button(app) -> None:
     app.app.refresh()
     btn = row_action_button(app, "ws-running")
     assert btn.text == "Arrêter"
-    assert btn._options["bg"] == "#334155"
+    assert btn.style == "Secondary.TButton"
 
 
 def test_list_scrolls_on_mousewheel(app) -> None:

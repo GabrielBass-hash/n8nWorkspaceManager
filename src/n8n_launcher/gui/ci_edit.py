@@ -28,11 +28,8 @@ from ..workspaces import ci
 from ..workspaces.manager import WorkspaceManager
 from .theme import (
     APP_BACKGROUND,
-    BORDER,
     FONT_META,
-    FONT_PILL,
     SURFACE,
-    SURFACE_HOVER,
     TEXT_MUTED,
     TEXT_PRIMARY,
 )
@@ -213,14 +210,15 @@ def prompt_ci_workflows(
         update_caption()
 
     def save() -> None:
-        push = False
-        if selection:
-            push = messagebox.askyesno(
-                "Pousser maintenant ?",
-                "Pousser ces changements vers GitHub maintenant ?\n"
-                "Sinon ils seront inclus au prochain poussage (fermeture du workspace).",
-                parent=dialog,
-            )
+        # Demander le push même pour une sélection vide : sans cela, « Tout
+        # décocher » restait local et GitHub continuait d'exécuter l'ancienne
+        # sélection au prochain poussage.
+        push = messagebox.askyesno(
+            "Pousser maintenant ?",
+            "Pousser ces changements vers GitHub maintenant ?\n"
+            "Sinon ils seront inclus au prochain poussage (fermeture du workspace).",
+            parent=dialog,
+        )
         nonlocal result
         result = (set(selection), push)
         dialog.destroy()
@@ -241,17 +239,10 @@ def prompt_ci_workflows(
         ("Enregistrer", save),
         ("Annuler", cancel),
     ):
-        tk.Button(
+        ttk.Button(
             actions,
             text=text,
-            font=FONT_PILL,
-            bg=BORDER if command is not save else SURFACE_HOVER,
-            fg=TEXT_PRIMARY,
-            relief="flat",
-            borderwidth=0,
-            padx=10,
-            pady=4,
-            activebackground=SURFACE_HOVER,
+            style="Surface.TButton" if command is save else "Secondary.TButton",
             cursor="hand2",
             command=command,
         ).pack(side="right", padx=(6, 0))
@@ -413,17 +404,10 @@ def prompt_ci_credentials(
         ("J'ai collé", confirm_pasted),
         ("Annuler", lambda: dialog.destroy()),
     ):
-        tk.Button(
+        ttk.Button(
             actions,
             text=text,
-            font=FONT_PILL,
-            bg=BORDER,
-            fg=TEXT_PRIMARY,
-            relief="flat",
-            borderwidth=0,
-            padx=10,
-            pady=4,
-            activebackground=SURFACE_HOVER,
+            style="Secondary.TButton",
             cursor="hand2",
             command=command,
         ).pack(side="right", padx=(6, 0))

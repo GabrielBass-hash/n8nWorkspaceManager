@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,37 @@ def git_has_unpushed_commits(path: Path) -> bool:
     """Return True if the repo has commits not yet pushed to any remote."""
     result = _run_git(["log", "--branches", "--not", "--remotes", "--oneline"], cwd=path, check=False)
     return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def git_seed_remote(path: Path, remote_url: str, token: str, *, message: str = "n8n-launcher: initial") -> None:
+    """Seed a freshly created remote with the current branch, authenticating once.
+
+    When the branch is still unborn (no commit yet), an initial commit is
+    created first so seeding an empty workspace folder succeeds. The token is
+    embedded only in this single ``git push`` invocation's URL (via
+    :func:`_tokenized_remote`), never persisted in the repository's git
+    config: the caller then stores the clean URL as the remote.
+    """
+    branch = _current_branch(path)
+    if not branch:
+        raise GitError("can't seed remote: repository has no active branch")
+    head = _run_git(["rev-parse", "--verify", "HEAD"], cwd=path, check=False)
+    if head.returncode != 0:
+        git_add(path)
+        _run_git(_commit_identity_args(path) + ["commit", "--allow-empty", "-m", message], cwd=path)
+    # Pushing without ``-u`` on purpose: ``-u`` would store the tokenized URL as
+    # the branch's upstream in .git/config, persisting the credential. The
+    # launcher always spells origin (or an explicit URL) for pull/push, so no
+    # tracking ref is required here.
+    _run_git(["push", _tokenized_remote(remote_url, token), branch], cwd=path)
+    logger.info("Seeded remote %s from %s", remote_url, path)
+
+
+def _tokenized_remote(remote_url: str, token: str) -> str:
+    """Embed *token* into a GitHub HTTPS URL for a single git invocation."""
+    if not remote_url.startswith("https://"):
+        raise GitError("remote URL must be https to be seeded with a token")
+    return remote_url.replace("https://", f"https://{quote(token, safe='')}@", 1)
 
 
 def git_pull(path: Path) -> None:

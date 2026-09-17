@@ -382,7 +382,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Compter les pipelines sélectionnées
+        id: selection
+        run: |
+          count=$(python -c "import json;print(len(json.load(open('.n8n-tests/tests.json', encoding='utf-8'))['selected']))" 2>/dev/null || echo 0)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
       - name: Lancer le runner de tests n8n
+        # Une sélection vide (aucun test coché) ne lance rien : le job passe
+        # « vert » sans démarrer de conteneur, au lieu d'exécuter l'ancienne
+        # sélection encore présente sur GitHub.
+        if: steps.selection.outputs.count != '0'
         env:
           N8N_IMAGE: ${{ vars.N8N_IMAGE }}
           N8N_CI_CREDENTIALS: ${{ secrets.N8N_CI_CREDENTIALS }}
@@ -627,13 +636,18 @@ def wait_ready(http: Http) -> None:
 
 
 def login(http: Http) -> None:
+    \"\"\"Connecte le propriétaire ; l'auth des endpoints /rest passe par le
+    cookie de session ``n8n-auth`` posé par la réponse (jamais par un jeton
+    dans le corps de réponse sur n8n 2.33+). Le jeton éventuel du corps n'est
+    accepté que comme signal de secours pour de futures versions.\"\"\"
     code, body = http.request(
         "POST",
         "/rest/login",
         {"emailOrLdapLoginId": OWNER_EMAIL, "password": OWNER_PASSWORD},
     )
-    token = bool(isinstance(body, dict) and body.get("data", {}).get("token"))
-    if code not in (200, 201) or not (token or http.cookies):
+    body_token = isinstance(body, dict) and bool((body.get("data") or {}).get("token"))
+    has_session = any(cookie.name == "n8n-auth" for cookie in http.cookies)
+    if code not in (200, 201) or not (body_token or has_session):
         raise RuntimeError(f"connexion au propriétaire impossible (HTTP {code}) : {body}")
 
 
@@ -792,13 +806,23 @@ def run_payload(export: dict):
 
 
 def trigger_run(http: Http, workflow_id: str, payload: dict) -> str | None:
-    \"\"\"Lance le run ; renvoie l'id d'exécution ou None si en attente webhook.\"\"\"
-    code, body = http.request("POST", f"/rest/workflows/{workflow_id}/run", payload)
+    \"\"\"Lance le run ; renvoie l'id d'exécution ou None si en attente webhook.
+
+    La réponse est soit ``{"executionId": ...}`` soit, selon les versions,
+    ``{"data": {"executionId": ...}}`` — les deux sont acceptées.\"\"\"
+    code, body = http.request(
+        "POST", f"/rest/workflows/{workflow_id}/run", payload
+    )
     if not isinstance(body, dict):
         raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
-    if body.get("waitingForWebhook"):
+    data = body.get("data")
+    if body.get("waitingForWebhook") or (
+        isinstance(data, dict) and data.get("waitingForWebhook")
+    ):
         return None
     execution_id = body.get("executionId")
+    if not execution_id and isinstance(data, dict):
+        execution_id = data.get("executionId")
     if execution_id:
         return str(execution_id)
     raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
@@ -820,7 +844,9 @@ def wait_execution(http: Http, execution_id: str):
     \"\"\"Sonde une exécution ; renvoie (statut, détail).\"\"\"
     deadline = time.monotonic() + RUN_TIMEOUT
     while True:
-        code, body = http.request("GET", f"/rest/executions/{execution_id}")
+        code, body = http.request(
+            "GET", f"/rest/executions/{execution_id}"
+        )
         if not isinstance(body, dict):
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"n8n n'a pas renvoyé l'exécution {execution_id} (HTTP {code})")
@@ -901,6 +927,11 @@ def main():
                 "-e", "N8N_DIAGNOSTICS_ENABLED=false",
                 "-e", "N8N_DISABLE_TELEMETRY=true",
                 "-e", "N8N_VERSION_NOTIFICATIONS_ENABLED=false",
+                # Le conteneur est local et jetable : sans ce flag le cookie
+                # de session n8n-auth est marqué « Secure » et ne serait pas
+                # rejoué en HTTP plain par le client standard, d'où des 401
+                # sur /rest/api-keys. Même réglage que les conteneurs gérés.
+                "-e", "N8N_SECURE_COOKIE=false",
                 "-e", f"N8N_ENCRYPTION_KEY={os.environ.get('N8N_ENCRYPTION_KEY') or 'n8n-ci-encryption-key-0123456789abcdef'}",
                 "-e", "EXECUTIONS_TIMEOUT=300",
                 "-e", "EXECUTIONS_TIMEOUT_MAX=300",
