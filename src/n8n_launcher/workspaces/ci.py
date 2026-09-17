@@ -635,26 +635,23 @@ def wait_ready(http: Http) -> None:
         time.sleep(2.0)
 
 
-def login(http: Http) -> str:
+def login(http: Http) -> None:
+    \"\"\"Connecte le propriétaire ; l'auth des endpoints /rest passe par le
+    cookie de session ``n8n-auth`` posé par la réponse (jamais par un jeton
+    dans le corps de réponse sur n8n 2.33+). Le jeton éventuel du corps n'est
+    accepté que comme signal de secours pour de futures versions.\"\"\"
     code, body = http.request(
         "POST",
         "/rest/login",
         {"emailOrLdapLoginId": OWNER_EMAIL, "password": OWNER_PASSWORD},
     )
-    if code not in (200, 201) or not isinstance(body, dict):
+    body_token = isinstance(body, dict) and bool((body.get("data") or {}).get("token"))
+    has_session = any(cookie.name == "n8n-auth" for cookie in http.cookies)
+    if code not in (200, 201) or not (body_token or has_session):
         raise RuntimeError(f"connexion au propriétaire impossible (HTTP {code}) : {body}")
-    token = body.get("data", {}).get("token")
-    if not token:
-        raise RuntimeError(f"connexion au propriétaire sans jeton (HTTP {code}) : {body}")
-    return str(token)
 
 
-def _rest_headers(token: str) -> dict[str, str]:
-    \"\"\"En-têtes d'authentification pour les endpoints internes /rest de n8n.\"\"\"
-    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-
-def create_api_key(http: Http, token: str) -> str:
+def create_api_key(http: Http) -> str:
     code, body = http.request(
         "POST",
         "/rest/api-keys",
@@ -669,7 +666,6 @@ def create_api_key(http: Http, token: str) -> str:
             ],
             "expiresAt": 0,
         },
-        headers=_rest_headers(token),
     )
     if not isinstance(body, dict):
         raise RuntimeError(f"n8n n'a pas répondu en JSON pour la clé API (HTTP {code})")
@@ -809,16 +805,24 @@ def run_payload(export: dict):
     return None, None
 
 
-def trigger_run(http: Http, workflow_id: str, payload: dict, token: str) -> str | None:
-    \"\"\"Lance le run ; renvoie l'id d'exécution ou None si en attente webhook.\"\"\"
+def trigger_run(http: Http, workflow_id: str, payload: dict) -> str | None:
+    \"\"\"Lance le run ; renvoie l'id d'exécution ou None si en attente webhook.
+
+    La réponse est soit ``{"executionId": ...}`` soit, selon les versions,
+    ``{"data": {"executionId": ...}}`` — les deux sont acceptées.\"\"\"
     code, body = http.request(
-        "POST", f"/rest/workflows/{workflow_id}/run", payload, headers=_rest_headers(token)
+        "POST", f"/rest/workflows/{workflow_id}/run", payload
     )
     if not isinstance(body, dict):
         raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
-    if body.get("waitingForWebhook"):
+    data = body.get("data")
+    if body.get("waitingForWebhook") or (
+        isinstance(data, dict) and data.get("waitingForWebhook")
+    ):
         return None
     execution_id = body.get("executionId")
+    if not execution_id and isinstance(data, dict):
+        execution_id = data.get("executionId")
     if execution_id:
         return str(execution_id)
     raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
@@ -836,12 +840,12 @@ def _execution_detail(data: Any) -> str:
     return f"dernier nœud : {node}" if node else ""
 
 
-def wait_execution(http: Http, execution_id: str, token: str):
+def wait_execution(http: Http, execution_id: str):
     \"\"\"Sonde une exécution ; renvoie (statut, détail).\"\"\"
     deadline = time.monotonic() + RUN_TIMEOUT
     while True:
         code, body = http.request(
-            "GET", f"/rest/executions/{execution_id}", headers=_rest_headers(token)
+            "GET", f"/rest/executions/{execution_id}"
         )
         if not isinstance(body, dict):
             if time.monotonic() >= deadline:
@@ -923,6 +927,11 @@ def main():
                 "-e", "N8N_DIAGNOSTICS_ENABLED=false",
                 "-e", "N8N_DISABLE_TELEMETRY=true",
                 "-e", "N8N_VERSION_NOTIFICATIONS_ENABLED=false",
+                # Le conteneur est local et jetable : sans ce flag le cookie
+                # de session n8n-auth est marqué « Secure » et ne serait pas
+                # rejoué en HTTP plain par le client standard, d'où des 401
+                # sur /rest/api-keys. Même réglage que les conteneurs gérés.
+                "-e", "N8N_SECURE_COOKIE=false",
                 "-e", f"N8N_ENCRYPTION_KEY={os.environ.get('N8N_ENCRYPTION_KEY') or 'n8n-ci-encryption-key-0123456789abcdef'}",
                 "-e", "EXECUTIONS_TIMEOUT=300",
                 "-e", "EXECUTIONS_TIMEOUT_MAX=300",
@@ -938,8 +947,8 @@ def main():
         ) from exc
     try:
         wait_ready(http)
-        token = login(http)
-        api_key = create_api_key(http, token)
+        login(http)
+        api_key = create_api_key(http)
         mapping = import_workflows(http, api_key)
         configure_credentials(http, api_key)
 
@@ -951,11 +960,11 @@ def main():
             _, payload = run_payload(export)
             if payload is None:
                 raise RuntimeError(f"pipeline « {rel} » n'a aucun déclencheur exécutable")
-            execution_id = trigger_run(http, mapping[rel], payload, token)
+            execution_id = trigger_run(http, mapping[rel], payload)
             if execution_id is None:
                 results.append((rel, "waiting"))
                 continue
-            status, detail = wait_execution(http, execution_id, token)
+            status, detail = wait_execution(http, execution_id)
             results.append((rel, status))
             suffix = f" ({detail})" if detail else ""
             _verbose(f"{rel} : {status}{suffix}")
