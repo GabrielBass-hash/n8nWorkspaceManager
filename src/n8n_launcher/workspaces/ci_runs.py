@@ -101,6 +101,22 @@ class JobSummary:
         concluded = self.conclusion or self.status
         return _JOB_STATUS_LABELS.get(concluded, _JOB_STATUS_LABELS.get(self.status, concluded))
 
+    @property
+    def current_step(self) -> tuple[str, str] | None:
+        """Return the first step still in flight ``(name, status)``, or ``None``.
+
+        Lets the runs panel highlight exactly what the live job is doing without
+        repeating the whole step list. The stored status is a conclusion-or-
+        status string, so a finished step reads ``success``/``failure``/… while
+        only queued/waiting/in-progress steps count as unfinished. Completed
+        jobs return ``None``.
+        """
+        for name, status in self.steps:
+            if status not in ("queued", "waiting", "in_progress", "pending", "requested"):
+                continue
+            return name, status
+        return None
+
 
 @dataclass(frozen=True)
 class PipelineResult:
@@ -146,6 +162,17 @@ _JOB_STATUS_LABELS: dict[str, str] = {
     "waiting": "en attente",
     "completed": "terminé",
 }
+
+# GitHub run-status values meaning the workflow is still running (or waiting to
+# start) and could still change. Anything else is finished and immutable.
+RUN_ACTIVE_STATUSES = frozenset(
+    {"queued", "waiting", "in_progress", "pending", "requested"}
+)
+
+
+def run_status_is_active(status: str) -> bool:
+    """Return True when a raw GitHub run status means the run is in flight."""
+    return status in RUN_ACTIVE_STATUSES
 
 
 def _as_int(value: Any, default: int = 0) -> int:

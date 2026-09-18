@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 
 from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui.ci_edit import (
+    RUNS_POLL_ACTIVE_MS,
+    RUNS_POLL_IDLE_MS,
+    _schedule_runs_poll,
     prompt_ci_credentials,
     prompt_ci_workflows,
     prompt_run_ci,
@@ -390,6 +393,71 @@ def test_prompt_ci_workflows_without_source_has_no_notebook(tmp_path) -> None:
     assert RunsPanel.instances == []
 
 
+# --- Auto-refresh polling (gui/ci_edit.py) ----------------------------------
+
+
+def _active_run_snapshot() -> ci_runs.RunsSnapshot:
+    run = ci_runs.RunSummary(
+        id=12,
+        run_number=12,
+        branch="main",
+        head_sha="b" * 40,
+        status="in_progress",
+        conclusion=None,
+        created_at="2026-01-01T00:00:00Z",
+        url="https://github.com/octo/repo/actions/runs/12",
+    )
+    return ci_runs.RunsSnapshot(repo_path="octo/repo", runs=(run,))
+
+
+def _panel_for_poll(snapshot):
+    dialog = FakeTk.Toplevel(None)
+    with fake_runs_panel_bases(), patch(
+        "n8n_launcher.gui.ci_runs.tk", FakeTk()
+    ), patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()):
+        panel = RunsPanel(dialog, refresh=lambda: None, open_run=lambda _r: None)
+        panel.apply(snapshot)
+    return dialog, panel
+
+
+def test_schedule_runs_poll_refreshes_then_reschedules_active() -> None:
+    dialog, panel = _panel_for_poll(_active_run_snapshot())
+    refreshed: list[RunsPanel] = []
+
+    _schedule_runs_poll(dialog, panel, refreshed.append)
+
+    assert len(dialog._after_callbacks) == 1
+    dialog._after_callbacks[0][1]()
+    assert refreshed == [panel]
+    # An in-flight run keeps the fast cadence.
+    assert dialog._after_callbacks[-1][0] == RUNS_POLL_ACTIVE_MS
+
+
+def test_schedule_runs_poll_reschedules_idle_without_active_run() -> None:
+    dialog, panel = _panel_for_poll(_runs_snapshot())
+    refreshed: list[RunsPanel] = []
+
+    _schedule_runs_poll(dialog, panel, refreshed.append)
+    dialog._after_callbacks[0][1]()
+
+    assert refreshed == [panel]
+    assert dialog._after_callbacks[-1][0] == RUNS_POLL_IDLE_MS
+
+
+def test_schedule_runs_poll_stops_when_dialog_destroyed() -> None:
+    dialog, panel = _panel_for_poll(_runs_snapshot())
+    refreshed: list[RunsPanel] = []
+
+    _schedule_runs_poll(dialog, panel, refreshed.append)
+    tick = dialog._after_callbacks[0][1]
+    dialog.destroy()
+    # Fire the now-stale tick: the winfo_exists guard must stop the loop.
+    tick()
+
+    assert refreshed == []
+    assert dialog._after_callbacks == []
+
+
 def _drive_run_dialog(ref: str | None):
     """Return a ``wait_window`` replacement typing ``ref`` then submitting.
 
@@ -707,3 +775,126 @@ def test_ci_runs_run_reports_dispatch_error(app) -> None:
 
     message = app.mocks.messagebox.errors[0]
     assert "boom" in message
+
+
+def test_ci_runs_run_blocks_when_cache_has_active_run(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    app.app._ci_runs_cache[workspace.id] = ci_runs.RunsSnapshot(
+        repo_path="octo/repo",
+        runs=(ci_runs.RunSummary(
+            id=13,
+            run_number=13,
+            branch="main",
+            head_sha="a" * 40,
+            status="in_progress",
+            conclusion=None,
+            created_at="2026-01-01T00:00:00Z",
+            url="https://github.com/octo/repo/actions/runs/13",
+        ),),
+    )
+
+    with patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci") as prompt, patch(
+        "n8n_launcher.gui.app.GitHubClient"
+    ) as client:
+        app.app._ci_runs_run(workspace, MagicMock())
+
+    prompt.assert_not_called()
+    client.assert_not_called()
+    assert app.mocks.messagebox.warnings
+    assert "déjà en cours" in app.mocks.messagebox.warnings[0]
+
+
+def test_ci_runs_run_allows_dispatch_when_cache_has_only_finished_runs(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    app.app._ci_runs_cache[workspace.id] = _runs_snapshot()
+    client = MagicMock()
+
+    with patch(
+        "n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="main"
+    ), patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+        app.app._ci_runs_run(workspace, MagicMock())
+        app.app._drain_events()
+
+    client.dispatch_workflow.assert_called_once()
+    assert not app.mocks.messagebox.warnings
+
+
+def test_build_ci_runs_snapshot_records_fetch_time(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    client = MagicMock()
+    client.list_workflow_runs.return_value = []
+
+    with patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+        snapshot = app.app._build_ci_runs_snapshot(workspace)
+
+    assert snapshot.fetched_at is not None
+    # A fresh snapshot never loses its fetch time to the panel.
+    assert snapshot.fetched_at[:4].isdigit()
+
+
+def _run_dict(run_id: int, status: str) -> dict:
+    return {
+        "id": run_id,
+        "run_number": run_id,
+        "head_branch": "main",
+        "head_sha": "a" * 40,
+        "status": status,
+        "conclusion": None if status != "completed" else "success",
+    }
+
+
+def test_build_ci_runs_snapshot_details_only_the_active_run(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    client = MagicMock()
+    # Old finished runs plus one in flight: only the in-flight run is watched.
+    client.list_workflow_runs.return_value = [
+        _run_dict(11, "completed"),
+        _run_dict(12, "completed"),
+        _run_dict(13, "in_progress"),
+    ]
+    client.list_run_jobs.return_value = [
+        {"id": 21, "name": "validate", "status": "completed", "conclusion": "success"},
+        {"id": 22, "name": "test", "status": "in_progress", "conclusion": None},
+    ]
+    client.fetch_job_logs.side_effect = lambda _repo, job_id: {
+        21: "[runner] n8nPipelines/a.json : success\n",
+        22: "[runner] n8nPipelines/b.json : failure\n",
+    }[job_id]
+
+    with patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+        snapshot = app.app._build_ci_runs_snapshot(workspace)
+
+    # Jobs + logs fetched for the active run only; the finished runs stay rows.
+    client.list_run_jobs.assert_called_once_with("octo/repo", 13)
+    assert client.fetch_job_logs.call_args_list == [
+        (("octo/repo", 21),),
+        (("octo/repo", 22),),
+    ]
+    # Both the finished job and the in-flight job's logs are parsed.
+    assert snapshot.pipelines[21][0].rel == "n8nPipelines/a.json"
+    assert snapshot.pipelines[22][0].rel == "n8nPipelines/b.json"
+    assert snapshot.jobs[13][1].status == "in_progress"
+
+
+def test_refresh_ci_runs_is_noop_while_a_fetch_is_in_flight(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    app.app._ci_runs_fetch_in_flight = True
+    panel = MagicMock()
+
+    with patch("n8n_launcher.gui.app.GitHubClient") as client:
+        app.app._refresh_ci_runs(workspace, panel)
+
+    client.assert_not_called()
+    assert app.app._ci_runs_fetch_in_flight is True
+    app.app._drain_events()
+    panel.apply.assert_not_called()

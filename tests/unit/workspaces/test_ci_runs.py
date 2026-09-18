@@ -104,6 +104,55 @@ def test_job_human_status_prefers_conclusion_then_status() -> None:
     assert ci_runs.job_summary({"status": "inconnu"}).human_status == "inconnu"
 
 
+def test_job_current_step_returns_first_unfinished_step() -> None:
+    job = ci_runs.job_summary(
+        {
+            "id": 21,
+            "name": "test",
+            "steps": [
+                {"name": "Checkout", "conclusion": "success"},
+                {"id": "run-tests", "status": "in_progress"},
+                {"id": "after", "status": "queued"},
+            ],
+        }
+    )
+
+    assert job.current_step == ("run-tests", "in_progress")
+
+
+def test_job_current_step_none_when_all_completed_or_empty() -> None:
+    assert (
+        ci_runs.job_summary(
+            {
+                "id": 21,
+                "name": "validate",
+                "steps": [{"name": "Checkout", "conclusion": "success"}],
+            }
+        ).current_step
+        is None
+    )
+    assert ci_runs.job_summary({"id": 21, "name": "validate"}).current_step is None
+
+
+# --- run_status_is_active ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["queued", "waiting", "in_progress", "pending", "requested"],
+)
+def test_run_status_is_active_accepts_in_flight_statuses(status: str) -> None:
+    assert ci_runs.run_status_is_active(status) is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["completed", "success", "failure", "cancelled", "timed_out", "", None],
+)
+def test_run_status_is_active_rejects_finished_or_unknown(status) -> None:
+    assert ci_runs.run_status_is_active(status or "") is False
+
+
 # --- parse_pipeline_lines ----------------------------------------------------
 
 

@@ -7,7 +7,14 @@ call and spawns no thread. Everything it draws comes from a pre-assembled
 already-fetched GitHub payloads (see the ``compose_*`` helpers in
 :mod:`n8n_launcher.workspaces.ci_runs`). The panel only records the tree's
 expansion state between refreshes and forwards the actions (open a run on
-GitHub, refresh) to the callbacks the host wires up.
+GitHub, launch CI) to the callbacks the host wires up.
+
+There is no manual refresh button: while the runs tab is open, the host
+re-polls on a timer (see ``gui/ci_edit.py``) and applies fresh snapshots. The
+panel highlights whatever sits at the top of the tree — a run still in flight
+is auto-expanded with its live steps and pipeline progress, the "Lancer la CI"
+button is disabled while a run is running, and finished runs stay collapsed
+single rows unless the user expands them.
 
 Asserts are kept off the main thread by construction: ``refresh`` just asks
 the host to trigger a background fetch — the panel never blocks on I/O.
@@ -16,6 +23,7 @@ the host to trigger a background fetch — the panel never blocks on I/O.
 from __future__ import annotations
 
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
 from typing import Callable
 
@@ -40,6 +48,19 @@ _TAG_FAILURE = "#3f1d1d"
 _TAG_WAITING = "#3a2f0f"
 _TAG_SKIPPED = "#1e293b"
 _TAG_SELECTED = "#1e3056"
+
+# Human labels for the live *step* rows shown under an in-progress job.
+_STEP_LABELS: dict[str, str] = {
+    "success": "terminée",
+    "failure": "échouée",
+    "timed_out": "temps écoulé",
+    "cancelled": "annulée",
+    "skipped": "ignorée",
+    "in_progress": "en cours",
+    "queued": "en attente",
+    "waiting": "en attente",
+    "pending": "en attente",
+}
 
 
 def _run_mark(run: ci_runs.RunSummary) -> str:
@@ -66,6 +87,30 @@ def _job_mark(job: ci_runs.JobSummary) -> str:
     return _MARK_WAITING
 
 
+def _step_style(status: str) -> tuple[str, str]:
+    """Return (glyph, tag) for one step of an in-progress job."""
+    if status == "success":
+        return _MARK_SUCCESS, "success"
+    if status in ("failure", "timed_out", "action_required"):
+        return _MARK_FAILURE, "failure"
+    if status == "in_progress":
+        return _MARK_WAITING, "waiting"
+    return _MARK_SKIPPED, "skipped"
+
+
+def _step_label(status: str) -> str:
+    """Human French label for a step status, with the raw value as fallback."""
+    return _STEP_LABELS.get(status, status)
+
+
+def _format_fetched_at(iso_timestamp: str) -> str:
+    """Render an ISO timestamp as ``HH:MM:SS`` (local time); ``""`` when bad."""
+    try:
+        return datetime.fromisoformat(iso_timestamp).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+
+
 def _row_of(
     snapshot: ci_runs.RunsSnapshot,
 ) -> list[tuple[ci_runs.RunSummary, tuple[ci_runs.JobSummary, ...]]]:
@@ -79,13 +124,25 @@ def _run_badge(run: ci_runs.RunSummary) -> str:
 
 
 def runs_summary_text(snapshot: ci_runs.RunsSnapshot) -> str:
-    """Short header describing the whole snapshot."""
+    """Short header describing the whole snapshot.
+
+    Counts finished and in-flight runs and, when the host populated
+    ``fetched_at``, appends the time of the last successful poll so the
+    auto-refresh is visible without a button.
+    """
     if snapshot.error:
         return f"GitHub Actions indisponible : {snapshot.error}"
     if not snapshot.runs:
         return "Aucun run GitHub Actions pour ce workspace."
     completed = sum(1 for run in snapshot.runs if run.conclusion)
-    return f"{len(snapshot.runs)} run(s) · {completed} terminé(s)"
+    active = sum(1 for run in snapshot.runs if ci_runs.run_status_is_active(run.status))
+    parts = [f"{len(snapshot.runs)} run(s)", f"{completed} terminé(s)"]
+    if active:
+        parts.append(f"{active} en cours")
+    text = " · ".join(parts)
+    if snapshot.fetched_at:
+        text += f" — à jour {_format_fetched_at(snapshot.fetched_at)}"
+    return text
 
 
 class RunsPanel(tk.Frame):
@@ -94,8 +151,14 @@ class RunsPanel(tk.Frame):
     The widget is a plain renderer: it is fed :meth:`apply` with a
     :class:`~n8n_launcher.workspaces.ci_runs.RunsSnapshot` and shows a
     three-level tree whose tag colours encode each outcome. It never fetches
-    data itself: both the refresh button and the "open on GitHub" action
+    data itself: the "open on GitHub" action and the "Lancer la CI" button
     delegate to the host callbacks, keeping I/O and threading in the caller.
+
+    The host is expected to poll and :meth:`apply` fresh snapshots on a timer
+    while the panel is visible; there is deliberately no manual refresh button.
+    A run still in flight is auto-expanded (with its live steps and pipeline
+    rows) and disables the "Lancer la CI" button, since launching a second CI
+    run while one is running would cancel the live one.
     """
 
     instances: list["RunsPanel"] = []
@@ -128,10 +191,6 @@ class RunsPanel(tk.Frame):
             anchor="w",
         )
         self._summary.pack(side="left", expand=True, fill="x")
-        self._refresh_btn = ttk.Button(
-            header, text="Actualiser", style="Secondary.TButton", command=self.refresh
-        )
-        self._refresh_btn.pack(side="right", padx=(6, 0))
         self._open_btn = ttk.Button(
             header,
             text="Ouvrir sur GitHub",
@@ -193,19 +252,28 @@ class RunsPanel(tk.Frame):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
+        # While a run is in flight, launching a second one would cancel it
+        # (the generated workflow carries ``concurrency: cancel-in-progress``),
+        # so button state is derived straight from the snapshot.
+        self.set_run_enabled(not self.has_active_run)
+
         if snapshot.error or not snapshot.runs:
             if snapshot.error:
                 self._empty.config(
                     text=f"GitHub Actions indisponible : {snapshot.error}\n"
-                    "Vérifiez la connexion puis « Actualiser »."
+                    "Le panneau s'actualise automatiquement dès que GitHub répond."
                 )
             else:
                 self._empty.config(text="Aucun run GitHub Actions pour ce workspace.")
             return
         self._empty.config(text="")
 
+        active_run_ids = {
+            run.id for run in snapshot.runs if ci_runs.run_status_is_active(run.status)
+        }
         for run, jobs in _row_of(snapshot):
             run_iid = self.layout_key(run)
+            active_run = run.id in active_run_ids
             conclusion = run.conclusion or run.status
             tag = {
                 "success": "success",
@@ -220,10 +288,13 @@ class RunsPanel(tk.Frame):
                 text=f"{_run_mark(run)}  {_run_badge(run)}  ({run.human_status})",
                 values=(conclusion,),
                 tags=(tag,),
-                open=run_iid in self._expanded,
+                open=active_run or run_iid in self._expanded,
             )
             for job in jobs:
                 job_iid = f"job-{run.id}-{job.id}"
+                # A job of an in-flight run without a conclusion is the live
+                # one; everything else is over (or still queued behind it).
+                live_job = active_run and job.conclusion is None
                 job_tag = {
                     "success": "success",
                     "failure": "failure",
@@ -232,15 +303,31 @@ class RunsPanel(tk.Frame):
                     "cancelled": "skipped",
                     "skipped": "skipped",
                 }.get(job.conclusion or job.status, "waiting")
+                detail = job.human_status
+                if live_job and job.current_step is not None:
+                    detail += f" — étape : {job.current_step[0]}"
                 self.tree.insert(
                     run_iid,
                     "end",
                     iid=job_iid,
                     text=f"    {_job_mark(job)}  {job.name}",
-                    values=(job.human_status,),
+                    values=(detail,),
                     tags=(job_tag,),
-                    open=job_iid in self._expanded,
+                    open=live_job or job_iid in self._expanded,
                 )
+                if live_job:
+                    # The live job's own step list is the closest thing to a
+                    # progress meter: finished steps check-marked, the running
+                    # one highlighted, the rest blanked out.
+                    for name, status in job.steps:
+                        mark, step_tag = _step_style(status)
+                        self.tree.insert(
+                            job_iid,
+                            "end",
+                            text=f"        {mark}  étape : {name}",
+                            values=(_step_label(status),),
+                            tags=(step_tag,),
+                        )
                 for pipeline in snapshot.pipelines.get(job.id, ()):
                     self.tree.insert(
                         job_iid,
@@ -249,11 +336,27 @@ class RunsPanel(tk.Frame):
                         values=(pipeline.detail or pipeline.status,),
                         tags=("muted",) if pipeline.status == "waiting" else (),
                     )
-            self.tree.item(run_iid, open=run_iid in self._expanded)
+            self.tree.item(run_iid, open=active_run or run_iid in self._expanded)
 
     @property
     def expanded(self) -> set[str]:
         return set(self._expanded)
+
+    @property
+    def has_active_run(self) -> bool:
+        """True when the last snapshot holds a run that is still in flight."""
+        return any(
+            ci_runs.run_status_is_active(run.status) for run in self._last.runs
+        )
+
+    def set_run_enabled(self, enabled: bool) -> None:
+        """Enable or disable the "Lancer la CI" button (no-op without a host)."""
+        if not hasattr(self, "_run_btn"):
+            return
+        try:
+            self._run_btn.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            pass
 
     def remember_expansion(self, iid: str, is_open: bool) -> None:
         """Record an open/closed state so a later :meth:`apply` keeps it."""

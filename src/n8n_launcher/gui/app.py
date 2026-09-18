@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Callable
@@ -122,6 +123,10 @@ class LauncherApp:
         self._ci_token: str | None = None
         self._ci_token_declined = False
         self._ci_runs_cache: dict[str, ci_runs.RunsSnapshot] = {}
+        # Mirrors ``_poll_in_flight`` for the run panel: the auto-refresh must
+        # never stack overlapping fetch workers when a poll takes longer than
+        # the cadence (5s while a run is in flight).
+        self._ci_runs_fetch_in_flight = False
         self._apply_theme()
         self._configure_root()
         self._build_ui()
@@ -1017,6 +1022,20 @@ class LauncherApp:
                 parent=self.root,
             )
             return
+        # The generated workflow uses ``concurrency: cancel-in-progress``: a
+        # second dispatch would cancel the run the user is watching. Refuse
+        # while the cached snapshot shows an in-flight run.
+        snapshot = self._ci_runs_cache.get(workspace.id)
+        if snapshot and any(
+            ci_runs.run_status_is_active(run.status) for run in snapshot.runs
+        ):
+            messagebox.showwarning(
+                "n8n Launcher",
+                "Un run CI est déjà en cours pour ce workspace. Attendez son "
+                "achèvement avant d'en lancer un autre.",
+                parent=self.root,
+            )
+            return
         token = self._ci_token_for_ui()
         if token is None:
             return
@@ -1096,17 +1115,34 @@ class LauncherApp:
         asked for (once per session, and only to remember it if the user wants)
         when no Git/``gh`` credential is available. The worker never touches
         Tk: it hands the rendered snapshot back through the event queue, whose
-        drain runs ``panel.apply`` on the main thread.
+        drain runs ``panel.apply`` on the main thread. A fetch already in
+        progress makes this a no-op — the auto-poll must never stack
+        overlapping workers (the panel is refreshed again on the next tick).
         """
+        if self._ci_runs_fetch_in_flight:
+            return
         token = self._ci_token_for_ui()
         if token is None:
             return
 
         def worker() -> None:
-            snapshot = self._build_ci_runs_snapshot(workspace)
-            self._ci_runs_cache[workspace.id] = snapshot
-            self.events.put((lambda: panel.apply(snapshot), None))
+            try:
+                snapshot = self._build_ci_runs_snapshot(workspace)
+                self._ci_runs_cache[workspace.id] = snapshot
+                self.events.put((lambda: panel.apply(snapshot), None))
+            finally:
+                # Release the lock on the main thread: the next poll callback
+                # runs after the drain, so a fresh fetch is allowed right away.
+                self.events.put(
+                    (
+                        lambda: setattr(
+                            self, "_ci_runs_fetch_in_flight", False
+                        ),
+                        None,
+                    )
+                )
 
+        self._ci_runs_fetch_in_flight = True
         threading.Thread(
             target=worker, name="n8n-launcher-ci-runs", daemon=True
         ).start()
@@ -1131,9 +1167,12 @@ class LauncherApp:
         """Fetch runs/jobs/logs and normalise them into a snapshot (worker-thread safe).
 
         Every failure is turned into a snapshot ``error`` so the panel renders a
-        readable message instead of the worker dying. Only the five most recent
-        runs have their jobs and logs fetched: that keeps the API budget (and
-        the wait) bounded while the panel still lists every recent run.
+        readable message instead of the worker dying. Only the run the user is
+        watching — the in-flight one, or the newest when nothing runs — has its
+        jobs and logs fetched; every other run is just listed. That keeps the
+        API budget (and the wait) bounded and stops old failures from flooding
+        the panel. The wall-clock fetch time is recorded as ``fetched_at`` so
+        the panel can show its freshness.
         """
         remote = self.workspace_manager.git_remote_url(workspace)
         repo_path = ci.github_repo_path(remote) if remote else None
@@ -1158,31 +1197,47 @@ class LauncherApp:
 
         raw_jobs: dict[int, list[dict[str, Any]]] = {}
         pipelines: dict[int, list[ci_runs.PipelineResult]] = {}
-        for run in runs[:5]:
-            run_id = int(run.get("id") or 0)
-            if not run_id:
-                continue
-            try:
-                jobs = client.list_run_jobs(repo_path, run_id)
-            except GitHubError:
-                continue
-            raw_jobs[run_id] = jobs
-            for job in jobs:
-                job_id = int(job.get("id") or 0)
-                if not job_id or job.get("status") != "completed":
-                    continue
+        # Only the run worth detailing is expanded: an in-flight run (that is
+        # exactly what the user watches) or, when nothing is running, the
+        # newest one. Every other run stays a compact single row — fetching
+        # jobs and logs for all recent runs would only dump old failures the
+        # user explicitly does not want to see.
+        focus_run = next(
+            (
+                run
+                for run in runs
+                if ci_runs.run_status_is_active(str(run.get("status") or ""))
+            ),
+            None,
+        ) or (runs[0] if runs else None)
+        if focus_run is not None:
+            run_id = int(focus_run.get("id") or 0)
+            if run_id:
                 try:
-                    log_text = client.fetch_job_logs(repo_path, job_id)
+                    jobs = client.list_run_jobs(repo_path, run_id)
                 except GitHubError:
-                    continue
-                parsed = ci_runs.parse_pipeline_lines(log_text)
-                if parsed:
-                    pipelines[job_id] = parsed
+                    jobs = []
+                raw_jobs[run_id] = jobs
+                for job in jobs:
+                    job_id = int(job.get("id") or 0)
+                    if not job_id:
+                        continue
+                    # Logs are fetched for every job of the focus run: the
+                    # finished ones (final summary) and the in-flight one (live
+                    # ``[runner]`` progress lines), so the panel can detail it.
+                    try:
+                        log_text = client.fetch_job_logs(repo_path, job_id)
+                    except GitHubError:
+                        continue
+                    parsed = ci_runs.parse_pipeline_lines(log_text)
+                    if parsed:
+                        pipelines[job_id] = parsed
         return ci_runs.compose_snapshot(
             repo_path=repo_path,
             runs=runs,
             raw_jobs=raw_jobs,
             pipelines=pipelines,
+            fetched_at=datetime.now().astimezone().isoformat(),
         )
 
     def configure_ci_credentials_selected(self) -> None:

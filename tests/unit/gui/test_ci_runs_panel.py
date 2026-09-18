@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from n8n_launcher.gui.ci_runs import RunsPanel, runs_summary_text
+from n8n_launcher.gui.ci_runs import RunsPanel, _format_fetched_at, runs_summary_text
 from n8n_launcher.workspaces import ci_runs
 
 from helpers import FakeTk, FakeTtk, fake_runs_panel_bases  # noqa: E402
@@ -23,13 +23,21 @@ def _run(run_id: int = 11, *, conclusion: str | None = "success", status: str = 
     )
 
 
-def _job(job_id: int = 21, name: str = "validate", *, conclusion: str | None = "success"):
+def _job(
+    job_id: int = 21,
+    name: str = "validate",
+    *,
+    conclusion: str | None = "success",
+    status: str = "completed",
+    steps=(),
+):
     return ci_runs.JobSummary(
         id=job_id,
         name=name,
-        status="completed",
+        status=status,
         conclusion=conclusion,
         url=f"https://github.com/octo/repo/actions/jobs/{job_id}",
+        steps=tuple(steps),
     )
 
 
@@ -38,13 +46,14 @@ def _pipeline(rel: str = "n8nPipelines/a.json", status: str = "success", detail:
     return ci_runs.PipelineResult(rel=rel, status=status, detail=detail, mark=mark)
 
 
-def _snapshot(*, runs=(), jobs=None, pipelines=None, error=None):
+def _snapshot(*, runs=(), jobs=None, pipelines=None, error=None, fetched_at=None):
     return ci_runs.RunsSnapshot(
         repo_path="octo/repo",
         runs=tuple(runs),
         jobs=dict(jobs or {}),
         pipelines=dict(pipelines or {}),
         error=error,
+        fetched_at=fetched_at,
     )
 
 
@@ -237,4 +246,100 @@ def test_runs_summary_text_variants() -> None:
             ]
         )
     )
-    assert summary == "2 run(s) · 1 terminé(s)"
+    assert summary == "2 run(s) · 1 terminé(s) · 1 en cours"
+
+
+def test_runs_summary_text_includes_last_poll_time() -> None:
+    summary = runs_summary_text(
+        _snapshot(runs=[_run(11)], fetched_at="2026-09-18T14:03:05+02:00")
+    )
+
+    assert summary == "1 run(s) · 1 terminé(s) — à jour 14:03:05"
+
+
+def test_has_active_run_tracks_last_snapshot() -> None:
+    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
+        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    ):
+        panel, _refresh, _open = _build()
+        assert panel.has_active_run is False
+
+        panel.apply(_snapshot(runs=[_run(11, conclusion=None, status="in_progress")]))
+        assert panel.has_active_run is True
+
+        panel.apply(_snapshot(runs=[_run(11)]))
+        assert panel.has_active_run is False
+
+
+def test_run_button_state_follows_snapshot() -> None:
+    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
+        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    ):
+        panel, _refresh, _open = _build(run=MagicMock())
+
+        panel.apply(_snapshot(runs=[_run(11, conclusion=None, status="in_progress")]))
+        assert panel._run_btn.state == "disabled"
+
+        panel.apply(_snapshot(runs=[_run(11, conclusion="failure")]))
+        assert panel._run_btn.state == "normal"
+
+
+def test_run_button_toggle_is_noop_without_host() -> None:
+    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
+        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    ):
+        panel, _refresh, _open = _build()
+        panel.set_run_enabled(False)
+        assert not hasattr(panel, "_run_btn")
+
+
+def test_apply_auto_expands_active_run_and_live_job() -> None:
+    snapshot = _snapshot(
+        runs=[_run(11, conclusion=None, status="in_progress")],
+        jobs={
+            11: (
+                _job(21, "validate", conclusion="success"),
+                _job(
+                    22,
+                    "test",
+                    conclusion=None,
+                    status="in_progress",
+                    steps=[
+                        ("Checkout", "success"),
+                        ("Lancer le runner", "in_progress"),
+                        ("Cleanup", "queued"),
+                    ],
+                ),
+            )
+        },
+    )
+
+    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
+        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+
+    assert panel.tree.item("run-11")["open"] is True
+    # Completed job of the active run stays collapsed; live job is opened.
+    assert panel.tree.item("job-11-21")["open"] is False
+    assert panel.tree.item("job-11-21")["values"] == ["réussi"]
+    live_job = panel.tree.item("job-11-22")
+    assert live_job["open"] is True
+    assert live_job["values"] == ["en cours — étape : Lancer le runner"]
+
+    step_iids = panel.tree.get_children("job-11-22")
+    step_texts = [panel.tree.item(iid)["text"] for iid in step_iids]
+    assert step_texts[0].strip().startswith("\u2714")
+    assert "Checkout" in step_texts[0]
+    assert step_texts[1].strip().startswith("\u25fb")
+    assert "Lancer le runner" in step_texts[1]
+    assert panel.tree.item(step_iids[1])["values"] == ["en cours"]
+    assert step_texts[2].strip().startswith("\u2013")
+    assert panel.tree.item(step_iids[2])["values"] == ["en attente"]
+
+
+def test_format_fetched_at_helpers() -> None:
+    assert _format_fetched_at("2026-09-18T14:03:05+02:00") == "14:03:05"
+    assert _format_fetched_at("garbage") == ""
+    assert _format_fetched_at("") == ""

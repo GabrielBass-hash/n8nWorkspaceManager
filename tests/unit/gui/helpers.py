@@ -172,6 +172,8 @@ class FakeTk:
             self._bindings: dict[str, object] = {}
             self.destroyed = False
             self._clipboard = ""
+            # Pending ``after`` timers, keyed by id (tests drive them manually).
+            self._after_callbacks: list[tuple[int, object]] = []
             FakeTk.Toplevel.instances.append(self)
 
         def title(self, _value: str) -> None:
@@ -200,6 +202,18 @@ class FakeTk:
 
         def destroy(self) -> None:
             self.destroyed = True
+            self._after_callbacks.clear()
+
+        def after(self, delay: int, callback) -> int:
+            self._after_callbacks.append((delay, callback))
+            return len(self._after_callbacks) - 1
+
+        def after_cancel(self, _after_id: int) -> None:
+            self._after_callbacks.clear()
+
+        def winfo_exists(self) -> int:
+            """Mirror Tk's ``winfo_exists``: 0 on a destroyed widget, else 1."""
+            return 0 if self.destroyed else 1
 
         def wait_window(self) -> None:
             """Drive the dialog: act as if the user pressed Return, or Escape."""
@@ -289,6 +303,13 @@ class FakeTtk:
             self.packed = True
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
+
+        def configure(self, **kwargs) -> None:
+            """Mirror ttk's ``configure`` for the handful of knobs we touch."""
+            for key in ("text", "command", "style", "state"):
+                if key in kwargs:
+                    setattr(self, key, kwargs.pop(key))
+            self._options.update(kwargs)
 
     class Treeview:
         instances: list["FakeTtk.Treeview"] = []

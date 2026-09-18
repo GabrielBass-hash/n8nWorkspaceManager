@@ -16,7 +16,10 @@ Two dialogs live here:
 
 Neither dialog reaches the network itself except through the workspace
 manager (credentials flow) and the runs tab's host callbacks; eligibility is
-computed purely from the export files on disk.
+computed purely from the export files on disk. The "Déroulement" tab has no
+manual refresh button: while the dialog lives, :func:`_schedule_runs_poll`
+re-fetches on a timer (5 s while a run is in flight, 30 s otherwise) through
+the host's ``runs_refresh`` callback.
 """
 
 from __future__ import annotations
@@ -46,6 +49,11 @@ _CHECKBOX = "\u2611"
 _CHECKBOX_EMPTY = "\u2610"
 _BLOCKED = "\u2013"
 
+# Auto-refresh cadence of the runs tab: quick while a run is in flight (that's
+# the phase the user watches), much slower otherwise to spare the API.
+RUNS_POLL_ACTIVE_MS = 5000
+RUNS_POLL_IDLE_MS = 30000
+
 
 def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk) -> None:
     """Center a modal dialog over its parent and make it modal (best-effort)."""
@@ -62,6 +70,38 @@ def _copy_text(widget: tk.Misc, text: str) -> None:
     try:
         widget.clipboard_clear()
         widget.clipboard_append(text)
+    except Exception:
+        pass
+
+
+def _schedule_runs_poll(
+    dialog: tk.Toplevel,
+    panel: RunsPanel,
+    runs_refresh: Callable[[RunsPanel], None],
+) -> None:
+    """Poll the runs panel on a timer while the dialog is open.
+
+    There is no manual refresh button: this replaces it. Each tick delegates
+    the actual fetch to the host (which runs it on a background thread) through
+    ``runs_refresh``; the cadence adapts to the last snapshot — 5 s while a
+    run is in flight, 30 s otherwise — so the GitHub API is not hammered when
+    nothing is running. The loop self-terminates once the dialog is destroyed:
+    the fake Toplevel drops pending timers on ``destroy``, while the real Tk
+    path hits the ``winfo_exists`` TclError guard on the next stale tick.
+    """
+
+    def tick() -> None:
+        try:
+            if not dialog.winfo_exists():
+                return
+            runs_refresh(panel)
+            cadence = RUNS_POLL_ACTIVE_MS if panel.has_active_run else RUNS_POLL_IDLE_MS
+            dialog.after(cadence, tick)
+        except Exception:
+            return
+
+    try:
+        dialog.after(RUNS_POLL_ACTIVE_MS, tick)
     except Exception:
         pass
 
@@ -86,13 +126,13 @@ def prompt_ci_workflows(
     "Déroulement" a read-only :class:`RunsPanel` rendered from the host's
     cached snapshot. ``runs_source()`` must be a synchronous, I/O-free callable
     returning the latest snapshot; ``runs_refresh`` is invoked once on open and
-    on every "Actualiser" click so the host can re-fetch in a background thread
-    and call :meth:`RunsPanel.apply` on the main thread;     ``runs_open`` is
-    called with a run when the user double-clicks its row. ``runs_run``, when
-    provided, adds the panel's "Lancer la CI" button and is called with the
-    panel on click so the host can dispatch a run off-thread. Omitting
-    ``runs_source`` keeps the exact single-pane layout, which is what older
-    callers still get.
+    then on a timer (:func:`_schedule_runs_poll`) so the host can re-fetch in a
+    background thread and call :meth:`RunsPanel.apply` on the main thread —
+    there is no manual refresh button. ``runs_open`` is called with a run when
+    the user double-clicks its row. ``runs_run``, when provided, adds the
+    panel's "Lancer la CI" button and is called with the panel on click so the
+    host can dispatch a run off-thread. Omitting ``runs_source`` keeps the
+    exact single-pane layout, which is what older callers still get.
     """
     provided = ci.provided_credentials(workspace.git.ci_credentials)
     exports: dict[str, dict[str, Any]] = {}
@@ -321,6 +361,9 @@ def prompt_ci_workflows(
         if runs_refresh is not None:
             panel.refresh_cb = lambda: runs_refresh(panel)
             runs_refresh(panel)
+            # No manual refresh button: keep the tab in sync on a timer while
+            # the dialog is open (fast while a run is in flight, slow otherwise).
+            _schedule_runs_poll(dialog, panel, runs_refresh)
         if runs_open is not None:
             panel.open_run_cb = runs_open
         if runs_run is not None:
