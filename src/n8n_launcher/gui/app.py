@@ -1508,9 +1508,14 @@ class LauncherApp:
             if running:
                 self.workspace_manager.stop(workspace_id)
             self.workspace_manager.delete(workspace_id)
+
+        def on_success() -> None:
+            # The worker stopped the stack and deleted the config: the
+            # selection is cleared here, on the main thread, never on the
+            # worker (which must not touch Tk state).
             self._selected_id = None
 
-        self._run_async(action)
+        self._run_async(action, on_success=on_success)
 
     def _run_async(
         self,
