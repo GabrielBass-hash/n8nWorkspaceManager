@@ -29,6 +29,7 @@ def make_test_release() -> Release:
 def update_worker_patches(target, *, writable: bool):
     return [
         patch("n8n_launcher.gui.update_flow.updater.fetch_latest_release", return_value=make_test_release()),
+        patch("n8n_launcher.gui.update_flow.updater.current_version", return_value="1.0.02"),
         patch("n8n_launcher.gui.update_flow.updater.install_target", return_value=target),
         patch("n8n_launcher.gui.update_flow.updater.compatible_asset", return_value=TEST_ASSET),
         patch("n8n_launcher.gui.update_flow.os.access", return_value=writable),

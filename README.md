@@ -134,6 +134,29 @@ prefer option 1.
 
 ## Releases
 
-Pushing to `main` automatically runs unit tests (blocker) and builds the per-OS distribution above. If `version` in `pyproject.toml` has been bumped, a GitHub Release `v<version>` is created with all three artifacts attached.
+The launcher version is a strict SemVer (`MAJOR.MINOR.PATCH`), defined in a
+single place — `__version__` in `src/n8n_launcher/__init__.py`. `pyproject.toml`
+inherits it (`dynamic = ["version"]`), `scripts/build.py` embeds it into the
+bundle and `platform/updater.py` compares it against GitHub releases, so a bump
+never goes out of sync.
+
+Bump the version explicitly (never by editing the file by hand):
+
+```bash
+python scripts/bump_version.py patch   # 4.0.2 -> 4.0.3 (bugfix)
+python scripts/bump_version.py minor   # 4.0.3 -> 4.1.0 (feature)
+python scripts/bump_version.py major   # 4.1.0 -> 5.0.0 (breaking)
+python scripts/bump_version.py --to 4.2.0     # pin an exact version
+python scripts/bump_version.py --dry-run patch  # preview only
+```
+
+The script refuses to run on a dirty working tree and refuses to produce a
+version whose `v<version>` tag already exists (`--force` bypasses both).
+
+Releases are published **only from `main`**. When a push to `main` carries a
+new source version, the release workflow tags it (`v<version>`), runs the tests,
+builds the per-OS distribution above and attaches all three artifacts to a
+GitHub Release. Pushes that do not change the version are skipped, so there is
+no automatic bumping and no release spam from `dev` or feature branches.
 
 The launcher is independent of the source repository that inspired some of its API and workflow-sync boundaries. It does not reuse that repository's weather database schema, runtime state, or Docker sync service.

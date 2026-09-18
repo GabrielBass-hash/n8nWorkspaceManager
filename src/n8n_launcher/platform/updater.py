@@ -51,11 +51,11 @@ class UpdateError(RuntimeError):
 
 @dataclass(frozen=True, order=True)
 class Version:
-    """Comparable ``major.minor.build`` version triplet."""
+    """Comparable SemVer ``MAJOR.MINOR.PATCH`` triplet."""
 
     major: int
     minor: int
-    build: int
+    patch: int
 
 
 @dataclass(frozen=True)
@@ -77,10 +77,11 @@ class Release:
 
 
 def parse_version(text: str) -> Version:
-    """Parse ``major[.minor[.build]]``, tolerating a ``v`` prefix and padding.
+    """Parse ``MAJOR[.MINOR[.PATCH]]``, tolerating a ``v`` prefix.
 
-    GitHub tags use zero-padded builds (``v0.4.01``) while the source tree
-    keeps a plain ``0.3.0``; both normalize to the same integer triplet.
+    GitHub tags historically used zero-padded builds (``v0.4.01``) while the
+    current releases are plain SemVer (``v4.0.2``); both normalize to the same
+    integer triplet.
     """
     raw = text.strip()
     if raw[:1] in ("v", "V"):

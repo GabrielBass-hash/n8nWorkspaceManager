@@ -17,17 +17,19 @@ import struct
 import subprocess
 import sys
 import tempfile
-import tomllib
 import zlib
 from pathlib import Path
+
+# Repository root, resolved from this file so the build works from any CWD.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 APP_NAME = "n8n-launcher"
 DISPLAY_NAME = "n8n Launcher"
 BUNDLE_ID = "io.launcher.n8n"
 # Thin root entry point used instead of src/n8n_launcher/__main__.py:
 # PyInstaller runs it correctly while the package keeps its relative imports.
-ENTRY_POINT = "run.py"
-ICON_SOURCE = Path("assets/icon.png")
+ENTRY_POINT = PROJECT_ROOT / "run.py"
+ICON_SOURCE = PROJECT_ROOT / "assets" / "icon.png"
 
 DMG_WINDOW_RECT = ((60, 80), (720, 490))  # 660 x 410
 DMG_BACKGROUND_SIZE = (660, 410)
@@ -39,8 +41,13 @@ def _run(command: list[str]) -> None:
 
 
 def project_version() -> str:
-    with open("pyproject.toml", "rb") as handle:
-        return str(tomllib.load(handle)["project"]["version"])
+    """Read the version from the package's single source of truth."""
+    src = str(PROJECT_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from n8n_launcher import __version__
+
+    return __version__
 
 
 def _png_chunk(tag: bytes, data: bytes) -> bytes:
@@ -89,7 +96,7 @@ def render_background(path: Path) -> None:
 
 def build_icns() -> Path:
     """Render ``assets/icon.png`` into a full-resolution ``.icns``."""
-    scratch = Path("build") / "icon"
+    scratch = PROJECT_ROOT / "build" / "icon"
     iconset = scratch / "icon.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
@@ -165,7 +172,7 @@ def _hidden_import_args() -> list[str]:
 
 
 def build_onedir() -> Path:
-    app = Path("dist") / f"{APP_NAME}.app"
+    app = PROJECT_ROOT / "dist" / f"{APP_NAME}.app"
     if app.exists():
         shutil.rmtree(app)
     _run(
@@ -181,9 +188,9 @@ def build_onedir() -> Path:
             "--osx-bundle-identifier",
             BUNDLE_ID,
             "--paths",
-            "src",
+            str(PROJECT_ROOT / "src"),
             *_hidden_import_args(),
-            ENTRY_POINT,
+            str(ENTRY_POINT),
         ]
     )
     return app
@@ -200,9 +207,9 @@ def build_onefile() -> None:
             "--name",
             APP_NAME,
             "--paths",
-            "src",
+            str(PROJECT_ROOT / "src"),
             *_hidden_import_args(),
-            ENTRY_POINT,
+            str(ENTRY_POINT),
         ]
     )
 
@@ -232,9 +239,9 @@ def patch_info_plist(app: Path) -> None:
 
 def build_dmg(app: Path) -> None:
     """Package the signed .app into a styled drag-and-drop .dmg via dmgbuild."""
-    scratch = Path("build") / "dmg"
+    scratch = PROJECT_ROOT / "build" / "dmg"
     scratch.mkdir(parents=True, exist_ok=True)
-    icns = Path("build") / "icon" / "icon.icns"
+    icns = PROJECT_ROOT / "build" / "icon" / "icon.icns"
     background = scratch / "background.png"
     render_background(background)
     settings = scratch / "settings.py"
@@ -267,7 +274,7 @@ def build_dmg(app: Path) -> None:
         ),
         encoding="utf-8",
     )
-    dmg = Path("dist") / f"{APP_NAME}-macos.dmg"
+    dmg = PROJECT_ROOT / "dist" / f"{APP_NAME}-macos.dmg"
     if dmg.exists():
         dmg.unlink()
     _run(

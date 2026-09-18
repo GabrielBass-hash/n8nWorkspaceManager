@@ -4,11 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n8n-launcher"
-
-
-version = "3.0.04"
-
-
+dynamic = ["version"]
 description = "Cross-platform desktop launcher for isolated n8n workspaces"
 requires-python = ">=3.12"
 dependencies = [
@@ -30,6 +26,9 @@ n8n-launcher = "n8n_launcher.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "n8n_launcher.__version__"}
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "scripts"]

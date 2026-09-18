@@ -6,6 +6,8 @@ Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu
 
 Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via `dmgbuild` with app icon + full `Info.plist`), one-file `.exe` (Windows), `.AppImage` (Linux). CI builds all three in the `build` job and the release-asset job.
 
+The launcher version is a single-source SemVer (`MAJOR.MINOR.PATCH`) declared in `src/n8n_launcher/__init__.py` (`__version__`); `pyproject.toml` inherits it via `dynamic = ["version"]`, `scripts/build.py` embeds it, `platform/updater.py` compares it. Bump it with `python scripts/bump_version.py <patch|minor|major>` (or `--to X.Y.Z`; `--dry-run` previews; refuses on a dirty tree or an already-tagged version, `--force` bypasses). Releases are published only from `main` and only when the source version differs from the last git tag — no auto-bump, no `[skip ci]` reliance.
+
 ## Commands
 
 ```bash
@@ -28,6 +30,10 @@ pytest tests/unit/docker/test_compose.py::test_render_compose_managed -v
 # Build desktop executable (macOS: .dmg via dmgbuild; Linux/Windows: one-file exe)
 python -m pip install -e '.[packaging]'
 python scripts/build.py
+
+# Bump the launcher SemVer (single source: src/n8n_launcher/__init__.py)
+python scripts/bump_version.py patch|minor|major        # or: --to X.Y.Z
+python scripts/bump_version.py --dry-run patch          # preview without writing
 
 # Additional Linux AppImage (after scripts/build.py produced dist/n8n-launcher)
 bash scripts/build_appimage.sh

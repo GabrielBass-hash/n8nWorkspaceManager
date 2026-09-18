@@ -1,3 +1,7 @@
 """Desktop launcher for isolated n8n workspaces."""
 
-__version__ = "1.0.02"
+#: Single source of truth for the launcher version (SemVer ``MAJOR.MINOR.PATCH``).
+#: ``pyproject.toml`` declares ``dynamic = ["version"]`` and reads it from here,
+#: ``scripts/build.py`` embeds it into the bundle and ``platform/updater.py``
+#: compares it against GitHub releases. Bump it only with ``scripts/bump_version.py``.
+__version__ = "4.0.2"

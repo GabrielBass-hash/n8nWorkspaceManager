@@ -46,7 +46,8 @@ def test_parse_version_normalizes_prefix_and_padding() -> None:
     assert parse_version("0.4.01") == parse_version("v0.4.1")
     assert parse_version("v1.2.34") == parse_version("1.2.034")
     assert parse_version("5").major == 5
-    assert parse_version("1.2.3").build == 3
+    assert parse_version("1.2.3").patch == 3
+    assert parse_version("v4.0.2").patch == 2
 
 
 def test_parse_version_rejects_garbage() -> None:
