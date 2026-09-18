@@ -14,7 +14,13 @@ from uuid import uuid4
 from ..core.config import ConfigStore
 from ..core.models import AppConfig, DbConfig, DbMode, Workspace, WorkspaceState
 from ..core.paths import compose_file
-from ..database import MigrationRunner, configure_db_credential, detect_migrations
+from ..database import (
+    DATA_DATABASE,
+    DATA_USER,
+    MigrationRunner,
+    configure_db_credential,
+    detect_migrations,
+)
 from ..docker.compose import write_compose
 from ..docker.manager import DockerManager, DockerError, parse_compose_status
 from ..git import (
@@ -101,24 +107,35 @@ class WorkspaceManager:
     def reconcile_all(self) -> int:
         """Sync persisted states with Docker reality and save the changes.
 
-        Returns the number of workspaces whose state changed.
+        Returns the number of workspaces whose state changed. Live states are
+        probed *before* taking the config lock (``docker status`` can take
+        seconds), then the changes are applied through one locked
+        ``store.mutate`` so a concurrent edit is never overwritten by a stale
+        full-save.
         """
-        changed = 0
         try:
             config = self.store.load()
         except Exception:
-            return changed
+            return 0
+        updates: dict[str, WorkspaceState] = {}
         for workspace in config.workspaces:
             live = self.live_state(workspace)
             if live is not workspace.state:
-                workspace.state = live
-                changed += 1
-        if changed:
-            try:
-                self.store.save(config)
-            except Exception:
-                pass
-        return changed
+                updates[workspace.id] = live
+        if not updates:
+            return 0
+
+        def apply(config: AppConfig) -> None:
+            for workspace in config.workspaces:
+                live = updates.get(workspace.id)
+                if live is not None and live is not workspace.state:
+                    workspace.state = live
+
+        try:
+            self.store.mutate(apply)
+        except Exception:
+            return 0
+        return len(updates)
 
     def create(
         self,
@@ -132,7 +149,7 @@ class WorkspaceManager:
         """Create and persist a new workspace, scaffolding its folders."""
         if not name.strip():
             raise WorkspaceError("Workspace name is required")
-        config = self.store.load()
+        reserved = {workspace.port for workspace in self.store.load().workspaces}
         workspace_id = uuid4().hex[:8]
         migrations = detect_migrations(workflows_dir)
         if db is None:
@@ -142,7 +159,6 @@ class WorkspaceManager:
                 db = DbConfig(DbMode.NONE)
         if db.mode is DbMode.MANAGED and not db.password:
             db = self._managed_db_config()
-        reserved = {workspace.port for workspace in config.workspaces}
         selected_port = port or suggest_port(reserved=reserved)
         if selected_port in reserved:
             raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
@@ -155,33 +171,45 @@ class WorkspaceManager:
             db=db,
             n8n_version=n8n_version,
         )
-        config.workspaces.append(workspace)
-        self.store.save(config)
-        return workspace
+
+        def append(config: AppConfig) -> Workspace:
+            # Re-check under the lock: a concurrent creation may have claimed
+            # the port suggested from an earlier snapshot.
+            if workspace.port in {item.port for item in config.workspaces}:
+                raise WorkspaceError(
+                    f"Port is already used by another workspace: {workspace.port}"
+                )
+            config.workspaces.append(workspace)
+            return workspace
+
+        return self.store.mutate(append)
 
     def update(self, workspace_id: str, **changes: object) -> Workspace:
         """Update the allowed workspace fields and flag a restart when needed."""
-        config = self.store.load()
-        current = self._find(config, workspace_id)
         allowed = {"name", "workflows_dir", "port", "db", "git", "n8n_version"}
         unknown = set(changes) - allowed
         if unknown:
             raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
-        updated = replace(current, **changes)
-        if any(key in changes for key in ("workflows_dir", "port", "db")):
-            updated.restart_required = True
-        config.workspaces[config.workspaces.index(current)] = updated
-        self.store.save(config)
-        return updated
+
+        def apply(config: AppConfig) -> Workspace:
+            current = self._find(config, workspace_id)
+            updated = replace(current, **changes)
+            if any(key in changes for key in ("workflows_dir", "port", "db", "n8n_version")):
+                updated.restart_required = True
+            config.workspaces[config.workspaces.index(current)] = updated
+            return updated
+
+        return self.store.mutate(apply)
 
     def delete(self, workspace_id: str) -> None:
         """Remove a stopped workspace from the configuration."""
-        config = self.store.load()
-        workspace = self._find(config, workspace_id)
-        if workspace.state is not WorkspaceState.STOPPED:
-            raise WorkspaceError("Workspace must be stopped before deletion")
-        config.workspaces.remove(workspace)
-        self.store.save(config)
+        def remove(config: AppConfig) -> None:
+            workspace = self._find(config, workspace_id)
+            if workspace.state is not WorkspaceState.STOPPED:
+                raise WorkspaceError("Workspace must be stopped before deletion")
+            config.workspaces.remove(workspace)
+
+        self.store.mutate(remove)
 
     def ensure_running(
         self,
@@ -203,12 +231,17 @@ class WorkspaceManager:
         if on_ready is not None:
             on_ready(workspace.port)
         if not workspace.api_key:
-            workspace.api_key = self.owner_booter(
+            api_key = self.owner_booter(
                 f"http://127.0.0.1:{workspace.port}",
                 config.owner_email,
                 config.owner_password,
             )
-            self.store.save(config)
+            workspace.api_key = api_key
+
+            def save_key(config: AppConfig) -> None:
+                self._find(config, workspace_id).api_key = api_key
+
+            self.store.mutate(save_key)
         self._ensure_db_credentials(workspace)
         self._import_workflows(workspace)
         return self._find(self.store.load(), workspace_id)
@@ -225,6 +258,7 @@ class WorkspaceManager:
             return
         # Import files stored at the folder root as well, so a folder that
         # simply contains workflow exports is picked up too.
+        assert workspace.api_key is not None
         api = self.api_factory(workspace, workspace.api_key)
         runner = SyncRunner(api, pipelines_dir)
         runner.import_all()
@@ -275,10 +309,12 @@ class WorkspaceManager:
     def _set_git_push_failed(self, workspace: Workspace, failed: bool) -> None:
         """Persist the push-failed flag (and mirror it on the in-memory object)."""
         workspace.git_push_failed = failed
-        config = self.store.load()
-        current = self._find(config, workspace.id)
-        current.git_push_failed = failed
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> None:
+            current = self._find(config, workspace.id)
+            current.git_push_failed = failed
+
+        self.store.mutate(apply)
 
     def git_init_workspace(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Initialize a git repository in the workspace folder."""
@@ -291,17 +327,19 @@ class WorkspaceManager:
             else:
                 git_add_remote(workspace.workflows_dir, "origin", remote_url)
         elif git_has_remote(workspace.workflows_dir):
-            # Clearing the URL must really detach the repo, otherwise the stale
-            # origin would keep being pushed to while the UI shows no remote.
+            # Detach for real: an empty URL must not leave a stale origin that
+            # keeps being pushed to behind the launcher's back.
             git_remove_remote(workspace.workflows_dir, "origin")
-        config = self.store.load()
-        workspace = self._find(config, workspace.id)
-        # Keep the existing CI metadata: reconfiguring the remote must not
-        # silently turn the GitHub Actions workflow "off" in the app while the
-        # tracked workflow file keeps running on every push.
-        workspace.git = replace(workspace.git, enabled=True, remote_url=remote_url)
-        workspace.git_push_failed = False
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> None:
+            current = self._find(config, workspace.id)
+            # Keep the existing CI metadata: reconfiguring the remote must not
+            # silently turn the GitHub Actions workflow "off" in the app while
+            # the tracked workflow file keeps running on every push.
+            current.git = replace(current.git, enabled=True, remote_url=remote_url)
+            current.git_push_failed = False
+
+        self.store.mutate(apply)
 
     def git_remote_url(self, workspace: Workspace) -> str | None:
         """Return the current origin URL of the workspace repository."""
@@ -322,9 +360,11 @@ class WorkspaceManager:
 
     def set_github_token(self, token: str | None) -> None:
         """Persist (or clear, when falsy) the GitHub token override."""
-        config = self.store.load()
-        config.github_token = token or None
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> None:
+            config.github_token = token or None
+
+        self.store.mutate(apply)
         logger.info("Updated the stored GitHub token override")
 
     def configure_db(self, workspace: Workspace, db: DbConfig) -> Workspace:
@@ -362,16 +402,14 @@ class WorkspaceManager:
                     workspace.name,
                 )
             else:
-                db.database_name = db.database_name or "data"
-                db.username = db.username or "n8ndata"
+                db.database_name = db.database_name or DATA_DATABASE
+                db.username = db.username or DATA_USER
                 db.password = db.password or secrets.token_hex(16)
                 self._scaffold(workspace.workflows_dir, db)
         return self.update(workspace.id, db=db)
 
     def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Attach, update or detach the remote of an existing git repository."""
-        config = self.store.load()
-        workspace = self._find(config, workspace.id)
         ensure_gitignore(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
@@ -382,12 +420,16 @@ class WorkspaceManager:
             # Detach for real: an empty URL must not leave a stale origin that
             # keeps being pushed to behind the launcher's back.
             git_remove_remote(workspace.workflows_dir, "origin")
-        # Keep CI metadata (enabled state + credential names) intact: toggling
-        # the remote must not desync the tracked GitHub Actions workflow from
-        # what the app believes is configured.
-        workspace.git = replace(workspace.git, enabled=True, remote_url=remote_url)
-        workspace.git_push_failed = False
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> None:
+            current = self._find(config, workspace.id)
+            # Keep CI metadata (enabled state + credential names) intact:
+            # toggling the remote must not desync the tracked GitHub Actions
+            # workflow from what the app believes is configured.
+            current.git = replace(current.git, enabled=True, remote_url=remote_url)
+            current.git_push_failed = False
+
+        self.store.mutate(apply)
         logger.info("Configured git for %s", workspace.name)
 
     def enable_ci(self, workspace: Workspace) -> Workspace:
@@ -418,11 +460,13 @@ class WorkspaceManager:
             target = workspace.workflows_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-        config = self.store.load()
-        workspace = self._find(config, workspace.id)
-        workspace.git = replace(workspace.git, ci_enabled=True)
-        config.workspaces[config.workspaces.index(workspace)] = workspace
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> Workspace:
+            current = self._find(config, workspace.id)
+            current.git = replace(current.git, ci_enabled=True)
+            return current
+
+        workspace = self.store.mutate(apply)
         self._commit_and_push(workspace, "n8n-launcher: activer les tests GitHub Actions")
         logger.info("Enabled CI for %s", workspace.name)
         return workspace
@@ -436,11 +480,13 @@ class WorkspaceManager:
                     target.unlink()
             except OSError as exc:
                 logger.warning("Could not remove %s: %s", target, exc)
-        config = self.store.load()
-        workspace = self._find(config, workspace.id)
-        workspace.git = replace(workspace.git, ci_enabled=False)
-        config.workspaces[config.workspaces.index(workspace)] = workspace
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> Workspace:
+            current = self._find(config, workspace.id)
+            current.git = replace(current.git, ci_enabled=False)
+            return current
+
+        workspace = self.store.mutate(apply)
         self._commit_and_push(workspace, "n8n-launcher: désactiver les tests GitHub Actions")
         logger.info("Disabled CI for %s", workspace.name)
         return workspace
@@ -457,11 +503,13 @@ class WorkspaceManager:
         clean = [
             {"name": item.get("name"), "type": item.get("type")} for item in credentials
         ]
-        config = self.store.load()
-        workspace = self._find(config, workspace.id)
-        workspace.git = replace(workspace.git, ci_credentials=clean)
-        config.workspaces[config.workspaces.index(workspace)] = workspace
-        self.store.save(config)
+
+        def apply(config: AppConfig) -> Workspace:
+            current = self._find(config, workspace.id)
+            current.git = replace(current.git, ci_credentials=clean)
+            return current
+
+        workspace = self.store.mutate(apply)
         logger.info("Recorded %d CI credential(s) for %s", len(clean), workspace.name)
         return workspace
 
@@ -491,11 +539,21 @@ class WorkspaceManager:
                 "Le workspace doit avoir été démarré une fois pour exporter ses credentials."
             )
         api = self.api_factory(workspace, workspace.api_key)
-        wanted = {(item.get("name"), item.get("type")) for item in selected}
+        wanted = {
+            (name, ctype)
+            for (name, ctype) in (
+                (item.get("name"), item.get("type")) for item in selected
+            )
+            if isinstance(name, str) and isinstance(ctype, str)
+        }
         listed = api.list_credentials()
         found: dict[tuple[str, str], dict[str, Any]] = {}
         for item in listed:
-            key = (item.get("name"), item.get("type"))
+            name = item.get("name")
+            ctype = item.get("type")
+            if not isinstance(name, str) or not isinstance(ctype, str):
+                continue
+            key = (name, ctype)
             if key in wanted and key not in found:
                 found[key] = item
         missing = wanted - set(found)
@@ -510,12 +568,10 @@ class WorkspaceManager:
 
     def start(self, workspace_id: str) -> Workspace:
         """Write Compose, bring the stack up, and apply managed migrations."""
+        if self._workspace_db_mode(workspace_id) is DbMode.MANAGED:
+            self._ensure_managed_db_parameters(workspace_id)
         config = self.store.load()
         workspace = self._find(config, workspace_id)
-        if workspace.db.mode is DbMode.MANAGED:
-            self._ensure_managed_db_parameters(config, workspace)
-            config = self.store.load()
-            workspace = self._find(config, workspace_id)
         compose = compose_file(workspace.id)
         write_compose(workspace, compose)
         workspace.state = WorkspaceState.STARTING
@@ -530,13 +586,28 @@ class WorkspaceManager:
                     compose,
                 )
         except Exception:
-            workspace.state = WorkspaceState.ERROR
-            self.store.save(config)
+
+            def mark_error(config: AppConfig) -> None:
+                self._find(config, workspace_id).state = WorkspaceState.ERROR
+
+            self.store.mutate(mark_error)
             raise
-        workspace.state = WorkspaceState.RUNNING
-        workspace.restart_required = False
-        self.store.save(config)
-        return workspace
+
+        def mark_running(config: AppConfig) -> None:
+            current = self._find(config, workspace_id)
+            current.state = WorkspaceState.RUNNING
+            current.restart_required = False
+
+        self.store.mutate(mark_running)
+        return self._find(self.store.load(), workspace_id)
+
+    def _workspace_db_mode(self, workspace_id: str) -> DbMode:
+        """Return the persisted DB mode of a workspace (for pre-start checks)."""
+
+        def current(config: AppConfig) -> DbMode:
+            return self._find(config, workspace_id).db.mode
+
+        return self.store.mutate(current)
 
     def stop_with_sync(self, workspace_id: str) -> Workspace:
         """Stop a workspace after exporting and Git-syncing its workflows.
@@ -572,12 +643,20 @@ class WorkspaceManager:
         # down a second time.
         if compose.exists() and workspace.state is not WorkspaceState.STOPPED:
             self.docker.down(workspace, compose, remove_orphans=True)
-        workspace.state = WorkspaceState.STOPPED
-        self.store.save(config)
-        return workspace
+
+        def mark_stopped(config: AppConfig) -> Workspace:
+            current = self._find(config, workspace_id)
+            current.state = WorkspaceState.STOPPED
+            return current
+
+        return self.store.mutate(mark_stopped)
 
     def _ensure_db_credentials(self, workspace: Workspace) -> None:
         if workspace.db.mode is DbMode.NONE:
+            return
+        if workspace.api_key is None:
+            # No key at all: defer to the caller (``ensure_running``) which
+            # bootstraps one before reaching this point.
             return
         try:
             self._configure_credentials(workspace, workspace.api_key)
@@ -585,41 +664,49 @@ class WorkspaceManager:
         except N8nApiError as exc:
             if exc.status_code not in (401, 403):
                 raise
+        # The stored key is stale (401/403): rotate it once, then retry. The
+        # rotation is persisted atomically so a concurrent poll never
+        # resurrects the invalid key.
         config = self.store.load()
-        current = self._find(config, workspace.id)
-        current.api_key = self.owner_booter(
-            f"http://127.0.0.1:{current.port}",
+        rotated = self.owner_booter(
+            f"http://127.0.0.1:{workspace.port}",
             config.owner_email,
             config.owner_password,
         )
-        self.store.save(config)
-        self._configure_credentials(current, current.api_key)
+        workspace.api_key = rotated
+
+        def apply(config: AppConfig) -> None:
+            self._find(config, workspace.id).api_key = rotated
+
+        self.store.mutate(apply)
+        self._configure_credentials(workspace, rotated)
 
     def _configure_credentials(self, workspace: Workspace, api_key: str) -> None:
         api = self.api_factory(workspace, api_key)
         configure_db_credential(api, workspace)
 
-    def _ensure_managed_db_parameters(self, config: AppConfig, workspace: Workspace) -> None:
-        mutated = False
-        if not workspace.db.database_name:
-            workspace.db.database_name = "data"
-            mutated = True
-        if not workspace.db.username:
-            workspace.db.username = "n8ndata"
-            mutated = True
-        if not workspace.db.password:
-            workspace.db.password = secrets.token_hex(16)
-            mutated = True
-        if mutated:
-            config.workspaces[config.workspaces.index(workspace)] = workspace
-            self.store.save(config)
+    def _ensure_managed_db_parameters(self, workspace_id: str) -> None:
+        """Fill missing managed DB credentials, persisting them atomically."""
+
+        def apply(config: AppConfig) -> None:
+            workspace = self._find(config, workspace_id)
+            if workspace.db.mode is not DbMode.MANAGED:
+                return
+            if not workspace.db.database_name:
+                workspace.db.database_name = DATA_DATABASE
+            if not workspace.db.username:
+                workspace.db.username = DATA_USER
+            if not workspace.db.password:
+                workspace.db.password = secrets.token_hex(16)
+
+        self.store.mutate(apply)
 
     @staticmethod
     def _managed_db_config() -> DbConfig:
         return DbConfig(
             mode=DbMode.MANAGED,
-            database_name="data",
-            username="n8ndata",
+            database_name=DATA_DATABASE,
+            username=DATA_USER,
             password=secrets.token_hex(16),
         )
 

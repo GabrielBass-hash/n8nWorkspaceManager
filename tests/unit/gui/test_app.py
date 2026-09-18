@@ -147,6 +147,9 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
 
     assert len(HoldingThread.instances) == 1
     HoldingThread.instances[0].target()
+    # The launch marker is cleared on the main thread, through the event
+    # queue, never from the worker — drain it before asserting the reset.
+    launcher._drain_events()
     assert launcher._launching is None
     manager.ensure_running.assert_called_once_with("ws-hold", on_ready=launcher._wait_until_healthy)
 

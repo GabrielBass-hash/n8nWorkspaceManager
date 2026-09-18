@@ -1128,8 +1128,14 @@ class LauncherApp:
         def worker() -> None:
             try:
                 snapshot = self._build_ci_runs_snapshot(workspace)
-                self._ci_runs_cache[workspace.id] = snapshot
-                self.events.put((lambda: panel.apply(snapshot), None))
+                self.events.put(
+                    (
+                        lambda snapshot=snapshot: self._apply_ci_runs_snapshot(
+                            workspace.id, panel, snapshot
+                        ),
+                        None,
+                    )
+                )
             finally:
                 # Release the lock on the main thread: the next poll callback
                 # runs after the drain, so a fresh fetch is allowed right away.
@@ -1146,6 +1152,13 @@ class LauncherApp:
         threading.Thread(
             target=worker, name="n8n-launcher-ci-runs", daemon=True
         ).start()
+
+    def _apply_ci_runs_snapshot(
+        self, workspace_id: str, panel: RunsPanel, snapshot: RunsSnapshot
+    ) -> None:
+        """Cache and render a fetched CI snapshot, always on the main thread."""
+        self._ci_runs_cache[workspace_id] = snapshot
+        panel.apply(snapshot)
 
     def configure_github_token(self) -> None:
         """Let the user replace the GitHub token used for the API calls.
@@ -1348,19 +1361,17 @@ class LauncherApp:
         self.refresh()
 
         def action() -> None:
-            try:
-                self._ensure_running(workspace)
-            finally:
-                self._launching = None
+            self._ensure_running(workspace)
 
         def on_success() -> None:
+            self._launching = None
             self.refresh()
             self.browser_opener(url, browser_app_dir(workspace.id))
 
-        self._run_async(
-            action,
-            on_success=on_success,
-        )
+        def on_error() -> None:
+            self._launching = None
+
+        self._run_async(action, on_success=on_success, on_error=on_error)
 
     def open_workflows(self) -> None:
         if self._closing:
@@ -1503,15 +1514,16 @@ class LauncherApp:
 
     def _run_async(
         self,
-        action: Callable[[], None],
+        action: Callable[[], Any],
         *,
         on_success: Callable[[], None] | None = None,
+        on_error: Callable[[], None] | None = None,
     ) -> None:
         def worker() -> None:
             try:
                 action()
             except Exception as exc:
-                self.events.put((self.refresh, exc))
+                self.events.put((on_error or self.refresh, exc))
             else:
                 self.events.put((on_success or self.refresh, None))
 
