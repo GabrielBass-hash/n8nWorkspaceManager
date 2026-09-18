@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "n8n-launcher"
 
 
-version = "3.0.03"
+version = "3.0.04"
 
 
 description = "Cross-platform desktop launcher for isolated n8n workspaces"
