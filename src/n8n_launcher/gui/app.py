@@ -1511,9 +1511,10 @@ class LauncherApp:
 
         def on_success() -> None:
             # The worker stopped the stack and deleted the config: the
-            # selection is cleared here, on the main thread, never on the
-            # worker (which must not touch Tk state).
+            # selection is cleared and the list refreshed here, on the
+            # main thread, never on the worker (which must not touch Tk state).
             self._selected_id = None
+            self.refresh()
 
         self._run_async(action, on_success=on_success)
 

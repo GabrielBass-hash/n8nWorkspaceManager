@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from n8n_launcher.workspaces import ci
@@ -323,10 +325,11 @@ def test_rendered_scripts_compile_and_validate_static_exports(tmp_path: Path) ->
     for rel in (ci.VALIDATE_FILE, ci.RUNNER_FILE):
         py_compile.compile(root / rel, doraise=True)
 
-    result = __import__("subprocess").run(
-        ["python", str(root / ci.VALIDATE_FILE)],
+    result = subprocess.run(
+        [sys.executable, str(root / ci.VALIDATE_FILE)],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0
+    assert "SystemExit" not in result.stderr

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,12 +81,14 @@ def test_generated_validate_rejects_duplicate_names(tmp_path: Path) -> None:
     write_export(root, "n8nPipelines/a.json", [{"name": "B", "type": "n8n-nodes-base.noOp", "typeVersion": 1}], name="B")
     write_export(root, "n8nPipelines/b.json", [{"name": "B", "type": "n8n-nodes-base.noOp", "typeVersion": 1}], name="B")
 
-    result = __import__("subprocess").run(
-        ["python", str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
+    result = subprocess.run(
+        [sys.executable, str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
     )
 
     assert result.returncode == 1
     assert "dupliqué" in result.stderr
+    assert "SystemExit" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_generated_validate_rejects_unknown_selection(tmp_path: Path) -> None:
@@ -92,12 +96,14 @@ def test_generated_validate_rejects_unknown_selection(tmp_path: Path) -> None:
     write_export(root, "n8nPipelines/a.json", [{"name": "A", "type": "n8n-nodes-base.noOp", "typeVersion": 1}])
     write_selection(root, ["n8nPipelines/ghost.json"])
 
-    result = __import__("subprocess").run(
-        ["python", str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
+    result = subprocess.run(
+        [sys.executable, str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
     )
 
     assert result.returncode == 1
     assert "ne correspond à aucun export" in result.stderr
+    assert "SystemExit" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_generated_validate_accepts_known_selection(tmp_path: Path) -> None:
@@ -105,8 +111,8 @@ def test_generated_validate_accepts_known_selection(tmp_path: Path) -> None:
     write_export(root, "n8nPipelines/a.json", [{"name": "A", "type": "n8n-nodes-base.noOp", "typeVersion": 1}])
     write_selection(root, ["n8nPipelines/a.json"])
 
-    result = __import__("subprocess").run(
-        ["python", str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
+    result = subprocess.run(
+        [sys.executable, str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
     )
 
     assert result.returncode == 0
