@@ -828,3 +828,146 @@ def _clipboard_text(widget: tk.Misc) -> str:
         return widget.clipboard_get()
     except Exception:
         return ""
+
+
+@dataclass(frozen=True)
+class GitClonePlan:
+    """URL et branche optionnelle pour un clonage."""
+    url: str
+    branch: str | None = None
+
+
+def prompt_create_source(root: tk.Tk) -> str | None:
+    """Demande d'où vient le nouveau workspace : ``"local"`` ou ``"clone"``.
+
+    Retourne ``None`` quand l'utilisateur annule.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Nouveau workspace")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: str | None = None
+    choice = tk.StringVar(value="local")
+
+    tk.Label(
+        dialog,
+        text="Source des workflows :",
+        bg=APP_BACKGROUND, fg=TEXT_PRIMARY, font=FONT_META, anchor="w",
+    ).pack(fill="x", padx=18, pady=(16, 4))
+    tk.Radiobutton(
+        dialog, text="Dossier local existant", variable=choice, value="local",
+        bg=APP_BACKGROUND, fg=TEXT_PRIMARY, selectcolor=SURFACE,
+        activebackground=APP_BACKGROUND, font=FONT_META,
+    ).pack(fill="x", padx=18)
+    tk.Radiobutton(
+        dialog, text="Cloner un dépôt Git (URL)", variable=choice, value="clone",
+        bg=APP_BACKGROUND, fg=TEXT_PRIMARY, selectcolor=SURFACE,
+        activebackground=APP_BACKGROUND, font=FONT_META,
+    ).pack(fill="x", padx=18, pady=(0, 12))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def submit() -> None:
+        nonlocal result
+        result = choice.get()
+        dialog.destroy()
+
+    ttk.Button(buttons, text="Annuler", style="Secondary.TButton",
+               command=dialog.destroy).pack(side="right")
+    ttk.Button(buttons, text="Continuer", style="Accent.TButton",
+               command=submit).pack(side="right", padx=(8, 0))
+
+    dialog.bind("<Escape>", lambda _e: dialog.destroy())
+    _finish_dialog_setup(dialog, root)
+    dialog.wait_window()
+    return result
+
+
+def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
+    """Demande l'URL du dépôt et une branche optionnelle.
+
+    Le bouton « Charger les branches » utilise
+    :func:`n8n_launcher.git.git_list_remote_branches` pour peupler le champ :
+    l'utilisateur peut alors choisir parmi les dépôts/branches réellement
+    disponibles côté remote. Un échec réseau reste non bloquant (l'URL reste
+    éditable à la main).
+    """
+    from ..git import GitError, git_list_remote_branches
+
+    dialog = tk.Toplevel(root)
+    dialog.title("Cloner un dépôt Git")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: GitClonePlan | None = None
+    url_var = tk.StringVar(value="")
+    branch_var = tk.StringVar(value="")
+
+    tk.Label(
+        dialog, text="URL du dépôt (HTTPS ou SSH) :",
+        bg=APP_BACKGROUND, fg=TEXT_PRIMARY, font=FONT_META, anchor="w",
+    ).pack(fill="x", padx=18, pady=(16, 2))
+    url_entry = tk.Entry(dialog, textvariable=url_var, bg=SURFACE, fg=TEXT_PRIMARY,
+                         insertbackground=TEXT_PRIMARY, relief="flat", font=FONT_META)
+    url_entry.pack(fill="x", padx=18, pady=(0, 6))
+
+    tk.Label(
+        dialog, text="Branche (optionnel — laisser vide pour la branche par défaut) :",
+        bg=APP_BACKGROUND, fg=TEXT_MUTED, font=FONT_SUBTITLE, anchor="w",
+    ).pack(fill="x", padx=18)
+    branch_entry = tk.Entry(dialog, textvariable=branch_var, bg=SURFACE, fg=TEXT_PRIMARY,
+                            insertbackground=TEXT_PRIMARY, relief="flat", font=FONT_META)
+    branch_entry.pack(fill="x", padx=18, pady=(0, 6))
+
+    status = tk.Label(dialog, text="", bg=APP_BACKGROUND, fg=TEXT_MUTED,
+                      font=FONT_SUBTITLE, anchor="w", justify="left", wraplength=380)
+    status.pack(fill="x", padx=18)
+
+    def load_branches() -> None:
+        url = url_var.get().strip()
+        if not url:
+            return
+        try:
+            branches = git_list_remote_branches(url)
+        except GitError as exc:
+            status.config(text=f"Impossible de lister les branches : {exc}")
+            return
+        if not branches:
+            status.config(text="Aucune branche trouvée à cette URL.")
+            return
+        status.config(text="Branches : " + ", ".join(branches))
+        if not branch_var.get():
+            branch_var.set("main" if "main" in branches else branches[0])
+
+    ttk.Button(dialog, text="Charger les branches", style="Secondary.TButton",
+               command=load_branches).pack(fill="x", padx=18, pady=(6, 14))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def submit(_event: tk.Event | None = None) -> None:
+        nonlocal result
+        url = url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Cloner un dépôt Git",
+                                   "L'URL du dépôt est requise.", parent=dialog)
+            return
+        result = GitClonePlan(url=url, branch=branch_var.get().strip() or None)
+        dialog.destroy()
+
+    def cancel(_event: tk.Event | None = None) -> None:
+        dialog.destroy()
+
+    ttk.Button(buttons, text="Annuler", style="Secondary.TButton",
+               command=cancel).pack(side="right")
+    ttk.Button(buttons, text="Cloner", style="Accent.TButton",
+               command=submit).pack(side="right", padx=(8, 0))
+
+    url_entry.bind("<Return>", lambda _e: load_branches())
+    branch_entry.bind("<Return>", submit)
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root, focus=url_entry)
+    dialog.wait_window()
+    return result
