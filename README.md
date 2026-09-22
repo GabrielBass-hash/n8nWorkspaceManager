@@ -154,19 +154,6 @@ inherits it (`dynamic = ["version"]`), `scripts/build.py` embeds it into the
 bundle and `platform/updater.py` compares it against GitHub releases, so a bump
 never goes out of sync.
 
-Bump the version explicitly (never by editing the file by hand):
-
-```bash
-python scripts/bump_version.py patch   # 4.0.2 -> 4.0.3 (bugfix)
-python scripts/bump_version.py minor   # 4.0.3 -> 4.1.0 (feature)
-python scripts/bump_version.py major   # 4.1.0 -> 5.0.0 (breaking)
-python scripts/bump_version.py --to 4.2.0     # pin an exact version
-python scripts/bump_version.py --dry-run patch  # preview only
-```
-
-The script refuses to run on a dirty working tree and refuses to produce a
-version whose `v<version>` tag already exists (`--force` bypasses both).
-
 Releases are published **only from `main`**. When a push to `main` carries a
 new source version, the release workflow tags it (`v<version>`), runs the tests,
 builds the per-OS distribution above and attaches all three artifacts to a

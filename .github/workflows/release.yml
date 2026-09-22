@@ -1,11 +1,11 @@
 name: Release
 
-# Releases are published only from `main`. A version bump is an explicit
-# developer action (``scripts/bump_version.py``, committed as part of a PR):
-# this workflow reads the version out of the single source of truth
-# (``src/n8n_launcher/__init__.py``), compares it with the last git tag, and
-# only tags + builds + publishes when the version actually moved. There is no
-# automatic bump and no reliance on a ``[skip ci]`` convention.
+# Releases are published only from `main`. The version is an explicit
+# developer edit: bump `__version__` in `src/n8n_launcher/__init__.py` as part
+# of a PR. This workflow reads the version out of the single source of truth,
+# compares it with the last git tag, and only tags + builds + publishes when
+# the version actually moved. There is no automatic bump and no reliance on a
+# ``[skip ci]`` convention.
 on:
   push:
     branches: [main]

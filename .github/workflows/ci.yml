@@ -38,6 +38,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
+      # The GUI imports ``tkinter`` at module level. uv's managed CPython bundles
+      # Tk, but if uv ever resolves a bare system CPython (no ``python3-tk``),
+      # collection would error instead of running the GUI suite — install it so
+      # the ubuntu matrix leg always runs those tests.
+      - name: Install tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
       - name: Install dependencies
         run: uv sync --frozen
 

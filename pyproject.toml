@@ -93,7 +93,7 @@ ignore = []
 keep-runtime-typing = false
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "scripts"]
+pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "unit: tests that do not require external services",

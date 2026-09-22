@@ -6,6 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# ``src/n8n_launcher/gui`` imports ``tkinter`` at module level, but an
+# interpreter without Tk support (e.g. a bare system CPython on Ubuntu) cannot
+# even import it. Skip the whole GUI suite there instead of failing collection;
+# every CI matrix runner (and a venv built on uv's managed Python) ships Tk.
+pytest.importorskip("tkinter")
+
 # Re-export for test modules that import helpers by name from this dir.
 from helpers import (
     FakeMessagebox,

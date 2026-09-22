@@ -6,7 +6,7 @@ Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu
 
 Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via `dmgbuild` with app icon + full `Info.plist`), one-file `.exe` (Windows), and a one-file executable on Linux (a `.AppImage` is built out-of-band via `scripts/build_appimage.sh`). CI builds the three release artifacts in the `build` jobs; the AppImage is not part of CI.
 
-The launcher version is a single-source SemVer (`MAJOR.MINOR.PATCH`) declared in `src/n8n_launcher/__init__.py` (`__version__`); `pyproject.toml` inherits it via `dynamic = ["version"]`, `scripts/build.py` embeds it, `platform/updater.py` compares it. Bump it with `python scripts/bump_version.py <patch|minor|major>` (or `--to X.Y.Z`; `--dry-run` previews; refuses on a dirty tree or an already-tagged version, `--force` bypasses). Releases are published only from `main` and only when the source version differs from the last git tag — no auto-bump, no `[skip ci]` reliance.
+The launcher version is a single-source SemVer (`MAJOR.MINOR.PATCH`) declared in `src/n8n_launcher/__init__.py` (`__version__`); `pyproject.toml` inherits it via `dynamic = ["version"]`, `scripts/build.py` embeds it, `platform/updater.py` compares it. Bump it by hand in `__init__.py` before a release. Releases are published only from `main` and only when the source version differs from the last git tag — no auto-bump, no `[skip ci]` reliance.
 
 ## Commands
 
@@ -37,10 +37,6 @@ uv run pre-commit run --all-files
 
 # Build desktop executable (macOS: .dmg via dmgbuild; Linux/Windows: one-file exe)
 uv run python scripts/build.py
-
-# Bump the launcher SemVer (single source: src/n8n_launcher/__init__.py)
-uv run python scripts/bump_version.py patch|minor|major        # or: --to X.Y.Z
-uv run python scripts/bump_version.py --dry-run patch          # preview without writing
 
 # Additional Linux AppImage (after scripts/build.py produced dist/n8n-launcher)
 bash scripts/build_appimage.sh
