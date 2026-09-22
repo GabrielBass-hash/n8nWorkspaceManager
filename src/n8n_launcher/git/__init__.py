@@ -21,6 +21,8 @@ from .manager import (
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
+    git_list_remote_branches,
+    git_pull_new_repo
 )
 
 __all__ = [

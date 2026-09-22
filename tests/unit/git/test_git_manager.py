@@ -21,6 +21,8 @@ from n8n_launcher.git import (
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
+    git_list_remote_branches,
+    git_pull_new_repo
 )
 
 
@@ -448,51 +450,100 @@ def test_git_is_repo_false_on_os_error(tmp_path: Path) -> None:
         assert git_is_repo(tmp_path) is False
 
 
-def test_git_seed_remote_commits_unborn_branch_then_pushes_with_token(tmp_path: Path) -> None:
-    from n8n_launcher.git.manager import git_seed_remote
-
-    def fake_run(command, **kwargs):
-        if command[:2] == ["git", "symbolic-ref"]:
-            return completed(0, "main\n")
-        if command[:2] == ["git", "rev-parse"]:
-            return completed(128, "", "fatal: ambiguous argument")
-        if command[:2] == ["git", "config"] and "--get" in command:
-            return completed(0, "id\n")
-        return completed()
-
-    with patch("n8n_launcher.git.manager.subprocess.run", side_effect=fake_run) as run:
-        git_seed_remote(tmp_path, "https://github.com/octo/repo.git", "tok")
-
-    calls = [call.args[0] for call in run.call_args_list]
-    assert ["git", "add", "-A"] in calls
-    assert ["git", "commit", "--allow-empty", "-m", "n8n-launcher: initial"] in calls
-    push = next(c for c in calls if c[:2] == ["git", "push"])
-    assert push == ["git", "push", "https://tok@github.com/octo/repo.git", "main"]
-
-
-def test_git_seed_remote_skips_commit_when_head_exists(tmp_path: Path) -> None:
-    from n8n_launcher.git.manager import git_seed_remote
-
-    def fake_run(command, **kwargs):
-        if command[:2] == ["git", "symbolic-ref"]:
-            return completed(0, "main\n")
-        if command[:2] == ["git", "rev-parse"]:
-            return completed(0, "abc123\n")
-        return completed()
-
-    with patch("n8n_launcher.git.manager.subprocess.run", side_effect=fake_run) as run:
-        git_seed_remote(tmp_path, "https://github.com/octo/repo.git", "tok")
-
-    calls = [call.args[0] for call in run.call_args_list]
-    assert ["git", "add", "-A"] not in calls
-    assert not any(c[:2] == ["git", "commit"] for c in calls)
-
-
-def test_tokenized_remote_embeds_token_only_for_one_call() -> None:
-    from n8n_launcher.git.manager import _tokenized_remote
-
-    assert _tokenized_remote("https://github.com/octo/repo.git", "tok") == (
-        "https://tok@github.com/octo/repo.git"
+def test_git_list_remote_branches_parses_refs(tmp_path: Path) -> None:
+    payload = (
+        "1111111111111111111111111111111111111111\trefs/heads/main\n"
+        "2222222222222222222222222222222222222222\trefs/heads/feature/x\n"
+        "3333333333333333333333333333333333333333\trefs/tags/v1\n"
+        "4444444444444444444444444444444444444444\trefs/heads/feature/x\n"
     )
-    with pytest.raises(GitError):
-        _tokenized_remote("git@github.com:octo/repo.git", "tok")
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, payload),
+    ) as run:
+        branches = git_list_remote_branches("https://example.test/repo.git", cwd=tmp_path)
+
+    assert branches == ["feature/x", "main"]
+    assert run.call_args.args[0] == [
+        "git",
+        "ls-remote",
+        "--heads",
+        "https://example.test/repo.git",
+    ]
+    assert run.call_args.kwargs["cwd"] == tmp_path
+
+
+def test_git_list_remote_branches_returns_empty_when_no_heads(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, ""),
+    ):
+        assert git_list_remote_branches("https://example.test/repo.git", cwd=tmp_path) == []
+
+
+def test_git_list_remote_branches_raises_on_failure(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(128, "", "fatal: repository not found"),
+    ):
+        with pytest.raises(GitError, match="repository not found"):
+            git_list_remote_branches("https://bad.test/repo.git", cwd=tmp_path)
+
+
+def test_git_pull_new_repo_clones_without_branch(tmp_path: Path) -> None:
+    dest = tmp_path / "workspace"
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_pull_new_repo("https://example.test/repo.git", dest)
+
+    assert run.call_args.args[0] == [
+        "git",
+        "clone",
+        "https://example.test/repo.git",
+        str(dest),
+    ]
+    assert run.call_args.kwargs["cwd"] == dest.parent
+
+
+def test_git_pull_new_repo_clones_selected_branch(tmp_path: Path) -> None:
+    dest = tmp_path / "workspace"
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_pull_new_repo("https://example.test/repo.git", dest, branch="feature/x")
+
+    assert run.call_args.args[0] == [
+        "git",
+        "clone",
+        "--branch",
+        "feature/x",
+        "https://example.test/repo.git",
+        str(dest),
+    ]
+
+
+def test_git_pull_new_repo_propagates_git_error(tmp_path: Path) -> None:
+    dest = tmp_path / "workspace"
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(128, "", "fatal: destination path already exists"),
+    ):
+        with pytest.raises(GitError, match="destination path already exists"):
+            git_pull_new_repo("https://example.test/repo.git", dest)
+
+
+def test_git_pull_new_repo_then_list_round_trip(tmp_path: Path) -> None:
+    """A caller can list branches, pick one, and pull it in one flow."""
+    dest = tmp_path / "workspace"
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "aaaa\trefs/heads/main\nbbbb\trefs/heads/staging\n"),
+            completed(),
+        ],
+    ) as run:
+        branches = git_list_remote_branches("https://example.test/repo.git", cwd=tmp_path)
+        git_pull_new_repo("https://example.test/repo.git", dest, branch=branches[0])
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert calls == [
+        ["git", "ls-remote", "--heads", "https://example.test/repo.git"],
+        ["git", "clone", "--branch", "main", "https://example.test/repo.git", str(dest)],
+    ]
