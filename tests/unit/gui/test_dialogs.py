@@ -23,11 +23,10 @@ from n8n_launcher.gui.dialogs import (
     default_creation_db,
     prompt_ask_string,
     prompt_clone_plan,
+    prompt_create_source,
     prompt_db_config,
     prompt_github_create,
     prompt_github_token,
-    prompt_create_source,
-    prompt_clone_plan
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
 
