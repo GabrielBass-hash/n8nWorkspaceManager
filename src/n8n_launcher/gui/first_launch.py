@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sys
 import tkinter as tk
@@ -13,6 +14,7 @@ from ..core.config import ConfigStore
 from ..core.models import AppConfig
 from ..docker.manager import DockerManager
 from ..platform.shortcuts import install_desktop_shortcut
+from .theme import configure_fonts
 
 
 class SetupWizardError(RuntimeError):
@@ -69,6 +71,10 @@ def run_interactive_first_launch(
     """Prompt the user interactively for owner details; None when cancelled."""
     owns_root = root is None
     root = root or tk.Tk()
+    # The wizard can own a fresh interpreter (tk.Tk() created just above), so
+    # the named UI fonts must be registered on it for the prompts to be styled.
+    with contextlib.suppress(Exception):
+        configure_fonts(root)
     try:
         email = simpledialog.askstring("n8n Launcher", "Owner email:", parent=root)
         password = simpledialog.askstring("n8n Launcher", "Owner password:", show="*", parent=root)

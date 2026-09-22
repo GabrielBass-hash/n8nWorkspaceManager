@@ -106,6 +106,70 @@ def test_app_config_round_trip(tmp_path: Path) -> None:
     assert AppConfig.from_dict(config.to_dict()) == config
 
 
+def test_app_config_from_dict_skips_malformed_workspace(tmp_path: Path) -> None:
+    good = {
+        "id": "good",
+        "name": "Good",
+        "workflows_dir": str(tmp_path / "good"),
+        "port": 5678,
+        "db": {"mode": "none"},
+    }
+    broken = {"id": "broken", "name": "Broken"}
+
+    config = AppConfig.from_dict(
+        {
+            "owner_email": "owner@example.test",
+            "owner_password": "secret",
+            "work_dir": str(tmp_path),
+            "workspaces": [good, broken],
+        }
+    )
+
+    # One malformed entry must never make the whole config unreadable: the
+    # healthy workspace survives and the bad one is skipped with a warning.
+    assert [workspace.id for workspace in config.workspaces] == ["good"]
+
+
+def test_app_config_from_dict_tolerates_missing_workspaces(tmp_path: Path) -> None:
+    base = {
+        "owner_email": "owner@example.test",
+        "owner_password": "secret",
+        "work_dir": str(tmp_path),
+    }
+
+    assert AppConfig.from_dict(base | {"workspaces": None}).workspaces == []
+    assert AppConfig.from_dict(base).workspaces == []
+    assert AppConfig.from_dict(base | {"workspaces": {"oops": True}}).workspaces == []
+
+
+def test_workspace_from_dict_unknown_state_falls_back_to_stopped() -> None:
+    restored = Workspace.from_dict(
+        {
+            "id": "abc",
+            "name": "W",
+            "workflows_dir": "/tmp/w",
+            "port": 5680,
+            "db": {"mode": "none"},
+            "state": "exploded",
+        }
+    )
+
+    assert restored.state is WorkspaceState.STOPPED
+
+
+def test_workspace_from_dict_missing_db_falls_back_to_none() -> None:
+    restored = Workspace.from_dict(
+        {
+            "id": "abc",
+            "name": "W",
+            "workflows_dir": "/tmp/w",
+            "port": 5680,
+        }
+    )
+
+    assert restored.db.mode is DbMode.NONE
+
+
 def test_app_config_round_trip_keeps_github_token(tmp_path: Path) -> None:
     config = AppConfig(
         owner_email="owner@example.test",

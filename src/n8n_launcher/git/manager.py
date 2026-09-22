@@ -185,7 +185,7 @@ def git_seed_remote(
     When the branch is still unborn (no commit yet), an initial commit is
     created first so seeding an empty workspace folder succeeds. The token is
     embedded only in this single ``git push`` invocation's URL (via
-    :func:`_tokenized_remote`), never persisted in the repository's git
+    :func:`tokenize_remote_url`), never persisted in the repository's git
     config: the caller then stores the clean URL as the remote.
     """
     branch = _current_branch(path)
@@ -199,15 +199,25 @@ def git_seed_remote(
     # the branch's upstream in .git/config, persisting the credential. The
     # launcher always spells origin (or an explicit URL) for pull/push, so no
     # tracking ref is required here.
-    _run_git(["push", _tokenized_remote(remote_url, token), branch], cwd=path)
+    _run_git(["push", tokenize_remote_url(remote_url, token), branch], cwd=path)
     logger.info("Seeded remote %s from %s", remote_url, path)
 
 
-def _tokenized_remote(remote_url: str, token: str) -> str:
-    """Embed *token* into a GitHub HTTPS URL for a single git invocation."""
+def tokenize_remote_url(remote_url: str, token: str) -> str:
+    """Embed *token* into an HTTPS remote URL for a single git invocation.
+
+    GitHub accepts the token as the basic-auth username; callers must reset
+    the clean URL immediately after the command so the token never lands in
+    the repository's ``.git/config`` (see :func:`git_seed_remote` and
+    :meth:`WorkspaceManager.clone_from_git`).
+    """
     if not remote_url.startswith("https://"):
-        raise GitError("remote URL must be https to be seeded with a token")
+        raise GitError("remote URL must be https to be used with a token")
     return remote_url.replace("https://", f"https://{quote(token, safe='')}@", 1)
+
+
+# Backwards-compatible alias for the historical private name.
+_tokenized_remote = tokenize_remote_url
 
 
 def git_pull(path: Path) -> None:
