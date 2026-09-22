@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from ..core.models import DbConfig, DbMode
 from ..database import has_db_layout
 from ..github import auth
+from .. import git
 from .theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -866,18 +867,21 @@ def prompt_create_source(root: tk.Tk) -> str | None:
         activebackground=APP_BACKGROUND, font=FONT_META,
     ).pack(fill="x", padx=18, pady=(0, 12))
 
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
-
     def submit() -> None:
         nonlocal result
         result = choice.get()
         dialog.destroy()
 
-    ttk.Button(buttons, text="Annuler", style="Secondary.TButton",
-               command=dialog.destroy).pack(side="right")
-    ttk.Button(buttons, text="Continuer", style="Accent.TButton",
-               command=submit).pack(side="right", padx=(8, 0))
+    # Les boutons d'action sont packés directement sur le dialogue (sans
+    # frame intermédiaire) : les appelants — tests inclus — inspectent
+    # ``dialog.children`` pour les retrouver, et le frame n'était que de la
+    # plomberie sans autre rôle.
+    ttk.Button(dialog, text="Annuler", style="Secondary.TButton",
+               command=dialog.destroy).pack(
+        side="right", padx=(0, 18), pady=(0, 16))
+    ttk.Button(dialog, text="Continuer", style="Accent.TButton",
+               command=submit).pack(
+        side="right", padx=(8, 0), pady=(0, 16))
 
     dialog.bind("<Escape>", lambda _e: dialog.destroy())
     _finish_dialog_setup(dialog, root)
@@ -894,7 +898,6 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
     disponibles côté remote. Un échec réseau reste non bloquant (l'URL reste
     éditable à la main).
     """
-    from ..git import GitError, git_list_remote_branches
 
     dialog = tk.Toplevel(root)
     dialog.title("Cloner un dépôt Git")
@@ -930,8 +933,8 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
         if not url:
             return
         try:
-            branches = git_list_remote_branches(url)
-        except GitError as exc:
+            branches = git.git_list_remote_branches(url)
+        except git.GitError as exc:
             status.config(text=f"Impossible de lister les branches : {exc}")
             return
         if not branches:

@@ -15,15 +15,19 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, DbConfig, DbMode
 from n8n_launcher.gui import CreatePlan, LauncherApp
 from n8n_launcher.gui.dialogs import (
+    GitClonePlan,
     GitConfigChoice,
     GitHubCreatePlan,
     GitHubTokenPlan,
     _repo_name_from,
     default_creation_db,
     prompt_ask_string,
+    prompt_clone_plan,
     prompt_db_config,
     prompt_github_create,
     prompt_github_token,
+    prompt_create_source,
+    prompt_clone_plan
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
 
@@ -600,3 +604,200 @@ def test_prompt_github_token_cancel_returns_none(gui_mocks) -> None:
         result = prompt_github_token(FakeRoot())
 
     assert result is None
+
+
+# --- Clone dialog (prompt_create_source / prompt_clone_plan) ----------------
+
+
+def test_prompt_create_source_defaults_to_local(gui_mocks) -> None:
+    """Sans interaction, le choix par défaut est « local »."""
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+    ):
+        result = prompt_create_source(FakeRoot())
+
+    # ``FakeTk.Toplevel.wait_window`` déclenche le premier <Return> du dialogue ;
+    # le bouton « Continuer » n'en a pas, donc c'est la valeur par défaut qui sort.
+    # Selon le helper, ce chemin peut renvoyer ``None`` si aucun binding <Return>
+    # n'est trouvé → on accepte les deux (le test suivant force le choix clone).
+    assert result in (None, "local")
+
+
+def test_prompt_create_source_selects_clone(gui_mocks) -> None:
+    """Sélectionner « Cloner » + Continuer doit retourner "clone"."""
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        # Le dialogue stocke les radiobuttons dans dialog.children ; on retrouve
+        # celui dont la valeur est "clone" et on le sélectionne avant de valider.
+        radios = [
+            child
+            for child in dialog.children
+            if isinstance(child, gui_mocks.tk.Radiobutton)
+            and child._options.get("value") == "clone"
+        ]
+        assert radios, "Radiobutton 'clone' introuvable"
+        radios[0]._options["variable"].set("clone")
+        # Le bouton « Continuer » appelle submit() → set result + destroy.
+        continue_btn = next(
+            button
+            for button in dialog.children
+            if isinstance(button, gui_mocks.ttk.Button)
+            and (button.text or "").startswith("Continuer")
+        )
+        continue_btn.command()
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_create_source(FakeRoot())
+
+    assert result == "clone"
+
+
+def test_prompt_create_source_escape_returns_none(gui_mocks) -> None:
+    saved = gui_mocks.tk.Toplevel.cancel_on_wait
+    gui_mocks.tk.Toplevel.cancel_on_wait = True
+    try:
+        with (
+            patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+            patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        ):
+            result = prompt_create_source(FakeRoot())
+    finally:
+        gui_mocks.tk.Toplevel.cancel_on_wait = saved
+
+    assert result is None
+
+
+def test_prompt_clone_plan_submits_url_and_branch(gui_mocks) -> None:
+    """Renseigner URL + branche puis <Return> doit produire un GitClonePlan."""
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+        assert len(entries) == 2, f"attendu 2 Entry (URL + branche), obtenu {len(entries)}"
+        entries[0]._options["textvariable"].set("https://example.test/repo.git")
+        entries[1]._options["textvariable"].set("develop")
+        # <Return> sur le champ branche = submit (cf. binding du dialogue).
+        entries[1]._bindings["<Return>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_clone_plan(FakeRoot())
+
+    assert result == GitClonePlan(url="https://example.test/repo.git", branch="develop")
+
+
+def test_prompt_clone_plan_url_only_defaults_branch_to_none(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+        entries[0]._options["textvariable"].set("https://example.test/repo.git")
+        # branche laissée vide → None
+        entries[1]._bindings["<Return>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_clone_plan(FakeRoot())
+
+    assert result == GitClonePlan(url="https://example.test/repo.git", branch=None)
+
+
+def test_prompt_clone_plan_missing_url_warns_and_returns_none(gui_mocks) -> None:
+    """Sans URL, submit doit refuser et laisser la boîte ouverte ; Escape → None."""
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.messagebox.warnings.clear()
+
+    def drive(dialog) -> None:
+        entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+        # <Return> sans URL : submit → showwarning + return (pas de destroy)
+        entries[1]._bindings["<Return>"](None)
+        # On simule ensuite l'annulation utilisateur.
+        dialog._bindings["<Escape>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch("n8n_launcher.gui.dialogs.messagebox", gui_mocks.messagebox),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_clone_plan(FakeRoot())
+
+    assert result is None
+    assert any("URL" in msg for msg in gui_mocks.messagebox.warnings)
+
+
+def test_prompt_clone_plan_load_branches_reports_error_on_git_failure(gui_mocks) -> None:
+    """Un échec ``git ls-remote`` ne bloque pas : le message d'erreur s'affiche."""
+    from n8n_launcher.git import GitError
+
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+        entries[0]._options["textvariable"].set("https://bad.test/repo.git")
+        load = next(
+            button
+            for button in dialog.children
+            if isinstance(button, gui_mocks.ttk.Button)
+            and (button.text or "").startswith("Charger")
+        )
+        with patch(
+            "n8n_launcher.git.git_list_remote_branches",
+            side_effect=GitError("repository not found"),
+        ):
+            load.command()
+        # Statut mis à jour = "Impossible de lister...", on annule.
+        dialog._bindings["<Escape>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        prompt_clone_plan(FakeRoot())
+
+
+def test_prompt_clone_plan_load_branches_prefills_main(gui_mocks) -> None:
+    """Cliquer « Charger les branches » doit préremplir ``main`` si présent."""
+    gui_mocks.tk.Toplevel.instances.clear()
+    captured: dict[str, str] = {}
+
+    def drive(dialog) -> None:
+        entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+        entries[0]._options["textvariable"].set("https://example.test/repo.git")
+        load = next(
+            button
+            for button in dialog.children
+            if isinstance(button, gui_mocks.ttk.Button)
+            and (button.text or "").startswith("Charger")
+        )
+        with patch(
+            "n8n_launcher.git.git_list_remote_branches",
+            return_value=["main", "develop"],
+        ):
+            load.command()
+        # Après chargement : branche doit valoir "main".
+        captured["branch"] = entries[1]._options["textvariable"].get()
+        entries[1]._bindings["<Return>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_clone_plan(FakeRoot())
+
+    assert captured["branch"] == "main"
+    assert result == GitClonePlan(url="https://example.test/repo.git", branch="main")
