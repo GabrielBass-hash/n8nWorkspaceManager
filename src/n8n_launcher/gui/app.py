@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import platform
 import queue
@@ -60,13 +61,14 @@ from .theme import (
     CHIP_INACTIVE,
     CHIP_NEUTRAL,
     CHIP_WARN,
+    FONT_EMPTY_BADGE,
+    FONT_EMPTY_TITLE,
     FONT_META,
     FONT_PILL,
     FONT_ROWS,
     FONT_STATUS,
     FONT_SUBTITLE,
     FONT_TITLE,
-    FONT_WATERMARK,
     ROW_SELECTED_BG,
     STATE_POLL_MS,
     SURFACE,
@@ -74,10 +76,42 @@ from .theme import (
     SURFACE_HOVER,
     TEXT_MUTED,
     TEXT_PRIMARY,
-    WATERMARK_COLOR,
+    configure_fonts,
     state_label,
 )
 from .update_flow import UpdateController
+
+logger = logging.getLogger(__name__)
+
+# The main window is sized as a clamped fraction of the physical screen (see
+# ``window_size``): a fixed 980x600 geometry is a postage stamp on
+# high-resolution displays (e.g. 7680x2160) and an oversized box on small
+# laptops. Fonts stay point-sized, so the UI reflows with ``tk scaling``.
+# ``DEFAULT_WINDOW_*`` are the fallback geometry when screen metrics are
+# unavailable (a metric of 1 pixel means Tk never mapped the window).
+MIN_WINDOW_WIDTH = 720
+MIN_WINDOW_HEIGHT = 460
+MAX_WINDOW_WIDTH = 1280
+MAX_WINDOW_HEIGHT = 820
+WINDOW_WIDTH_FRACTION = 0.6
+WINDOW_HEIGHT_FRACTION = 0.72
+DEFAULT_WINDOW_WIDTH = 980
+DEFAULT_WINDOW_HEIGHT = 600
+
+
+def window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
+    """Pick the main-window geometry as a clamped fraction of the screen."""
+    width = (
+        round(screen_width * WINDOW_WIDTH_FRACTION) if screen_width > 1 else DEFAULT_WINDOW_WIDTH
+    )
+    height = (
+        round(screen_height * WINDOW_HEIGHT_FRACTION)
+        if screen_height > 1
+        else DEFAULT_WINDOW_HEIGHT
+    )
+    width = min(max(width, MIN_WINDOW_WIDTH), MAX_WINDOW_WIDTH)
+    height = min(max(height, MIN_WINDOW_HEIGHT), MAX_WINDOW_HEIGHT)
+    return width, height
 
 
 def open_n8n_app(url: str, profile_dir: Path) -> None:
@@ -200,6 +234,10 @@ class LauncherApp:
 
     def _apply_theme(self) -> None:
         try:
+            # Named fonts must exist before any widget or style resolves them;
+            # the family is probed from the running Tk (case-insensitively) to
+            # avoid the silent ``fixed`` fallback that made the UI unreadable.
+            configure_fonts(self.root)
             style = ttk.Style(self.root)
             style.theme_use("clam")
             style.configure(".", font=FONT_META, background=APP_BACKGROUND)
@@ -286,16 +324,19 @@ class LauncherApp:
         except Exception:
             pass
         try:
-            self.root.minsize(640, 380)
+            self.root.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
             self.root.configure(bg=APP_BACKGROUND)
         except Exception:
             pass
         if self._owns_root:
             try:
-                self.root.geometry("820x460")
+                width, height = window_size(
+                    self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+                )
+                self.root.geometry(f"{width}x{height}")
                 self.root.update_idletasks()
-                x = (self.root.winfo_screenwidth() - 820) // 2
-                y = max((self.root.winfo_screenheight() - 460) // 3, 0)
+                x = (self.root.winfo_screenwidth() - width) // 2
+                y = max((self.root.winfo_screenheight() - height) // 3, 0)
                 self.root.geometry(f"+{x}+{y}")
             except Exception:
                 pass
@@ -362,18 +403,8 @@ class LauncherApp:
             widget.bind("<Button-5>", self._on_wheel_linux)
         self._list_canvas.bind("<Configure>", self._on_canvas_resize)
 
-        watermark = tk.Label(
-            self.workspace_list,
-            text="+",
-            bg=SURFACE,
-            fg=WATERMARK_COLOR,
-            font=FONT_WATERMARK,
-            anchor="center",
-        )
-        with contextlib.suppress(Exception):
-            watermark.place(relx=0.5, rely=0.5, anchor="center")
-        self._watermark = watermark
-        watermark.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
+        self._empty_state = self._build_empty_state()
+        self._toggle_empty_state()
 
         self._menu = tk.Menu(self.root, tearoff=0)
         self._menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
@@ -413,12 +444,96 @@ class LauncherApp:
         self._list_canvas.yview_scroll(direction, "units")
 
     def _on_canvas_resize(self, event: tk.Event) -> None:
-        """Keep the inner list frame as wide as the canvas."""
+        """Keep the inner list frame as wide (and, when empty, as tall) as the canvas."""
         self._list_canvas.itemconfigure(self._list_window, width=event.width)
+        if not self._row_order:
+            self._list_canvas.itemconfigure(self._list_window, height=event.height)
 
     def _update_scrollregion(self) -> None:
         """Refresh the scrollable bounds after rows are rebuilt."""
         self._list_canvas.config(scrollregion=self._list_canvas.bbox("all"))
+
+    def _build_empty_state(self) -> tk.Frame:
+        """Build the centered creation card shown when the workspace list is empty.
+
+        The card sits in ``workspace_list``, which is stretched to the full
+        canvas height by ``_on_canvas_resize`` while the list is empty, so the
+        card stays centered in the visible area (instead of being clipped to a
+        pixel-tall strip the way the old watermark label was).
+        """
+        card = tk.Frame(
+            self.workspace_list,
+            bg=SURFACE_HOVER,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            padx=28,
+            pady=22,
+        )
+        badge = tk.Label(
+            card,
+            text="+",
+            bg=ACCENT,
+            fg=APP_BACKGROUND,
+            font=FONT_EMPTY_BADGE,
+            width=2,
+            height=1,
+        )
+        badge.pack(pady=(0, 10))
+        title = tk.Label(
+            card,
+            text="Créer un workflow",
+            bg=SURFACE_HOVER,
+            fg=TEXT_PRIMARY,
+            font=FONT_EMPTY_TITLE,
+        )
+        title.pack()
+        subtitle = tk.Label(
+            card,
+            text="Dossier local ou clonage depuis Git",
+            bg=SURFACE_HOVER,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+            pady=4,
+        )
+        subtitle.pack()
+
+        # Every child is clickable so the whole card opens the creation flow;
+        # the hover feedback shifts the card to the pressed surface tone.
+        for widget in (card, badge, title, subtitle):
+            widget.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
+            widget.bind("<Enter>", self._on_empty_enter)
+            widget.bind("<Leave>", self._on_empty_leave)
+            with contextlib.suppress(Exception):
+                widget.config(cursor="hand2")
+        self._empty_widgets = (card, badge, title, subtitle)
+        self._empty_hover_widgets = (card, title, subtitle)
+        return card
+
+    def _on_empty_enter(self, _event: tk.Event) -> None:
+        """Brighten the empty-state card while hovered."""
+        for widget in self._empty_hover_widgets:
+            with contextlib.suppress(Exception):
+                widget.config(bg=SURFACE_ACTIVE)
+
+    def _on_empty_leave(self, _event: tk.Event) -> None:
+        """Restore the empty-state card colors after hover ends."""
+        for widget in self._empty_hover_widgets:
+            with contextlib.suppress(Exception):
+                widget.config(bg=SURFACE_HOVER)
+
+    def _toggle_empty_state(self) -> None:
+        """Show the creation card only while the workspace list is empty.
+
+        The canvas window keeps an explicit height while empty so the card is
+        centered in the visible area; once rows exist the height must be reset
+        to ``0`` so Tk falls back to the content's own requested height.
+        """
+        if not self._row_order:
+            self._empty_state.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self._empty_state.place_forget()
+            with contextlib.suppress(Exception):
+                self._list_canvas.itemconfigure(self._list_window, height=0)
 
     def _build_row(self, workspace: Workspace) -> tuple[RowFrame, tk.Label]:
         if workspace.id == self._selected_id:
@@ -554,7 +669,7 @@ class LauncherApp:
         text: str,
         *,
         palette: tuple[str, str],
-        font: tuple[str, int, str] = FONT_PILL,
+        font: str | tuple[str, int, str] = FONT_PILL,
         padx: int = 8,
         pady: int = 2,
     ) -> tk.Label:
@@ -694,12 +809,21 @@ class LauncherApp:
         self._row_order = []
         workspaces = self.workspace_manager.list()
         for workspace in workspaces:
-            row = self._build_row(workspace)
+            try:
+                row = self._build_row(workspace)
+            except Exception:
+                # A single unhealthy workspace must never blank the whole
+                # list: log and skip it so the remaining rows still render.
+                logger.exception(
+                    "Skipping unrenderable workspace %s (%s)", workspace.id, workspace.name
+                )
+                continue
             self._rows[workspace.id] = row
             self._row_order.append(workspace.id)
         if self._selected_id is not None and self._selected_id not in self._rows:
             self._selected_id = None
         self._apply_selection_styles()
+        self._toggle_empty_state()
         if self._subtitle is not None:
             count = len(workspaces)
             if count == 0:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class DbMode(StrEnum):
@@ -119,18 +122,31 @@ class Workspace:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Workspace:
-        """Deserialize, defaulting every optional/legacy field gracefully."""
+        """Deserialize, defaulting every optional/legacy field gracefully.
+
+        Unknown states degrade to ``STOPPED`` and a missing ``db`` block to
+        ``DbMode.NONE`` so a partially-written entry keeps reading instead of
+        making the whole config unreadable (which used to push the app into
+        the first-launch wizard and silently wipe the workspace list).
+        """
+        try:
+            state = WorkspaceState(data.get("state", WorkspaceState.STOPPED))
+        except (TypeError, ValueError):
+            state = WorkspaceState.STOPPED
+        db_data = data.get("db")
+        if not isinstance(db_data, dict):
+            db_data = {}
         return cls(
             id=data["id"],
             name=data["name"],
             workflows_dir=Path(data["workflows_dir"]),
             port=int(data["port"]),
-            db=DbConfig.from_dict(data["db"]),
+            db=DbConfig.from_dict(db_data),
             git=GitConfig.from_dict(data.get("git")),
             n8n_version=data.get("n8n_version", "2.33.3"),
             postgres_image=data.get("postgres_image"),
             postgres_preload_timescaledb=bool(data.get("postgres_preload_timescaledb", False)),
-            state=WorkspaceState(data.get("state", WorkspaceState.STOPPED)),
+            state=state,
             restart_required=bool(data.get("restart_required", False)),
             api_key=data.get("api_key"),
             git_push_failed=bool(data.get("git_push_failed", False)),
@@ -162,11 +178,30 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AppConfig:
-        """Deserialize an :class:`AppConfig` from parsed JSON."""
+        """Deserialize an :class:`AppConfig` from parsed JSON.
+
+        Workspace parsing is tolerant per entry: a malformed workspace is
+        skipped with a warning (the healthy ones still load) and a missing or
+        non-list ``workspaces`` key behaves as an empty list. Without this, a
+        single broken entry made the whole file unreadable and ``main()``
+        treated it as a first launch, wiping the list via ``store.save()``.
+        """
+        raw_workspaces = data.get("workspaces") or []
+        if not isinstance(raw_workspaces, list):
+            raw_workspaces = []
+        workspaces: list[Workspace] = []
+        for item in raw_workspaces:
+            if not isinstance(item, dict):
+                logger.warning("Skipping non-object workspace entry: %r", item)
+                continue
+            try:
+                workspaces.append(Workspace.from_dict(item))
+            except Exception as exc:
+                logger.warning("Skipping malformed workspace %r: %s", item.get("id"), exc)
         return cls(
             owner_email=data["owner_email"],
             owner_password=data["owner_password"],
             work_dir=Path(data["work_dir"]),
-            workspaces=[Workspace.from_dict(item) for item in data.get("workspaces", [])],
+            workspaces=workspaces,
             github_token=data.get("github_token"),
         )

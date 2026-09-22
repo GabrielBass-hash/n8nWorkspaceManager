@@ -345,7 +345,14 @@ def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> No
     )
     workspace = launcher.create("Plain", tmp_path / "plain", db=DbConfig(DbMode.NONE))
 
-    launcher.ensure_running(workspace.id)
+    # The compose file must land in tmp, never in the real config directory:
+    # without this patch start() writes a compose.yml under
+    # ~/.config/n8n-launcher/workspaces/<id>/ (the manager uses the global
+    # paths by default), leaving pytest artifacts in the user's config.
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
+        launcher.ensure_running(workspace.id)
 
     fake_api.ensure_postgres_credential.assert_not_called()
 

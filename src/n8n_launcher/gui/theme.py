@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import platform
+import tkinter as tk
 
 from ..core.models import WorkspaceState
 
@@ -36,8 +36,6 @@ CHIP_INACTIVE = ("#7f1d1d", "#fca5a5")
 CHIP_NEUTRAL = ("#334155", "#cbd5e1")
 CHIP_WARN = ("#78350f", "#fcd34d")
 
-WATERMARK_COLOR = "#2b3950"
-
 STATE_LABELS = {
     WorkspaceState.STOPPED: "Arrêté",
     WorkspaceState.STARTING: "Démarrage",
@@ -54,20 +52,89 @@ def state_label(state: WorkspaceState) -> str:
     return STATE_LABELS.get(state, state.value)
 
 
-def _font_family() -> str:
-    system = platform.system()
-    if system == "Darwin":
-        return "Helvetica Neue"
-    if system == "Windows":
-        return "Segoe UI"
-    return "DejaVu Sans"
+# The UI renders through *named* fonts registered at startup by
+# ``configure_fonts``: widgets reference the ``FONT_*`` constants (plain font
+# names), and the actual family/size is decided once against the running Tk
+# root. Sizes are in *points*, so Tk converts them to pixels through the
+# DPI-aware ``tk scaling`` factor and the UI reflows responsively instead of
+# scaling pixel values by hand.
+#
+# The family is deliberately resolved at runtime rather than guessed: on Linux
+# a hard-coded "DejaVu Sans" misses whenever Tk does not expose that family
+# (this build only lists ``liberation sans``), the widget then falls back to
+# the tiny ``fixed`` bitmap font, and the requested point size is *ignored*
+# entirely — every size renders at ~13px. Probing the interpreter's own family
+# list avoids the silent fallback that produced that unreadable UI.
+_FONT_SPECS: tuple[tuple[str, int, str | None], ...] = (
+    ("Launcher.Title", 17, "bold"),
+    ("Launcher.Subtitle", 11, None),
+    ("Launcher.Rows", 13, "bold"),
+    ("Launcher.Meta", 12, None),
+    ("Launcher.Status", 11, None),
+    ("Launcher.Pill", 11, "bold"),
+    ("Launcher.EmptyTitle", 18, "bold"),
+    ("Launcher.EmptyBadge", 22, "bold"),
+)
+
+FONT_TITLE = "Launcher.Title"
+FONT_SUBTITLE = "Launcher.Subtitle"
+FONT_ROWS = "Launcher.Rows"
+FONT_META = "Launcher.Meta"
+FONT_STATUS = "Launcher.Status"
+FONT_PILL = "Launcher.Pill"
+FONT_EMPTY_TITLE = "Launcher.EmptyTitle"
+FONT_EMPTY_BADGE = "Launcher.EmptyBadge"
+
+# Preferred font families, most-desirable first. The first one reported by the
+# running Tk wins, so the table doubles as the platform fallback chain:
+# "Segoe UI" and "Helvetica Neue" win on Windows/macOS, popular Linux faces
+# follow, and "Liberation Sans" covers Tk builds that only expose the
+# ``liberation`` families. Matching is case-insensitive because Linux Tk
+# canonicalizes the family list to lowercase.
+FONT_FAMILY_ORDER = (
+    "Segoe UI",
+    "Helvetica Neue",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Ubuntu",
+    "Cantarell",
+    "Liberation Sans",
+    "Arial",
+    "Sans",
+)
+
+_FONTS_CONFIGURED = False
 
 
-FONT_BASE = _font_family()
-FONT_TITLE = (FONT_BASE, 15, "bold")
-FONT_SUBTITLE = (FONT_BASE, 9)
-FONT_ROWS = (FONT_BASE, 11, "bold")
-FONT_META = (FONT_BASE, 10)
-FONT_STATUS = (FONT_BASE, 9)
-FONT_PILL = (FONT_BASE, 9, "bold")
-FONT_WATERMARK = (FONT_BASE, 44)
+def configure_fonts(root: tk.Misc) -> bool:
+    """Register the named UI fonts against *root*; True when registered.
+
+    Idempotent: the first successful call wins, so later windows share the
+    same fonts. If no preferred family is available, ``TkDefaultFont`` keeps
+    every widget resolvable instead of crashing on a missing font name.
+    Fake/headless roots (unit tests) leave the names unregistered — widgets
+    still carry the ``FONT_*`` strings and the fakes ignore them.
+    """
+    global _FONTS_CONFIGURED
+    if _FONTS_CONFIGURED:
+        return True
+    try:
+        import tkinter.font as tkfont
+
+        known: dict[str, str] = {family.lower(): family for family in tkfont.families(root)}
+    except Exception:
+        return False
+    family = next(
+        (known[preferred.lower()] for preferred in FONT_FAMILY_ORDER if preferred.lower() in known),
+        "TkDefaultFont",
+    )
+    try:
+        for name, size, weight in _FONT_SPECS:
+            spec: list[object] = ["font", "create", name, "-family", family, "-size", size]
+            if weight is not None:
+                spec += ["-weight", weight]
+            root.tk.call(*spec)
+        _FONTS_CONFIGURED = True
+        return True
+    except Exception:
+        return False

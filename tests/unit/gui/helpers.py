@@ -42,6 +42,9 @@ class FakeTk:
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
 
+        def place_forget(self) -> None:
+            self._place_options = None
+
     class Label:
         def __init__(self, parent, **kwargs):
             self._parent = parent
@@ -66,6 +69,9 @@ class FakeTk:
 
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
+
+        def place_forget(self) -> None:
+            self._place_options = None
 
     class Button:
         def __init__(self, parent, **kwargs):
@@ -101,7 +107,8 @@ class FakeTk:
             return self._window_id
 
         def itemconfigure(self, _item_id, **kwargs) -> None:
-            self._item_kwargs = dict(kwargs)
+            existing = getattr(self, "_item_kwargs", {})
+            self._item_kwargs = {**existing, **kwargs}
 
         def yview_scroll(self, _n: int, _what: str) -> None:
             self.scrolled += 1

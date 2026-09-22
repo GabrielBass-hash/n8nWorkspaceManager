@@ -196,25 +196,25 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
     assert database.mode is DbMode.NONE
 
 
-def test_watermark_click_triggers_creation(gui_mocks, tmp_path) -> None:
+def test_empty_state_click_triggers_creation(gui_mocks, tmp_path) -> None:
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
-    folder = tmp_path / "wf-watermark"
+    folder = tmp_path / "wf-empty"
     folder.mkdir()
-    plan = CreatePlan(name="wf-watermark", db=DbConfig(DbMode.NONE))
+    plan = CreatePlan(name="wf-empty", db=DbConfig(DbMode.NONE))
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
         patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
-        launcher._watermark._bindings["<Button-1>"](None)
+        launcher._empty_state._bindings["<Button-1>"](None)
     launcher._drain_events()
 
-    assert manager.create.call_args.args[0] == "wf-watermark"
+    assert manager.create.call_args.args[0] == "wf-empty"
 
 
 def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) -> None:

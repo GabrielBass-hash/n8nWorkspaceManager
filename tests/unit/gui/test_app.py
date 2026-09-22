@@ -24,8 +24,52 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
+from n8n_launcher.gui.app import window_size
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
 from n8n_launcher.gui.display import GitRowStatus
+
+
+def test_window_size_scales_with_screen() -> None:
+    assert window_size(7680, 2160) == (1280, 820)
+    assert window_size(1920, 1080) == (1152, 778)
+    assert window_size(800, 600) == (720, 460)
+
+
+def test_window_size_falls_back_on_unknown_screen() -> None:
+    # A 1px metric means Tk never mapped the window; keep the legacy geometry.
+    assert window_size(1, 1) == (980, 600)
+
+
+class ScreenRoot(FakeRoot):
+    """FakeRoot plus the screen/geometry surface ``_configure_root`` needs."""
+
+    def __init__(self):
+        super().__init__()
+        self._geometry_calls: list[str] = []
+
+    def geometry(self, value: str) -> None:
+        self._geometry_calls.append(value)
+
+    def update_idletasks(self) -> None:
+        pass
+
+    def winfo_screenwidth(self) -> int:
+        return 3840
+
+    def winfo_screenheight(self) -> int:
+        return 2160
+
+
+def test_configure_root_sizes_window_from_screen(app) -> None:
+    fake_root = ScreenRoot()
+    app.app.root = fake_root
+    app.app._owns_root = True
+
+    app.app._configure_root()
+
+    assert fake_root._geometry_calls[0] == "1280x820"
+    # Centred with a slight upward bias; 0.6/0.72 fractions of 3840x2160.
+    assert fake_root._geometry_calls[1] == "+1280+446"
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -278,10 +322,34 @@ def test_action_without_selection_warns_instead_of_crashing(app) -> None:
     app.manager.stop.assert_not_called()
 
 
-def test_watermark_plus_is_centered(app) -> None:
-    watermark = app.app._watermark
-    assert watermark._options["text"] == "+"
-    assert watermark._place_options == {"relx": 0.5, "rely": 0.5, "anchor": "center"}
+def test_empty_state_shown_when_list_empty(app) -> None:
+    app.manager.list.return_value = []
+    app.app.refresh()
+
+    assert app.app._empty_state._place_options == {"relx": 0.5, "rely": 0.5, "anchor": "center"}
+
+
+def test_empty_state_hidden_when_rows_exist(app) -> None:
+    app.app.refresh()
+
+    assert app.app._empty_state._place_options is None
+
+
+def test_empty_state_claims_canvas_height_when_no_rows(app) -> None:
+    app.manager.list.return_value = []
+    app.app.refresh()
+    app.app._on_canvas_resize(SimpleNamespace(width=800, height=600))
+
+    assert app.app._list_canvas._item_kwargs == {"width": 800, "height": 600}
+
+
+def test_empty_state_releases_canvas_height_when_rows_appear(app) -> None:
+    app.app.refresh()
+    app.app._on_canvas_resize(SimpleNamespace(width=800, height=600))
+
+    # A height of 0 makes Tk fall back to the rows' requested height instead
+    # of pinning the canvas window to the stale full-canvas value.
+    assert app.app._list_canvas._item_kwargs == {"width": 800, "height": 0}
 
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
