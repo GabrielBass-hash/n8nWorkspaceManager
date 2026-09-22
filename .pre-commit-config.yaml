@@ -15,3 +15,12 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  # Runs in the project venv so the checked version is the one pinned by uv.lock
+  # (single source of truth), `uv run basedpyright` with no args uses pyproject.
+  - repo: local
+    hooks:
+      - id: basedpyright
+        name: basedpyright
+        entry: uv run basedpyright
+        language: system
+        types: [python]

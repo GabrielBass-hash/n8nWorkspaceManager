@@ -4,7 +4,7 @@
 
 Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu**) for managing isolated Docker-based n8n workspaces. Single package `n8n_launcher` under `src/`, split into subpackages by concern: `core/` (config, models, paths), `database/`, `docker/`, `git/`, `n8n/` (API, owner bootstrap, workflow sync), `platform/` (updater, browser, ports, shortcuts), `gui/` (app, dialogs, close/update flows, display), `workspaces/` (manager). Each file is one concern.
 
-Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via `dmgbuild` with app icon + full `Info.plist`), one-file `.exe` (Windows), `.AppImage` (Linux). CI builds all three in the `build` job and the release-asset job.
+Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via `dmgbuild` with app icon + full `Info.plist`), one-file `.exe` (Windows), and a one-file executable on Linux (a `.AppImage` is built out-of-band via `scripts/build_appimage.sh`). CI builds the three release artifacts in the `build` jobs; the AppImage is not part of CI.
 
 The launcher version is a single-source SemVer (`MAJOR.MINOR.PATCH`) declared in `src/n8n_launcher/__init__.py` (`__version__`); `pyproject.toml` inherits it via `dynamic = ["version"]`, `scripts/build.py` embeds it, `platform/updater.py` compares it. Bump it with `python scripts/bump_version.py <patch|minor|major>` (or `--to X.Y.Z`; `--dry-run` previews; refuses on a dirty tree or an already-tagged version, `--force` bypasses). Releases are published only from `main` and only when the source version differs from the last git tag — no auto-bump, no `[skip ci]` reliance.
 
@@ -12,8 +12,8 @@ The launcher version is a single-source SemVer (`MAJOR.MINOR.PATCH`) declared in
 
 ```bash
 # Setup (uv is the single package manager; .python-version pins 3.12)
-uv sync --extra test            # runtime + test group
-uv sync --extra packaging       # build tooling
+uv sync                        # runtime + dev tooling (dev group installed by default)
+uv sync --group packaging      # build tooling
 
 # Run unit tests (default — excludes integration)
 uv run pytest
@@ -32,7 +32,7 @@ uv run ruff check .
 uv run ruff format --check .
 uv run basedpyright            # src/n8n_launcher/ is fully typed (0 errors); tests/ and scripts/ are excluded by policy
 
-# All checks at once (what CI runs)
+# All checks at once (same command CI runs; CI also runs pytest + build)
 uv run pre-commit run --all-files
 
 # Build desktop executable (macOS: .dmg via dmgbuild; Linux/Windows: one-file exe)
@@ -46,7 +46,7 @@ uv run python scripts/bump_version.py --dry-run patch          # preview without
 bash scripts/build_appimage.sh
 ```
 
-The stack is **uv** (dependency management + virtualenv), **Ruff** (lint + format), **basedpyright** (typecheck, `typeCheckingMode = "standard"`), **pytest + pytest-cov**, and **pre-commit**. Everything is configured in `pyproject.toml` (project metadata, `dependency-groups`, `[tool.ruff]`, `[tool.pytest.ini_options]`, `[tool.basedpyright]`); hooks live in `.pre-commit-config.yaml`. CI runs `uv sync --frozen`, `ruff check`, `ruff format --check`, `basedpyright`, `pytest` (matrix: ubuntu, macOS, windows) and `scripts/build.py`.
+The stack is **uv** (dependency management + virtualenv), **Ruff** (lint + format), **basedpyright** (typecheck, `typeCheckingMode = "standard"`), **pytest + pytest-cov**, and **pre-commit**. Everything is configured in `pyproject.toml` (project metadata, `dependency-groups`, `[tool.ruff]`, `[tool.pytest.ini_options]`, `[tool.basedpyright]`); hooks live in `.pre-commit-config.yaml` (including `basedpyright` as a `local` hook, so `pre-commit run --all-files` covers the full stack). CI runs `uv sync --frozen`, `uv run pre-commit run --all-files`, `pytest` (matrix: ubuntu, macOS, windows) and `scripts/build.py`.
 
 `basedpyright` is configured with `exclude = ["tests/**", "scripts/**"]`: every module under `src/` must typecheck, but the test fixtures and build scripts are deliberately loose (FakeTk stand-ins, MagicMock return values) and are not shipped, so they are out of scope. Do not widen the exclusion back to `src/`.
 

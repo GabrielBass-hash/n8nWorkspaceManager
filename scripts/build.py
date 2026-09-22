@@ -118,6 +118,7 @@ def build_icns() -> Path:
 
 
 HIDDEN_IMPORTS = [
+    "n8n_launcher.__main__",
     "n8n_launcher.core",
     "n8n_launcher.core.config",
     "n8n_launcher.core.models",
@@ -131,8 +132,13 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.docker.manager",
     "n8n_launcher.git",
     "n8n_launcher.git.manager",
+    "n8n_launcher.github",
+    "n8n_launcher.github.api",
+    "n8n_launcher.github.auth",
     "n8n_launcher.gui",
     "n8n_launcher.gui.app",
+    "n8n_launcher.gui.ci_edit",
+    "n8n_launcher.gui.ci_runs",
     "n8n_launcher.gui.close",
     "n8n_launcher.gui.dialogs",
     "n8n_launcher.gui.display",
@@ -149,6 +155,8 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.platform.shortcuts",
     "n8n_launcher.platform.updater",
     "n8n_launcher.workspaces",
+    "n8n_launcher.workspaces.ci",
+    "n8n_launcher.workspaces.ci_runs",
     "n8n_launcher.workspaces.manager",
     "tkinter",
     "tkinter.ttk",

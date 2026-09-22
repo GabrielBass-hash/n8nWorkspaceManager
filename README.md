@@ -52,17 +52,23 @@ Requires Python 3.12 or newer. The project uses **uv** as the single package
 manager; every command below runs inside the uv-managed virtualenv.
 
 ```bash
-uv sync --extra test
+uv sync
 uv run pytest
 ```
 
-Lint, format, and typecheck (Ruff + basedpyright, mirroring CI):
+Lint, format, and typecheck (Ruff + basedpyright + repo hooks). The single
+pre-commit command runs exactly what CI runs for static checks:
+
+```bash
+uv run pre-commit run --all-files
+```
+
+The underlying tools are also available directly if you want to run one alone:
 
 ```bash
 uv run ruff check .
 uv run ruff format --check .
 uv run basedpyright
-uv run pre-commit run --all-files
 ```
 
 Integration tests are opt-in:
@@ -74,7 +80,7 @@ uv run pytest -m integration
 Build the desktop distribution locally with:
 
 ```bash
-uv sync --extra packaging
+uv sync --group packaging
 uv run python scripts/build.py
 ```
 
