@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 import bump_version
+import pytest
 
 INIT_STUB = """\"\"\"pkg.\"\"\"
 
@@ -106,6 +105,4 @@ def test_package_version_is_valid_semver() -> None:
 def test_package_version_has_no_padding() -> None:
     from n8n_launcher import __version__
 
-    assert __version__ == ".".join(
-        str(int(part)) for part in __version__.split(".")
-    )
+    assert __version__ == ".".join(str(int(part)) for part in __version__.split("."))

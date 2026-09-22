@@ -165,9 +165,7 @@ _JOB_STATUS_LABELS: dict[str, str] = {
 
 # GitHub run-status values meaning the workflow is still running (or waiting to
 # start) and could still change. Anything else is finished and immutable.
-RUN_ACTIVE_STATUSES = frozenset(
-    {"queued", "waiting", "in_progress", "pending", "requested"}
-)
+RUN_ACTIVE_STATUSES = frozenset({"queued", "waiting", "in_progress", "pending", "requested"})
 
 
 def run_status_is_active(status: str) -> bool:
@@ -175,14 +173,18 @@ def run_status_is_active(status: str) -> bool:
     return status in RUN_ACTIVE_STATUSES
 
 
-def _as_int(value: Any, default: int = 0) -> int:
-    try:
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    if isinstance(value, (int, float)):
         return int(value)
-    except (TypeError, ValueError):
-        return default
+    return default
 
 
-def _as_str(value: Any) -> str:
+def _as_str(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
@@ -339,16 +341,12 @@ def compose_snapshot(
     pipelines_by_job: dict[int, tuple[PipelineResult, ...]] = {}
     if raw_jobs:
         for run_id, job_payloads in raw_jobs.items():
-            summarized = tuple(
-                job_summary(job) for job in job_payloads if isinstance(job, dict)
-            )
+            summarized = tuple(job_summary(job) for job in job_payloads if isinstance(job, dict))
             if summarized:
                 jobs_by_run[run_id] = summarized
     if pipelines:
         pipelines_by_job = {
-            int(job_id): tuple(results)
-            for job_id, results in pipelines.items()
-            if int(job_id) >= 0
+            int(job_id): tuple(results) for job_id, results in pipelines.items() if int(job_id) >= 0
         }
     return RunsSnapshot(
         repo_path=repo_path,

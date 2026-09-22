@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import sys
 import tkinter as tk
+from collections.abc import Callable
+from pathlib import Path
 from tkinter import messagebox, simpledialog
-from typing import Callable
 
 from ..core.config import ConfigStore
 from ..core.models import AppConfig
@@ -24,13 +24,9 @@ def validate_password(password: str) -> None:
     if not password or not 8 <= len(password) <= 64:
         raise SetupWizardError("An owner password of 8 to 64 characters is required")
     if not re.search(r"\d", password):
-        raise SetupWizardError(
-            "An owner password must contain at least one number"
-        )
+        raise SetupWizardError("An owner password must contain at least one number")
     if not re.search(r"[A-Z]", password):
-        raise SetupWizardError(
-            "An owner password must contain at least one uppercase letter"
-        )
+        raise SetupWizardError("An owner password must contain at least one uppercase letter")
 
 
 def build_initial_config(email: str, password: str, work_dir: Path) -> AppConfig:

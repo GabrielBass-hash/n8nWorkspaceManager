@@ -21,11 +21,11 @@ __all__ = [
     "DATA_PASSWORD",
     "DATA_USER",
     "DatabaseTarget",
+    "MigrationError",
+    "MigrationRunner",
     "configure_db_credential",
     "data_db_target",
     "detect_migrations",
     "detect_schema",
     "has_db_layout",
-    "MigrationError",
-    "MigrationRunner",
 ]

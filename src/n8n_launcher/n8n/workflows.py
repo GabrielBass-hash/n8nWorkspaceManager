@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,7 @@ class SyncRunner:
         api: N8nApiClient,
         workflows_dir: Path,
         policy: SyncPolicy | None = None,
-        logger: Any | None = None,
+        logger: logging.Logger | None = None,
         interval: float = 10.0,
     ) -> None:
         self.api = api
@@ -78,7 +79,10 @@ class SyncRunner:
             if not workflow_id:
                 skipped += 1
                 continue
-            target = self.workflows_dir / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            target = (
+                self.workflows_dir
+                / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            )
             if target.exists():
                 skipped += 1
                 continue
@@ -97,7 +101,10 @@ class SyncRunner:
             workflow_id = str(workflow.get("id", ""))
             if not workflow_id:
                 continue
-            target = self.workflows_dir / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            target = (
+                self.workflows_dir
+                / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            )
             detail = self.api.get_workflow(workflow_id)
             target.write_text(json.dumps(detail, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             exported.add(target.name)
@@ -148,9 +155,11 @@ class SyncRunner:
             self._stop_event.wait(self.interval)
 
 
-def _safe_name(value: Any) -> str:
+def _safe_name(value: object) -> str:
     text = str(value or "workflow").strip()
-    safe = "".join(character if character.isalnum() or character in "-_" else "_" for character in text)
+    safe = "".join(
+        character if character.isalnum() or character in "-_" else "_" for character in text
+    )
     return safe or "workflow"
 
 

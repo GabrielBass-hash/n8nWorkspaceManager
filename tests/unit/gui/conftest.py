@@ -6,12 +6,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Re-export for test modules that import helpers by name from this dir.
+from helpers import (
+    FakeMessagebox,
+    FakeRoot,
+    FakeTk,
+    FakeTtk,
+    SyncThread,
+    _safe_git_row_status,
+    make_workspace,
+)
+
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, WorkspaceState
-
-# Re-export for test modules that import helpers by name from this dir.
-from helpers import FakeMessagebox  # noqa: F401
-from helpers import FakeRoot, FakeTk, FakeTtk, SyncThread, _safe_git_row_status, make_workspace
 from n8n_launcher.gui import LauncherApp
 
 

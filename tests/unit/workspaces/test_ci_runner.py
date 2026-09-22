@@ -78,8 +78,18 @@ class FakeHttp:
 
 def test_generated_validate_rejects_duplicate_names(tmp_path: Path) -> None:
     root = render_harness_at(tmp_path)
-    write_export(root, "n8nPipelines/a.json", [{"name": "B", "type": "n8n-nodes-base.noOp", "typeVersion": 1}], name="B")
-    write_export(root, "n8nPipelines/b.json", [{"name": "B", "type": "n8n-nodes-base.noOp", "typeVersion": 1}], name="B")
+    write_export(
+        root,
+        "n8nPipelines/a.json",
+        [{"name": "B", "type": "n8n-nodes-base.noOp", "typeVersion": 1}],
+        name="B",
+    )
+    write_export(
+        root,
+        "n8nPipelines/b.json",
+        [{"name": "B", "type": "n8n-nodes-base.noOp", "typeVersion": 1}],
+        name="B",
+    )
 
     result = subprocess.run(
         [sys.executable, str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
@@ -93,7 +103,11 @@ def test_generated_validate_rejects_duplicate_names(tmp_path: Path) -> None:
 
 def test_generated_validate_rejects_unknown_selection(tmp_path: Path) -> None:
     root = render_harness_at(tmp_path)
-    write_export(root, "n8nPipelines/a.json", [{"name": "A", "type": "n8n-nodes-base.noOp", "typeVersion": 1}])
+    write_export(
+        root,
+        "n8nPipelines/a.json",
+        [{"name": "A", "type": "n8n-nodes-base.noOp", "typeVersion": 1}],
+    )
     write_selection(root, ["n8nPipelines/ghost.json"])
 
     result = subprocess.run(
@@ -108,7 +122,11 @@ def test_generated_validate_rejects_unknown_selection(tmp_path: Path) -> None:
 
 def test_generated_validate_accepts_known_selection(tmp_path: Path) -> None:
     root = render_harness_at(tmp_path)
-    write_export(root, "n8nPipelines/a.json", [{"name": "A", "type": "n8n-nodes-base.noOp", "typeVersion": 1}])
+    write_export(
+        root,
+        "n8nPipelines/a.json",
+        [{"name": "A", "type": "n8n-nodes-base.noOp", "typeVersion": 1}],
+    )
     write_selection(root, ["n8nPipelines/a.json"])
 
     result = subprocess.run(
@@ -134,12 +152,14 @@ def test_generated_runner_run_payload_variants(tmp_path: Path) -> None:
 
     manual = write_export(root, "n8nPipelines/m.json", _MANUAL)
     assert runner.run_payload(manual) == (
-        "trigger", {"triggerToStartFrom": {"name": "Bouton"}},
+        "trigger",
+        {"triggerToStartFrom": {"name": "Bouton"}},
     )
 
     schedule = write_export(root, "n8nPipelines/s.json", _SCHEDULE)
     assert runner.run_payload(schedule) == (
-        "destination", {"destinationNode": {"nodeName": "Pull", "mode": "inclusive"}},
+        "destination",
+        {"destinationNode": {"nodeName": "Pull", "mode": "inclusive"}},
     )
 
     webhook = write_export(
@@ -154,7 +174,12 @@ def test_generated_runner_import_workflows_posts_missing_only(tmp_path: Path) ->
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
     write_export(root, "n8nPipelines/a.json", _MANUAL, name="a")
-    write_export(root, "n8nPipelines/b.json", [{"name": "New", "type": "n8n-nodes-base.noOp", "typeVersion": 1}], name="b")
+    write_export(
+        root,
+        "n8nPipelines/b.json",
+        [{"name": "New", "type": "n8n-nodes-base.noOp", "typeVersion": 1}],
+        name="b",
+    )
     http = FakeHttp(
         {
             ("GET", "/api/v1/workflows"): (200, {"data": [{"id": "w1", "name": "a"}]}),
@@ -171,11 +196,14 @@ def test_generated_runner_import_workflows_posts_missing_only(tmp_path: Path) ->
     assert "active" not in posts[0][2]  # whitelist drops server fields
 
 
-def test_generated_runner_configure_credentials_from_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generated_runner_configure_credentials_from_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
     monkeypatch.setenv(
-        "N8N_CI_CREDENTIALS", json.dumps([{"name": "API", "type": "httpRequest", "data": {"u": "x"}}])
+        "N8N_CI_CREDENTIALS",
+        json.dumps([{"name": "API", "type": "httpRequest", "data": {"u": "x"}}]),
     )
     http = FakeHttp(
         {
@@ -191,7 +219,9 @@ def test_generated_runner_configure_credentials_from_secret(tmp_path: Path, monk
     assert posts[0][2] == {"name": "API", "type": "httpRequest", "data": {"u": "x"}}
 
 
-def test_generated_runner_missing_secret_is_non_fatal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generated_runner_missing_secret_is_non_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
     monkeypatch.delenv("N8N_CI_CREDENTIALS", raising=False)
@@ -208,7 +238,14 @@ def test_generated_runner_wait_execution_polls_to_finish(tmp_path: Path) -> None
         {
             ("GET", "/rest/executions/e1"): (
                 200,
-                {"data": {"status": "success", "finished": True, "resultData": {}, "lastNodeExecuted": "Pull"}},
+                {
+                    "data": {
+                        "status": "success",
+                        "finished": True,
+                        "resultData": {},
+                        "lastNodeExecuted": "Pull",
+                    }
+                },
             )
         }
     )
@@ -240,8 +277,12 @@ def test_generated_runner_summarize_counts_failures(tmp_path: Path) -> None:
 def test_generated_runner_trigger_run_returns_waiting_for_webhook(tmp_path: Path) -> None:
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
-    waiting_http = FakeHttp({("POST", "/rest/workflows/w1/run"): (200, {"waitingForWebhook": True})})
-    running_http = FakeHttp({("POST", "/rest/workflows/w1/run"): (200, {"data": {"executionId": "e9"}})})
+    waiting_http = FakeHttp(
+        {("POST", "/rest/workflows/w1/run"): (200, {"waitingForWebhook": True})}
+    )
+    running_http = FakeHttp(
+        {("POST", "/rest/workflows/w1/run"): (200, {"data": {"executionId": "e9"}})}
+    )
 
     assert runner.trigger_run(waiting_http, "w1", {}) is None
     assert runner.trigger_run(running_http, "w1", {}) == "e9"
@@ -291,9 +332,7 @@ def test_generated_runner_login_without_session_raises(tmp_path: Path) -> None:
 def test_generated_runner_create_api_key_uses_cookie_session(tmp_path: Path) -> None:
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
-    http = FakeHttp(
-        {("POST", "/rest/api-keys"): (200, {"data": {"rawApiKey": "n8n_key_1"}})}
-    )
+    http = FakeHttp({("POST", "/rest/api-keys"): (200, {"data": {"rawApiKey": "n8n_key_1"}})})
 
     secret = runner.create_api_key(http)
 

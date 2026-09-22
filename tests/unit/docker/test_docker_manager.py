@@ -3,12 +3,12 @@ from unittest.mock import patch
 
 import pytest
 
+from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 from n8n_launcher.docker.manager import (
     DockerManager,
     parse_compose_status,
     resolve_docker_command,
 )
-from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 
 
 def workspace(tmp_path: Path) -> Workspace:
@@ -85,23 +85,23 @@ def test_resolve_docker_command_falls_back_to_name() -> None:
 def test_failed_command_raises_docker_error(tmp_path: Path) -> None:
     manager = DockerManager()
 
-    with patch(
-        "n8n_launcher.docker.manager.subprocess.run",
-        return_value=completed(1, stderr="daemon unavailable"),
-    ), pytest.raises(Exception, match="daemon unavailable"):
+    with (
+        patch(
+            "n8n_launcher.docker.manager.subprocess.run",
+            return_value=completed(1, stderr="daemon unavailable"),
+        ),
+        pytest.raises(Exception, match="daemon unavailable"),
+    ):
         manager.up(workspace(tmp_path), tmp_path / "compose.yml")
 
 
 def test_parse_compose_status_maps_services_to_state() -> None:
-    raw = (
-        '{"Service":"postgres","State":"running"}\n'
-        '{"Service":"n8n","State":"running"}\n'
-    )
+    raw = '{"Service":"postgres","State":"running"}\n{"Service":"n8n","State":"running"}\n'
     assert parse_compose_status(raw) == {"postgres": "running", "n8n": "running"}
 
 
 def test_parse_compose_status_ignores_garbage_lines() -> None:
-    raw = "not-json\n{\"Service\":\"n8n\",\"State\":\"exited\"}\n"
+    raw = 'not-json\n{"Service":"n8n","State":"exited"}\n'
     assert parse_compose_status(raw) == {"n8n": "exited"}
 
 

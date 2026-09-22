@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -32,7 +33,8 @@ class MigrationRunner:
         if workspace.db.mode is not DbMode.MANAGED:
             return
         target = data_db_target(workspace)
-        assert target is not None
+        if target is None:
+            raise RuntimeError("cannot run migrations without a managed database target")
         # A plain LOGIN role owning its database is enough for schema/migration
         # work. TimescaleDB nevertheless requires a SUPERUSER to run
         # ``CREATE EXTENSION timescaledb``, so keep the privilege in that case.
@@ -72,7 +74,8 @@ class MigrationRunner:
         if not migrations:
             return []
         target = data_db_target(workspace)
-        assert target is not None
+        if target is None:
+            raise RuntimeError("cannot run migrations without a managed database target")
         applied_names = self.applied(workspace, compose_file)
         pending = [migration for migration in migrations if migration.name not in applied_names]
         for migration in pending:
@@ -98,7 +101,8 @@ class MigrationRunner:
     def applied(self, workspace: Workspace, compose_file: Path) -> set[str]:
         """Return the set of migration filenames already recorded as applied."""
         target = data_db_target(workspace)
-        assert target is not None
+        if target is None:
+            raise RuntimeError("cannot list applied migrations without a managed database target")
         try:
             result = self._run_with_retries(
                 workspace,
@@ -106,9 +110,7 @@ class MigrationRunner:
                 database=target.database,
                 user=target.user,
                 password=target.password,
-                stdin=(
-                    "SELECT filename FROM public.schema_migrations ORDER BY filename;\n"
-                ),
+                stdin=("SELECT filename FROM public.schema_migrations ORDER BY filename;\n"),
                 check=False,
             )
         except DockerError:
@@ -136,7 +138,7 @@ class MigrationRunner:
         check: bool = True,
         attempts: int = 12,
         interval: float = 2.0,
-    ) -> object:
+    ) -> subprocess.CompletedProcess[str] | DockerError:
         last_error: Exception | None = None
         for _ in range(attempts):
             try:

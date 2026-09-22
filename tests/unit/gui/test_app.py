@@ -4,20 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
-from n8n_launcher.core.paths import browser_app_dir
-from n8n_launcher.gui.display import GitRowStatus
-from n8n_launcher.gui.dialogs import GitHubTokenPlan
-
-from helpers import (  # noqa: E402
+from helpers import (
     ACTIVE_CHIP,
-    FakeRoot,
-    FakeTk,
-    HoldingThread,
     INACTIVE_CHIP,
     WARN_CHIP,
+    FakeRoot,
+    HoldingThread,
     _drain_queue,
     make_workspace,
     row_action_button,
@@ -25,10 +17,15 @@ from helpers import (  # noqa: E402
     row_chip,
     row_chip_colors,
     row_chip_text,
-    row_label,
     row_text,
 )
+
+from n8n_launcher.core.config import ConfigStore
+from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
+from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
+from n8n_launcher.gui.dialogs import GitHubTokenPlan
+from n8n_launcher.gui.display import GitRowStatus
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -123,9 +120,7 @@ def test_double_click_launches_selected(app) -> None:
     app.manager.ensure_running.assert_called_once_with(
         "ws-stopped", on_ready=app.app._wait_until_healthy
     )
-    app.browser.assert_called_once_with(
-        "http://127.0.0.1:5680", browser_app_dir("ws-stopped")
-    )
+    app.browser.assert_called_once_with("http://127.0.0.1:5680", browser_app_dir("ws-stopped"))
 
 
 def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> None:
@@ -134,9 +129,7 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
     manager = MagicMock()
     held = make_workspace(tmp_path, "Hold", 5690)
     manager.list.return_value = [held]
-    launcher = LauncherApp(
-        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
-    )
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
 
     launcher._select_row("ws-hold")
     HoldingThread.instances.clear()
@@ -195,9 +188,7 @@ def test_launch_does_not_restart_when_running(app) -> None:
         "ws-running", on_ready=app.app._wait_until_healthy
     )
     app.manager.start.assert_not_called()
-    app.browser.assert_called_once_with(
-        "http://127.0.0.1:5678", browser_app_dir("ws-running")
-    )
+    app.browser.assert_called_once_with("http://127.0.0.1:5678", browser_app_dir("ws-running"))
 
 
 def test_launch_reports_health_timeout(app, gui_mocks) -> None:
@@ -207,11 +198,12 @@ def test_launch_reports_health_timeout(app, gui_mocks) -> None:
 
     app.manager.ensure_running.side_effect = ensure_running
     gui_mocks.health_ok = SimpleNamespace(ok=False)
-    with patch(
-        "n8n_launcher.gui.app.requests.get",
-        side_effect=[SimpleNamespace(ok=False)] * 5,
-    ), patch(
-        "n8n_launcher.gui.app.time.monotonic", side_effect=[0, 1, 2, 300, 301, 302]
+    with (
+        patch(
+            "n8n_launcher.gui.app.requests.get",
+            side_effect=[SimpleNamespace(ok=False)] * 5,
+        ),
+        patch("n8n_launcher.gui.app.time.monotonic", side_effect=[0, 1, 2, 300, 301, 302]),
     ):
         app.app._select_row("ws-stopped")
         app.app.launch_selected()
@@ -250,9 +242,9 @@ def test_wait_until_healthy_times_out_when_router_stuck_on_404(app, gui_mocks) -
     with (
         patch("n8n_launcher.gui.app.requests.get", side_effect=fake_get),
         patch("n8n_launcher.gui.app.time.monotonic", side_effect=[0, 1, 300]),
+        pytest.raises(RuntimeError, match="did not become ready"),
     ):
-        with pytest.raises(RuntimeError, match="did not become ready"):
-            app.app._wait_until_healthy(5678)
+        app.app._wait_until_healthy(5678)
 
 
 def test_wait_until_healthy_accepts_mounted_router(app, gui_mocks) -> None:
@@ -268,9 +260,10 @@ def test_wait_until_healthy_accepts_mounted_router(app, gui_mocks) -> None:
 def test_open_workflows_uses_xdg_open_on_linux(app, tmp_path) -> None:
     app.app._select_row("ws-stopped")
 
-    with patch("n8n_launcher.gui.app.platform.system", return_value="Linux"), patch(
-        "n8n_launcher.gui.app.subprocess.Popen"
-    ) as popen:
+    with (
+        patch("n8n_launcher.gui.app.platform.system", return_value="Linux"),
+        patch("n8n_launcher.gui.app.subprocess.Popen") as popen,
+    ):
         app.app.open_workflows()
 
     popen.assert_called_once_with(["xdg-open", str(tmp_path / "Stopped")])
@@ -292,18 +285,18 @@ def test_watermark_plus_is_centered(app) -> None:
 
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
-        labels = [label for label, _ in app.app._menu._items if label]
-        assert labels == [
-            "Ouvrir n8n",
-            "Ouvrir le dossier",
-            "Configurer Git…",
-            "Configurer les tests GitHub Actions…",
-            "Gérer les credentials CI…",
-            "Ouvrir les Actions GitHub…",
-            "Désactiver les tests CI",
-            "Configurer le token GitHub…",
-            "Supprimer",
-        ]
+    labels = [label for label, _ in app.app._menu._items if label]
+    assert labels == [
+        "Ouvrir n8n",
+        "Ouvrir le dossier",
+        "Configurer Git…",
+        "Configurer les tests GitHub Actions…",
+        "Gérer les credentials CI…",
+        "Ouvrir les Actions GitHub…",
+        "Désactiver les tests CI",
+        "Configurer le token GitHub…",
+        "Supprimer",
+    ]
 
 
 def test_delete_per_row_confirms_then_removes_workspace(app) -> None:
@@ -406,9 +399,7 @@ def test_poll_skips_refresh_when_state_unchanged(gui_mocks, tmp_path) -> None:
     manager = MagicMock()
     manager.list.return_value = []
     manager.reconcile_all.return_value = 0
-    launcher = LauncherApp(
-        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
-    )
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     _drain_queue(launcher)
 
     launcher._poll_states()
@@ -423,14 +414,12 @@ def test_poll_refreshes_only_when_state_changed(gui_mocks, tmp_path) -> None:
     manager = MagicMock()
     manager.list.return_value = []
     manager.reconcile_all.return_value = 1
-    launcher = LauncherApp(
-        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
-    )
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     _drain_queue(launcher)
 
     launcher._poll_states()
 
-    callback, error = launcher.events.get_nowait()
+    _callback, error = launcher.events.get_nowait()
     assert error is None
     assert launcher.events.empty()
 
@@ -441,9 +430,7 @@ def test_poll_skips_overlapping_reconcile(gui_mocks, tmp_path) -> None:
     manager = MagicMock()
     manager.list.return_value = []
     manager.reconcile_all.return_value = 0
-    launcher = LauncherApp(
-        store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
-    )
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     _drain_queue(launcher)
 
     launcher._poll_in_flight = True
@@ -471,9 +458,7 @@ def test_empty_list_subtitle_hints_create(gui_mocks, tmp_path) -> None:
     manager.list.return_value = []
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
 
-    assert launcher._subtitle._options["text"] == (
-        "Aucun workflow — cliquez pour en créer un"
-    )
+    assert launcher._subtitle._options["text"] == ("Aucun workflow — cliquez pour en créer un")
 
 
 def test_empty_state_hint_disappears_when_workspaces_exist(app) -> None:
@@ -514,9 +499,7 @@ def test_row_start_button_launches_and_opens(app) -> None:
     app.manager.ensure_running.assert_called_once_with(
         "ws-stopped", on_ready=app.app._wait_until_healthy
     )
-    app.browser.assert_called_once_with(
-        "http://127.0.0.1:5680", browser_app_dir("ws-stopped")
-    )
+    app.browser.assert_called_once_with("http://127.0.0.1:5680", browser_app_dir("ws-stopped"))
 
 
 def test_toggle_from_row_ignores_unknown_workspace(app) -> None:
@@ -619,6 +602,7 @@ def test_canvas_wheel_bindings_cover_canvas_and_list(app) -> None:
 
 def test_scrollregion_is_refreshed_after_row_rebuild(app) -> None:
     assert app.app._list_canvas._options.get("scrollregion") is not None
+
 
 def _stopped(app):
     return app.manager.list.return_value[1]
@@ -723,9 +707,10 @@ def test_open_ci_actions_warns_without_github_remote(app) -> None:
 def test_ensure_ci_token_resolves_and_caches_without_prompting(app) -> None:
     app.manager.github_token.return_value = None
 
-    with patch(
-        "n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_auto"
-    ) as resolve, patch("n8n_launcher.gui.app.prompt_github_token") as prompt:
+    with (
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_auto") as resolve,
+        patch("n8n_launcher.gui.app.prompt_github_token") as prompt,
+    ):
         assert app.app._ensure_ci_token() == "ghp_auto"
         assert app.app._ensure_ci_token() == "ghp_auto"
 
@@ -745,13 +730,13 @@ def test_refresh_ci_runs_prompts_as_last_resort_and_remembers(app) -> None:
     app.manager.github_token.return_value = None
     panel = MagicMock()
 
-    with patch(
-        "n8n_launcher.gui.app.auth.resolve_github_token", return_value=None
-    ), patch(
-        "n8n_launcher.gui.app.prompt_github_token",
-        return_value=GitHubTokenPlan(token="ghp_typed", remember=True),
-    ) as prompt, patch.object(
-        app.app, "_build_ci_runs_snapshot", return_value="snapshot"
+    with (
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch(
+            "n8n_launcher.gui.app.prompt_github_token",
+            return_value=GitHubTokenPlan(token="ghp_typed", remember=True),
+        ) as prompt,
+        patch.object(app.app, "_build_ci_runs_snapshot", return_value="snapshot"),
     ):
         app.app._refresh_ci_runs(stopped, panel)
 
@@ -765,9 +750,10 @@ def test_refresh_ci_runs_does_not_reprompt_after_cancel(app) -> None:
     app.manager.github_token.return_value = None
     panel = MagicMock()
 
-    with patch(
-        "n8n_launcher.gui.app.auth.resolve_github_token", return_value=None
-    ), patch("n8n_launcher.gui.app.prompt_github_token", return_value=None) as prompt:
+    with (
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.gui.app.prompt_github_token", return_value=None) as prompt,
+    ):
         app.app._refresh_ci_runs(stopped, panel)
         app.app._refresh_ci_runs(stopped, panel)
 
@@ -800,12 +786,10 @@ def test_configure_github_token_keeps_in_memory_when_not_ticked(app) -> None:
 def test_prompt_github_and_configure_prefills_resolved_token(app) -> None:
     stopped = _stopped(app)
 
-    with patch(
-        "n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_auto"
-    ), patch(
-        "n8n_launcher.gui.app.prompt_github_create", return_value=None
-    ) as prompt:
+    with (
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_auto"),
+        patch("n8n_launcher.gui.app.prompt_github_create", return_value=None) as prompt,
+    ):
         app.app._prompt_github_and_configure(stopped)
 
     prompt.assert_called_once_with(app.app.root, stopped.name, token="ghp_auto")
-

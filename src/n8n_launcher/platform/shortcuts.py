@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import platform
 import sys
 from pathlib import Path
 
@@ -34,7 +33,7 @@ def install_desktop_shortcut(
                 "[Desktop Entry]",
                 "Type=Application",
                 f"Name={name}",
-                f"Exec=\"{target.as_posix()}\"",
+                f'Exec="{target.as_posix()}"',
                 "Terminal=false",
                 "Categories=Utility;",
                 "",
@@ -45,9 +44,11 @@ def install_desktop_shortcut(
         return shortcut
     if os.name == "nt":
         shortcut = directory / "n8n-launcher.url"
-        shortcut.write_text(f"[InternetShortcut]\nURL=file:///{target.as_posix()}\n", encoding="utf-8")
+        shortcut.write_text(
+            f"[InternetShortcut]\nURL=file:///{target.as_posix()}\n", encoding="utf-8"
+        )
         return shortcut
     shortcut = directory / "n8n-launcher.command"
-    shortcut.write_text(f"#!/bin/sh\nexec \"{target.as_posix()}\"\n", encoding="utf-8")
+    shortcut.write_text(f'#!/bin/sh\nexec "{target.as_posix()}"\n', encoding="utf-8")
     shortcut.chmod(0o755)
     return shortcut

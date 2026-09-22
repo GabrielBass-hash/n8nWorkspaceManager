@@ -166,9 +166,7 @@ def _is_trigger_type(node_type: str) -> bool:
     return str(node_type).rsplit(".", 1)[-1].endswith("Trigger")
 
 
-def missing_credentials(
-    export: dict[str, Any], provided: set[str]
-) -> list[str]:
+def missing_credentials(export: dict[str, Any], provided: set[str]) -> list[str]:
     """Return the display names of credentials absent from *provided*.
 
     Nodes carrying pinned data are excluded: a pinned node runs on its pinned
@@ -218,9 +216,7 @@ def default_start_trigger(export: dict[str, Any]) -> str | None:
     return None
 
 
-def workflow_eligibility(
-    export: dict[str, Any], provided: set[str]
-) -> tuple[bool, str]:
+def workflow_eligibility(export: dict[str, Any], provided: set[str]) -> tuple[bool, str]:
     """Return (eligible, reason) for a pipeline.
 
     A pipeline is eligible for CI when it has a trigger n8n can start from
@@ -230,7 +226,11 @@ def workflow_eligibility(
     explains why the pipeline is greyed out.
     """
     raw_nodes = export.get("nodes", [])
-    nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
+    nodes = (
+        [node for node in raw_nodes if isinstance(node, dict)]
+        if isinstance(raw_nodes, list)
+        else []
+    )
     triggers = [node for node in nodes if _is_trigger_type(str(node.get("type", "")))]
     if not triggers:
         return False, "aucun déclencheur"
@@ -341,10 +341,7 @@ def _validate_content() -> str:
 
 def _runner_content(image: str) -> str:
     """Render the CI runner script with the pinned n8n image."""
-    return (
-        TEMPLATE_RUNNER.replace(_MARKER_TOKEN, GENERATED_MARKER)
-        .replace(_IMAGE_TOKEN, image)
-    )  # noqa: E501
+    return TEMPLATE_RUNNER.replace(_MARKER_TOKEN, GENERATED_MARKER).replace(_IMAGE_TOKEN, image)
 
 
 TEMPLATE_WORKFLOW = """# __MARKER__
@@ -566,7 +563,7 @@ class Http:
         self,
         method: str,
         path: str,
-        payload: Any = None,
+        payload: object | None = None,
         headers: dict[str, str] | None = None,
     ) -> tuple[int, Any]:
         \"\"\"Exécute la requête ; rend (code HTTP, corps JSON ou texte).\"\"\"
@@ -835,7 +832,7 @@ def trigger_run(http: Http, workflow_id: str, payload: dict) -> str | None:
     raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
 
 
-def _execution_detail(data: Any) -> str:
+def _execution_detail(data: object) -> str:
     if not isinstance(data, dict):
         return ""
     result = data.get("resultData") or {}

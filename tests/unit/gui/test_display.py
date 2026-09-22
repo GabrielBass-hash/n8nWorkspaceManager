@@ -9,9 +9,7 @@ from n8n_launcher.gui.display import (
     ci_enabled,
     ci_tooltip,
     db_connected,
-    db_label,
     format_row,
-    git_label,
     git_repo_status,
     git_row_label,
     git_row_status,
@@ -102,7 +100,9 @@ def test_format_row_shows_running_state_and_pipeline_count(tmp_path) -> None:
         "n8n_launcher.git.manager.subprocess.run",
         return_value=completed(0, "/tmp/.git\n"),
     ):
-        assert format_row(workspace) == "Demo | running | :5678 | db locale | git oui | n8nPipelines 1"
+        assert (
+            format_row(workspace) == "Demo | running | :5678 | db locale | git oui | n8nPipelines 1"
+        )
 
 
 def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
@@ -111,7 +111,9 @@ def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
         "n8n_launcher.git.manager.subprocess.run",
         return_value=completed(128, "", "fatal: not a git repository"),
     ):
-        assert format_row(workspace) == "Demo | stopped | :5678 | db aucune | git non | n8nPipelines 0"
+        assert (
+            format_row(workspace) == "Demo | stopped | :5678 | db aucune | git non | n8nPipelines 0"
+        )
 
 
 def test_db_label_maps_mode(tmp_path) -> None:

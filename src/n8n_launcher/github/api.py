@@ -105,8 +105,7 @@ class GitHubClient:
         workflow_id = quote(workflow_name(workflow_file), safe="")
         payload = self._request(
             "GET",
-            f"/repos/{repo_url_path(repo_path)}"
-            f"/actions/workflows/{workflow_id}/runs",
+            f"/repos/{repo_url_path(repo_path)}/actions/workflows/{workflow_id}/runs",
             params={"per_page": str(per_page)},
         )
         runs = payload.get("workflow_runs")
@@ -114,9 +113,7 @@ class GitHubClient:
             raise GitHubError("GitHub n'a pas renvoyé la liste des runs")
         return runs
 
-    def list_run_jobs(
-        self, repo_path: str, run_id: int | str
-    ) -> list[dict[str, Any]]:
+    def list_run_jobs(self, repo_path: str, run_id: int | str) -> list[dict[str, Any]]:
         """Return the jobs of a workflow run (``per_page`` capped at 100)."""
         payload = self._request(
             "GET",
@@ -158,8 +155,7 @@ class GitHubClient:
             payload["inputs"] = inputs
         self._request_action(
             "POST",
-            f"/repos/{repo_url_path(repo_path)}"
-            f"/actions/workflows/{workflow_id}/dispatches",
+            f"/repos/{repo_url_path(repo_path)}/actions/workflows/{workflow_id}/dispatches",
             json=payload,
         )
 
@@ -172,46 +168,76 @@ class GitHubClient:
             "Authorization": f"Bearer {self.token}",
         }
 
-    def _request_text(self, method: str, path: str, **kwargs: Any) -> str:
+    def _request_text(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> str:
         url = self.BASE_URL + path
         try:
             response = self.session.request(
-                method, url, headers=self._headers(), timeout=self.timeout, **kwargs
+                method,
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
+                json=json,
+                params=params,
             )
         except requests.RequestException as exc:
             raise GitHubError(f"requête GitHub impossible : {exc}") from exc
         if response.status_code not in (200, 201):
-            raise GitHubError(
-                _error_message(response), status_code=response.status_code
-            )
+            raise GitHubError(_error_message(response), status_code=response.status_code)
         return response.text
 
-    def _request_action(self, method: str, path: str, **kwargs: Any) -> None:
+    def _request_action(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> None:
         """Send a request whose success carries no body (e.g. a dispatch)."""
         url = self.BASE_URL + path
         try:
             response = self.session.request(
-                method, url, headers=self._headers(), timeout=self.timeout, **kwargs
+                method,
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
+                json=json,
+                params=params,
             )
         except requests.RequestException as exc:
             raise GitHubError(f"requête GitHub impossible : {exc}") from exc
         if response.status_code not in (200, 201, 202, 204):
-            raise GitHubError(
-                _error_message(response), status_code=response.status_code
-            )
+            raise GitHubError(_error_message(response), status_code=response.status_code)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         url = self.BASE_URL + path
         try:
             response = self.session.request(
-                method, url, headers=self._headers(), timeout=self.timeout, **kwargs
+                method,
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
+                json=json,
+                params=params,
             )
         except requests.RequestException as exc:
             raise GitHubError(f"requête GitHub impossible : {exc}") from exc
         if response.status_code not in (200, 201):
-            raise GitHubError(
-                _error_message(response), status_code=response.status_code
-            )
+            raise GitHubError(_error_message(response), status_code=response.status_code)
         try:
             payload = response.json()
         except ValueError as exc:

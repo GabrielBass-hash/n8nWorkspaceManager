@@ -10,13 +10,12 @@ Linux / Windows: single-file windowed executable.
 
 from __future__ import annotations
 
-import plistlib
 import platform
+import plistlib
 import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 import zlib
 from pathlib import Path
 
@@ -84,9 +83,7 @@ def render_background(path: Path) -> None:
             row.append((*color, 255))
         rows.append(row)
 
-    raw = b"".join(
-        b"\x00" + b"".join(struct.pack("BBBB", *pixel) for pixel in row) for row in rows
-    )
+    raw = b"".join(b"\x00" + b"".join(struct.pack("BBBB", *pixel) for pixel in row) for row in rows)
     png = b"\x89PNG\r\n\x1a\n"
     png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
     png += _png_chunk(b"IDAT", zlib.compress(raw, 9))
@@ -247,31 +244,18 @@ def build_dmg(app: Path) -> None:
     settings = scratch / "settings.py"
     left, top = DMG_WINDOW_RECT[0]
     right, bottom = DMG_WINDOW_RECT[1]
-    locations = ", ".join(
-        f"'{name}': ({x}, {y})" for name, (x, y) in DMG_ICON_POSITIONS.items()
-    )
+    locations = ", ".join(f"'{name}': ({x}, {y})" for name, (x, y) in DMG_ICON_POSITIONS.items())
     settings.write_text(
-        "app_name = '%s'\n"
-        "files = ['%s']\n"
+        f"app_name = '{DISPLAY_NAME}'\n"
+        f"files = ['{app.resolve()}']\n"
         "symlinks = {'Applications': '/Applications'}\n"
-        "icon = '%s'\n"
-        "background = '%s'\n"
-        "window_rect = ((%d, %d), (%d, %d))\n"
+        f"icon = '{icns.resolve()}'\n"
+        f"background = '{background.resolve()}'\n"
+        f"window_rect = (({left}, {top}), ({right}, {bottom}))\n"
         "icon_size = 110\n"
         "text_size = 12\n"
-        "icon_locations = {%s}\n"
-        "format = 'UDZO'\n"
-        % (
-            DISPLAY_NAME,
-            app.resolve(),
-            icns.resolve(),
-            background.resolve(),
-            left,
-            top,
-            right,
-            bottom,
-            locations,
-        ),
+        f"icon_locations = {{{locations}}}\n"
+        "format = 'UDZO'\n",
         encoding="utf-8",
     )
     dmg = PROJECT_ROOT / "dist" / f"{APP_NAME}-macos.dmg"

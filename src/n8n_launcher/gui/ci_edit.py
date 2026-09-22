@@ -24,13 +24,14 @@ the host's ``runs_refresh`` callback.
 
 from __future__ import annotations
 
+import contextlib
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import messagebox, ttk
-from typing import Any, Callable
+from typing import Any
 
 from ..core.models import Workspace
-from ..workspaces import ci
-from ..workspaces import ci_runs
+from ..workspaces import ci, ci_runs
 from ..workspaces.manager import WorkspaceManager
 from .ci_runs import RunsPanel
 from .theme import (
@@ -100,10 +101,8 @@ def _schedule_runs_poll(
         except Exception:
             return
 
-    try:
+    with contextlib.suppress(Exception):
         dialog.after(RUNS_POLL_ACTIVE_MS, tick)
-    except Exception:
-        pass
 
 
 def prompt_ci_workflows(
@@ -114,7 +113,7 @@ def prompt_ci_workflows(
     runs_refresh: Callable[[RunsPanel], None] | None = None,
     runs_open: Callable[[ci_runs.RunSummary], None] | None = None,
     runs_run: Callable[[RunsPanel], None] | None = None,
-) -> "tuple[set[str], bool] | None":
+) -> tuple[set[str], bool] | None:
     """Let the user pick the pipelines to run in GitHub Actions.
 
     Returns ``(selected_paths, push_now)`` on save, or ``None`` when
@@ -197,7 +196,11 @@ def prompt_ci_workflows(
     tree.column("#0", width=360, stretch=True)
     tree.column("detail", width=460, stretch=True, anchor="w")
     tree.configure(selectmode="none")
-    for tag, color in (("disabled", _COLOR_DISABLED), ("warn", _COLOR_WARN), ("muted", _COLOR_DISABLED)):
+    for tag, color in (
+        ("disabled", _COLOR_DISABLED),
+        ("warn", _COLOR_WARN),
+        ("muted", _COLOR_DISABLED),
+    ):
         tree.tag_configure(tag, foreground=color)
     tree.pack(fill="both", expand=True, padx=18, pady=(0, 8))
 
@@ -260,7 +263,7 @@ def prompt_ci_workflows(
         update_row(rel)
         update_caption()
 
-    def on_tree_click(event) -> None:
+    def on_tree_click(event: tk.Event) -> None:
         # Only toggle when clicking the item area itself (not scrollbar gaps).
         try:
             if tree.identify("region", event.x, event.y) not in ("cell", "tree"):
@@ -426,19 +429,19 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
 
-    def submit(_event=None) -> None:
+    def submit(_event: tk.Event | None = None) -> None:
         nonlocal result
         ref = ref_var.get().strip()
         if ref:
             result = ref
         dialog.destroy()
 
-    def cancel(_event=None) -> None:
+    def cancel(_event: tk.Event | None = None) -> None:
         dialog.destroy()
 
-    ttk.Button(
-        buttons, text="Annuler", style="Secondary.TButton", command=cancel
-    ).pack(side="right")
+    ttk.Button(buttons, text="Annuler", style="Secondary.TButton", command=cancel).pack(
+        side="right"
+    )
     ttk.Button(
         buttons,
         text="Lancer",
@@ -450,17 +453,13 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
     ref_entry.bind("<Return>", submit)
     dialog.bind("<Escape>", cancel)
     _finish_dialog_setup(dialog, root)
-    try:
+    with contextlib.suppress(Exception):
         ref_entry.focus_set()
-    except Exception:
-        pass
     dialog.wait_window()
     return result
 
 
-def prompt_ci_credentials(
-    root: tk.Tk, manager: WorkspaceManager, workspace: Workspace
-) -> None:
+def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Workspace) -> None:
     """Let the user pick the credentials to include in the CI secret.
 
     Requires a running workspace (the values are read live from its n8n
@@ -548,9 +547,7 @@ def prompt_ci_credentials(
 
     def copy_json() -> None:
         selected = [
-            {"name": name, "type": ctype}
-            for variable, name, ctype in rows
-            if variable.get()
+            {"name": name, "type": ctype} for variable, name, ctype in rows if variable.get()
         ]
         if not selected:
             messagebox.showwarning(
@@ -572,9 +569,7 @@ def prompt_ci_credentials(
 
     def confirm_pasted() -> None:
         selected = [
-            {"name": name, "type": ctype}
-            for variable, name, ctype in rows
-            if variable.get()
+            {"name": name, "type": ctype} for variable, name, ctype in rows if variable.get()
         ]
         try:
             manager.set_ci_credentials(workspace, selected)

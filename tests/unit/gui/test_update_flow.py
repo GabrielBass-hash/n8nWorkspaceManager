@@ -3,13 +3,12 @@
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
+from helpers import FakeRoot, _drain_queue
+
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig
-from n8n_launcher.platform.updater import Asset, Release, parse_version
-
-from helpers import FakeRoot, _drain_queue  # noqa: E402
 from n8n_launcher.gui import LauncherApp
-
+from n8n_launcher.platform.updater import Asset, Release, parse_version
 
 TEST_ASSET = Asset(
     name="n8n-launcher-macos.dmg",
@@ -28,7 +27,10 @@ def make_test_release() -> Release:
 
 def update_worker_patches(target, *, writable: bool):
     return [
-        patch("n8n_launcher.gui.update_flow.updater.fetch_latest_release", return_value=make_test_release()),
+        patch(
+            "n8n_launcher.gui.update_flow.updater.fetch_latest_release",
+            return_value=make_test_release(),
+        ),
         patch("n8n_launcher.gui.update_flow.updater.current_version", return_value="1.0.02"),
         patch("n8n_launcher.gui.update_flow.updater.install_target", return_value=target),
         patch("n8n_launcher.gui.update_flow.updater.compatible_asset", return_value=TEST_ASSET),
@@ -38,11 +40,10 @@ def update_worker_patches(target, *, writable: bool):
 
 def run_update_worker(app, target, *, writable: bool) -> None:
     _drain_queue(app.app)
-    with ExitStack() as stack:
-        with patch("n8n_launcher.gui.update_flow.updater.cleanup_stale"):
-            for cm in update_worker_patches(target, writable=writable):
-                stack.enter_context(cm)
-            app.app.update_flow.check()
+    with ExitStack() as stack, patch("n8n_launcher.gui.update_flow.updater.cleanup_stale"):
+        for cm in update_worker_patches(target, writable=writable):
+            stack.enter_context(cm)
+        app.app.update_flow.check()
 
 
 def next_event(app):
@@ -79,9 +80,10 @@ def test_update_worker_posts_offer_through_queue(app, tmp_path) -> None:
     callback, error = next_event(app)
     assert error is None
     ask = MagicMock(return_value=False)
-    with patch("n8n_launcher.gui.update_flow.messagebox.askyesno", ask), patch(
-        "n8n_launcher.gui.update_flow.updater.download_asset"
-    ) as download_asset:
+    with (
+        patch("n8n_launcher.gui.update_flow.messagebox.askyesno", ask),
+        patch("n8n_launcher.gui.update_flow.updater.download_asset") as download_asset,
+    ):
         callback()
 
     ask.assert_called_once()
@@ -90,13 +92,17 @@ def test_update_worker_posts_offer_through_queue(app, tmp_path) -> None:
 
 def test_update_worker_stays_silent_when_network_fails(app, tmp_path) -> None:
     _drain_queue(app.app)
-    with patch(
-        "n8n_launcher.gui.update_flow.updater.fetch_latest_release",
-        side_effect=RuntimeError("offline"),
-    ), patch(
-        "n8n_launcher.gui.update_flow.updater.install_target",
-        return_value=tmp_path / "n8n-launcher",
-    ), patch("n8n_launcher.gui.update_flow.updater.cleanup_stale"):
+    with (
+        patch(
+            "n8n_launcher.gui.update_flow.updater.fetch_latest_release",
+            side_effect=RuntimeError("offline"),
+        ),
+        patch(
+            "n8n_launcher.gui.update_flow.updater.install_target",
+            return_value=tmp_path / "n8n-launcher",
+        ),
+        patch("n8n_launcher.gui.update_flow.updater.cleanup_stale"),
+    ):
         app.app.update_flow.check()
 
     assert app.app.events.empty()
@@ -125,7 +131,9 @@ def test_update_link_opens_release_page(app, tmp_path) -> None:
     with patch("n8n_launcher.gui.update_flow.webbrowser.open") as webbrowser_open:
         app.app._status_label._bindings["<Button-1>"](None)
 
-    webbrowser_open.assert_called_once_with("https://github.com/GabrielBass-hash/n8nWorkspaceManager/releases/latest")
+    webbrowser_open.assert_called_once_with(
+        "https://github.com/GabrielBass-hash/n8nWorkspaceManager/releases/latest"
+    )
 
 
 def test_set_status_resets_update_link(app, tmp_path) -> None:
@@ -147,13 +155,14 @@ def test_update_accept_flow_downloads_installs_and_relaunches(app, tmp_path) -> 
     run_update_worker(app, target, writable=True)
 
     ask = MagicMock(side_effect=[True, True])
-    with patch("n8n_launcher.gui.update_flow.messagebox.askyesno", ask), patch(
-        "n8n_launcher.gui.update_flow.updater.download_asset"
-    ) as download_asset, patch(
-        "n8n_launcher.gui.update_flow.updater.installer_script", return_value=script
-    ) as installer_script, patch(
-        "n8n_launcher.gui.update_flow.updater.spawn_installer"
-    ) as spawn_installer:
+    with (
+        patch("n8n_launcher.gui.update_flow.messagebox.askyesno", ask),
+        patch("n8n_launcher.gui.update_flow.updater.download_asset") as download_asset,
+        patch(
+            "n8n_launcher.gui.update_flow.updater.installer_script", return_value=script
+        ) as installer_script,
+        patch("n8n_launcher.gui.update_flow.updater.spawn_installer") as spawn_installer,
+    ):
         app.app._drain_events()
 
     download_asset.assert_called_once()
@@ -171,9 +180,10 @@ def test_update_offer_declined_skips_download(app, tmp_path) -> None:
     target = tmp_path / "n8n-launcher.app"
     run_update_worker(app, target, writable=True)
 
-    with patch("n8n_launcher.gui.update_flow.messagebox.askyesno", return_value=False), patch(
-        "n8n_launcher.gui.update_flow.updater.download_asset"
-    ) as download_asset:
+    with (
+        patch("n8n_launcher.gui.update_flow.messagebox.askyesno", return_value=False),
+        patch("n8n_launcher.gui.update_flow.updater.download_asset") as download_asset,
+    ):
         app.app._drain_events()
 
     download_asset.assert_not_called()
@@ -184,10 +194,13 @@ def test_update_download_failure_surfaces_error(app, tmp_path) -> None:
     target = tmp_path / "n8n-launcher.app"
     run_update_worker(app, target, writable=True)
 
-    with patch("n8n_launcher.gui.update_flow.messagebox.askyesno", return_value=True), patch(
-        "n8n_launcher.gui.update_flow.updater.download_asset",
-        side_effect=RuntimeError("500 boom"),
-    ) as download_asset:
+    with (
+        patch("n8n_launcher.gui.update_flow.messagebox.askyesno", return_value=True),
+        patch(
+            "n8n_launcher.gui.update_flow.updater.download_asset",
+            side_effect=RuntimeError("500 boom"),
+        ) as download_asset,
+    ):
         app.app._drain_events()
 
     download_asset.assert_called_once()

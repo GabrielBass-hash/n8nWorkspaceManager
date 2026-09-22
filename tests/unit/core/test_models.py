@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
+from n8n_launcher.core.models import (
+    AppConfig,
+    DbConfig,
+    DbMode,
+    GitConfig,
+    Workspace,
+    WorkspaceState,
+)
 
 
 def test_workspace_round_trip() -> None:
@@ -9,7 +16,9 @@ def test_workspace_round_trip() -> None:
         name="My workspace",
         workflows_dir=Path("/tmp/workflows"),
         port=5680,
-        db=DbConfig(mode=DbMode.MANAGED, database_name="data", username="n8ndata", password="secret"),
+        db=DbConfig(
+            mode=DbMode.MANAGED, database_name="data", username="n8ndata", password="secret"
+        ),
         state=WorkspaceState.RUNNING,
         restart_required=True,
     )

@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 import requests
 
-
 from n8n_launcher.platform.updater import (
     REPO,
     Asset,
@@ -13,7 +12,6 @@ from n8n_launcher.platform.updater import (
     UpdateError,
     cleanup_stale,
     compatible_asset,
-    current_version,
     download_asset,
     fetch_latest_release,
     install_target,
@@ -155,10 +153,7 @@ def test_compatible_asset_selects_per_platform() -> None:
 
 def test_compatible_asset_falls_back_to_appimage() -> None:
     release = make_release(assets=[make_asset("n8n-launcher-linux-x86_64.AppImage")])
-    assert (
-        compatible_asset(release, system="Linux").name
-        == "n8n-launcher-linux-x86_64.AppImage"
-    )
+    assert compatible_asset(release, system="Linux").name == "n8n-launcher-linux-x86_64.AppImage"
 
 
 def test_compatible_asset_returns_none_when_missing() -> None:
@@ -184,8 +179,7 @@ class FakeStream:
         pass
 
     def iter_content(self, chunk_size: int):
-        for chunk in self._chunks:
-            yield chunk
+        yield from self._chunks
 
 
 class StreamSession:
@@ -262,9 +256,7 @@ def test_install_target_skips_when_not_frozen(monkeypatch) -> None:
 
 def test_install_target_macos_finds_app_bundle(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("sys.frozen", True, raising=False)
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Darwin"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Darwin")
     monkeypatch.setattr(
         "sys.executable",
         str(tmp_path / "n8n-launcher.app" / "Contents" / "MacOS" / "n8n-launcher"),
@@ -274,9 +266,7 @@ def test_install_target_macos_finds_app_bundle(monkeypatch, tmp_path: Path) -> N
 
 def test_install_target_other_platforms_return_executable(monkeypatch) -> None:
     monkeypatch.setattr("sys.frozen", True, raising=False)
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
     monkeypatch.setattr("sys.executable", "C:\\Program Files\\n8n-launcher.exe")
     assert install_target() == Path("C:\\Program Files\\n8n-launcher.exe")
 
@@ -289,9 +279,7 @@ def test_release_page_url_points_at_latest() -> None:
 
 
 def test_installer_script_writes_executable_sh(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Linux"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Linux")
     target = tmp_path / "n8n-launcher"
     asset = tmp_path / "n8n-launcher.new"
     script = installer_script(asset, target, script_dir=tmp_path)
@@ -306,9 +294,7 @@ def test_installer_script_writes_executable_sh(monkeypatch, tmp_path: Path) -> N
 
 
 def test_installer_script_macos_replaces_bundle(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Darwin"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Darwin")
     target = tmp_path / "n8n-launcher.app"
     asset = tmp_path / "n8n-launcher-macos.dmg"
     script = installer_script(asset, target, script_dir=tmp_path)
@@ -318,13 +304,11 @@ def test_installer_script_macos_replaces_bundle(monkeypatch, tmp_path: Path) -> 
     assert "ditto" in text
     assert "xattr -dr com.apple.quarantine" in text
     assert "codesign --verify" in text
-    assert "open \"$APP\"" in text
+    assert 'open "$APP"' in text
 
 
 def test_installer_script_windows_waits_and_swaps(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
     target = tmp_path / "n8n-launcher.exe"
     asset = tmp_path / "n8n-launcher.new.exe"
     script = installer_script(asset, target, script_dir=tmp_path)
@@ -334,27 +318,21 @@ def test_installer_script_windows_waits_and_swaps(monkeypatch, tmp_path: Path) -
     assert "tasklist" in text
     assert "move /Y" in text
     assert "copy /Y" in text
-    assert "start \"\" \"%OLD%\"" in text
+    assert 'start "" "%OLD%"' in text
 
 
 def test_installer_command_uses_shell_per_platform(monkeypatch, tmp_path: Path) -> None:
     script = tmp_path / "apply_update.sh"
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Darwin"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Darwin")
     assert installer_command(script) == ["/bin/sh", str(script)]
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
     assert installer_command(script) == ["cmd", "/c", str(script)]
 
 
 def test_spawn_installer_launches_detached(monkeypatch, tmp_path: Path) -> None:
     from unittest.mock import MagicMock
 
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Linux"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Linux")
     script = tmp_path / "apply_update.sh"
     mock_popen = MagicMock()
     monkeypatch.setattr("n8n_launcher.platform.updater.subprocess.Popen", mock_popen)
@@ -374,9 +352,7 @@ def test_cleanup_stale_removes_windows_backup(monkeypatch, tmp_path: Path) -> No
     target.write_bytes(b"old")
     (tmp_path / "n8n-launcher.exe.old").write_bytes(b"backup")
     monkeypatch.setattr("sys.frozen", True, raising=False)
-    monkeypatch.setattr(
-        "n8n_launcher.platform.updater.platform.system", lambda: "Windows"
-    )
+    monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
     monkeypatch.setattr("sys.executable", str(target))
 
     cleanup_stale()

@@ -17,9 +17,12 @@ def _completed(returncode: int = 0, stdout: str = "") -> SimpleNamespace:
 
 
 def test_token_from_gh_cli_returns_trimmed_token() -> None:
-    with patch("n8n_launcher.github.auth.shutil.which", return_value="/usr/bin/gh"), patch(
-        "n8n_launcher.github.auth.subprocess.run", return_value=_completed(stdout="ghp_x\n")
-    ) as run:
+    with (
+        patch("n8n_launcher.github.auth.shutil.which", return_value="/usr/bin/gh"),
+        patch(
+            "n8n_launcher.github.auth.subprocess.run", return_value=_completed(stdout="ghp_x\n")
+        ) as run,
+    ):
         assert auth.token_from_gh_cli() == "ghp_x"
 
     assert run.call_args.args[0] == ["gh", "auth", "token"]
@@ -31,16 +34,20 @@ def test_token_from_gh_cli_absent_returns_none() -> None:
 
 
 def test_token_from_gh_cli_failure_returns_none() -> None:
-    with patch("n8n_launcher.github.auth.shutil.which", return_value="/usr/bin/gh"), patch(
-        "n8n_launcher.github.auth.subprocess.run",
-        return_value=_completed(returncode=1, stdout=""),
+    with (
+        patch("n8n_launcher.github.auth.shutil.which", return_value="/usr/bin/gh"),
+        patch(
+            "n8n_launcher.github.auth.subprocess.run",
+            return_value=_completed(returncode=1, stdout=""),
+        ),
     ):
         assert auth.token_from_gh_cli() is None
 
 
 def test_token_from_gh_cli_oserror_returns_none() -> None:
-    with patch("n8n_launcher.github.auth.shutil.which", return_value="/usr/bin/gh"), patch(
-        "n8n_launcher.github.auth.subprocess.run", side_effect=OSError("boom")
+    with (
+        patch("n8n_launcher.github.auth.shutil.which", return_value="/usr/bin/gh"),
+        patch("n8n_launcher.github.auth.subprocess.run", side_effect=OSError("boom")),
     ):
         assert auth.token_from_gh_cli() is None
 
@@ -74,9 +81,7 @@ def test_token_from_git_credential_custom_host() -> None:
 
 def test_token_from_git_credential_without_password_returns_none() -> None:
     output = "protocol=https\nhost=github.com\nusername=octo\n\n"
-    with patch(
-        "n8n_launcher.github.auth.subprocess.run", return_value=_completed(stdout=output)
-    ):
+    with patch("n8n_launcher.github.auth.subprocess.run", return_value=_completed(stdout=output)):
         assert auth.token_from_git_credential() is None
 
 
@@ -97,9 +102,7 @@ def test_token_from_git_credential_failure_returns_none() -> None:
 
 
 def test_token_from_git_credential_oserror_returns_none() -> None:
-    with patch(
-        "n8n_launcher.github.auth.subprocess.run", side_effect=OSError("no git")
-    ):
+    with patch("n8n_launcher.github.auth.subprocess.run", side_effect=OSError("no git")):
         assert auth.token_from_git_credential() is None
 
 
@@ -107,9 +110,10 @@ def test_token_from_git_credential_oserror_returns_none() -> None:
 
 
 def test_resolve_prefers_configured_override() -> None:
-    with patch("n8n_launcher.github.auth.token_from_gh_cli") as gh, patch(
-        "n8n_launcher.github.auth.token_from_git_credential"
-    ) as credential:
+    with (
+        patch("n8n_launcher.github.auth.token_from_gh_cli") as gh,
+        patch("n8n_launcher.github.auth.token_from_git_credential") as credential,
+    ):
         assert auth.resolve_github_token("  ghp_override  ") == "ghp_override"
 
     gh.assert_not_called()
@@ -117,25 +121,26 @@ def test_resolve_prefers_configured_override() -> None:
 
 
 def test_resolve_blank_override_falls_through_to_gh() -> None:
-    with patch(
-        "n8n_launcher.github.auth.token_from_gh_cli", return_value="ghp_gh"
-    ), patch("n8n_launcher.github.auth.token_from_git_credential") as credential:
+    with (
+        patch("n8n_launcher.github.auth.token_from_gh_cli", return_value="ghp_gh"),
+        patch("n8n_launcher.github.auth.token_from_git_credential") as credential,
+    ):
         assert auth.resolve_github_token("   ") == "ghp_gh"
 
     credential.assert_not_called()
 
 
 def test_resolve_falls_back_to_git_credential() -> None:
-    with patch(
-        "n8n_launcher.github.auth.token_from_gh_cli", return_value=None
-    ), patch(
-        "n8n_launcher.github.auth.token_from_git_credential", return_value="ghp_git"
+    with (
+        patch("n8n_launcher.github.auth.token_from_gh_cli", return_value=None),
+        patch("n8n_launcher.github.auth.token_from_git_credential", return_value="ghp_git"),
     ):
         assert auth.resolve_github_token() == "ghp_git"
 
 
 def test_resolve_returns_none_when_every_source_is_empty() -> None:
-    with patch(
-        "n8n_launcher.github.auth.token_from_gh_cli", return_value=None
-    ), patch("n8n_launcher.github.auth.token_from_git_credential", return_value=None):
+    with (
+        patch("n8n_launcher.github.auth.token_from_gh_cli", return_value=None),
+        patch("n8n_launcher.github.auth.token_from_git_credential", return_value=None),
+    ):
         assert auth.resolve_github_token() is None

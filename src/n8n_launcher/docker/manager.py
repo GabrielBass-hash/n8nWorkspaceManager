@@ -7,12 +7,12 @@ import os
 import platform
 import shutil
 import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
-from .compose import compose_project_name
 from ..core.models import Workspace
+from .compose import compose_project_name
 
 MACOS_DOCKER_SEARCH_DIRS = [
     "/opt/homebrew/bin",
@@ -206,9 +206,7 @@ class DockerManager:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             detail = getattr(exc, "strerror", None) or str(exc)
-            raise DockerError(
-                f"Docker command failed: {' '.join(command)} ({detail})"
-            ) from exc
+            raise DockerError(f"Docker command failed: {' '.join(command)} ({detail})") from exc
         if check and result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             raise DockerError(f"Docker command failed ({result.returncode}): {detail}")

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from ..core.config import ConfigStore
@@ -22,7 +23,7 @@ from ..database import (
     detect_migrations,
 )
 from ..docker.compose import write_compose
-from ..docker.manager import DockerManager, DockerError, parse_compose_status
+from ..docker.manager import DockerManager, parse_compose_status
 from ..git import (
     GitError,
     ensure_gitignore,
@@ -44,7 +45,6 @@ from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
 from . import ci
-
 
 logger = logging.getLogger(__name__)
 
@@ -153,10 +153,7 @@ class WorkspaceManager:
         workspace_id = uuid4().hex[:8]
         migrations = detect_migrations(workflows_dir)
         if db is None:
-            if migrations:
-                db = self._managed_db_config()
-            else:
-                db = DbConfig(DbMode.NONE)
+            db = self._managed_db_config() if migrations else DbConfig(DbMode.NONE)
         if db.mode is DbMode.MANAGED and not db.password:
             db = self._managed_db_config()
         selected_port = port or suggest_port(reserved=reserved)
@@ -176,9 +173,7 @@ class WorkspaceManager:
             # Re-check under the lock: a concurrent creation may have claimed
             # the port suggested from an earlier snapshot.
             if workspace.port in {item.port for item in config.workspaces}:
-                raise WorkspaceError(
-                    f"Port is already used by another workspace: {workspace.port}"
-                )
+                raise WorkspaceError(f"Port is already used by another workspace: {workspace.port}")
             config.workspaces.append(workspace)
             return workspace
 
@@ -203,6 +198,7 @@ class WorkspaceManager:
 
     def delete(self, workspace_id: str) -> None:
         """Remove a stopped workspace from the configuration."""
+
         def remove(config: AppConfig) -> None:
             workspace = self._find(config, workspace_id)
             if workspace.state is not WorkspaceState.STOPPED:
@@ -258,7 +254,8 @@ class WorkspaceManager:
             return
         # Import files stored at the folder root as well, so a folder that
         # simply contains workflow exports is picked up too.
-        assert workspace.api_key is not None
+        if workspace.api_key is None:
+            raise RuntimeError("cannot import workflows without an API key")
         api = self.api_factory(workspace, workspace.api_key)
         runner = SyncRunner(api, pipelines_dir)
         runner.import_all()
@@ -500,9 +497,7 @@ class WorkspaceManager:
         values themselves live in the ``N8N_CI_CREDENTIALS`` GitHub secret,
         which is why this call never touches the repository.
         """
-        clean = [
-            {"name": item.get("name"), "type": item.get("type")} for item in credentials
-        ]
+        clean = [{"name": item.get("name"), "type": item.get("type")} for item in credentials]
 
         def apply(config: AppConfig) -> Workspace:
             current = self._find(config, workspace.id)
@@ -519,14 +514,10 @@ class WorkspaceManager:
         """Persist the pipeline selection and optionally commit/push it."""
         ci.write_selection(workspace.workflows_dir, set(selected))
         if push:
-            self._commit_and_push(
-                workspace, "n8n-launcher: mettre à jour les tests GitHub Actions"
-            )
+            self._commit_and_push(workspace, "n8n-launcher: mettre à jour les tests GitHub Actions")
         return workspace
 
-    def ci_credentials_payload(
-        self, workspace: Workspace, selected: list[dict[str, Any]]
-    ) -> str:
+    def ci_credentials_payload(self, workspace: Workspace, selected: list[dict[str, Any]]) -> str:
         """Build the JSON pasted as the ``N8N_CI_CREDENTIALS`` GitHub secret.
 
         Reads the credential values live from the workspace's n8n instance
@@ -541,9 +532,7 @@ class WorkspaceManager:
         api = self.api_factory(workspace, workspace.api_key)
         wanted = {
             (name, ctype)
-            for (name, ctype) in (
-                (item.get("name"), item.get("type")) for item in selected
-            )
+            for (name, ctype) in ((item.get("name"), item.get("type")) for item in selected)
             if isinstance(name, str) and isinstance(ctype, str)
         }
         listed = api.list_credentials()
@@ -627,9 +616,7 @@ class WorkspaceManager:
                     self.api_factory(workspace, workspace.api_key), pipelines_dir
                 ).export_all()
             except Exception as exc:
-                logger.warning(
-                    "Export before stop failed for %s: %s", workspace.name, exc
-                )
+                logger.warning("Export before stop failed for %s: %s", workspace.name, exc)
             self.sync_git(workspace, push=True)
         return self.stop(workspace_id)
 

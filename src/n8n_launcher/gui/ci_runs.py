@@ -22,20 +22,20 @@ the host to trigger a background fetch — the panel never blocks on I/O.
 
 from __future__ import annotations
 
+import contextlib
 import tkinter as tk
+from collections.abc import Callable
 from datetime import datetime
 from tkinter import ttk
-from typing import Callable
+from typing import ClassVar
 
 from ..workspaces import ci_runs
 from .theme import (
-    ACCENT,
     APP_BACKGROUND,
     FONT_META,
     FONT_ROWS,
     SURFACE,
     TEXT_MUTED,
-    TEXT_PRIMARY,
 )
 
 _MARK_SUCCESS = "✔"
@@ -161,11 +161,11 @@ class RunsPanel(tk.Frame):
     run while one is running would cancel the live one.
     """
 
-    instances: list["RunsPanel"] = []
+    instances: ClassVar[list[RunsPanel]] = []
 
     def __init__(
         self,
-        parent,
+        parent: tk.Widget,
         *,
         refresh: Callable[[], None],
         open_run: Callable[[ci_runs.RunSummary], None],
@@ -209,9 +209,7 @@ class RunsPanel(tk.Frame):
             )
             self._run_btn.pack(side="right", padx=(6, 0))
 
-        self.tree = ttk.Treeview(
-            self, columns=("detail",), show="tree headings", height=16
-        )
+        self.tree = ttk.Treeview(self, columns=("detail",), show="tree headings", height=16)
         self.tree.heading("#0", text="Run / job / pipeline")
         self.tree.heading("detail", text="Détails")
         self.tree.column("#0", width=540, stretch=True)
@@ -345,18 +343,14 @@ class RunsPanel(tk.Frame):
     @property
     def has_active_run(self) -> bool:
         """True when the last snapshot holds a run that is still in flight."""
-        return any(
-            ci_runs.run_status_is_active(run.status) for run in self._last.runs
-        )
+        return any(ci_runs.run_status_is_active(run.status) for run in self._last.runs)
 
     def set_run_enabled(self, enabled: bool) -> None:
         """Enable or disable the "Lancer la CI" button (no-op without a host)."""
         if not hasattr(self, "_run_btn"):
             return
-        try:
+        with contextlib.suppress(Exception):
             self._run_btn.configure(state="normal" if enabled else "disabled")
-        except Exception:
-            pass
 
     def remember_expansion(self, iid: str, is_open: bool) -> None:
         """Record an open/closed state so a later :meth:`apply` keeps it."""

@@ -5,7 +5,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
+from n8n_launcher.core.models import (
+    AppConfig,
+    DbConfig,
+    DbMode,
+    GitConfig,
+    Workspace,
+    WorkspaceState,
+)
 from n8n_launcher.docker.manager import ComposeStatus, DockerError
 from n8n_launcher.git import GitError
 from n8n_launcher.n8n.api import N8nApiError
@@ -85,10 +92,12 @@ def test_create_without_db_defaults_to_none(tmp_path: Path) -> None:
 
 
 def test_start_and_stop_update_state(tmp_path: Path) -> None:
-    launcher, store, docker, _ = manager(tmp_path)
+    launcher, _store, docker, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
         started = launcher.start(workspace.id)
         stopped = launcher.stop(workspace.id)
 
@@ -99,10 +108,12 @@ def test_start_and_stop_update_state(tmp_path: Path) -> None:
 
 
 def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
-    launcher, store, docker, _ = manager(tmp_path)
+    launcher, _store, docker, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "missing.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "missing.yml"
+    ):
         stopped = launcher.stop(workspace.id)
 
     assert stopped.state is WorkspaceState.STOPPED
@@ -166,7 +177,9 @@ def test_live_state_uses_stored_when_compose_missing(tmp_path: Path) -> None:
     launcher, _, docker, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "missing.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "missing.yml"
+    ):
         assert launcher.live_state(workspace) is WorkspaceState.STOPPED
 
     docker.status.assert_not_called()
@@ -210,7 +223,9 @@ def test_start_managed_applies_migrations(tmp_path: Path) -> None:
     (workflows_dir / "db" / "migrations" / "001-init.sql").write_text("select 1;", encoding="utf-8")
     workspace = launcher.create("Demo", workflows_dir, db=DbConfig(DbMode.MANAGED))
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
         started = launcher.start(workspace.id)
 
     assert started.state is WorkspaceState.RUNNING
@@ -232,7 +247,9 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
     )
     workspace = create_none(launcher, tmp_path)
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
         launcher.ensure_running(workspace.id)
 
     docker.up.assert_called_once()
@@ -258,7 +275,9 @@ def test_ensure_running_calls_on_ready_with_port_after_start(tmp_path: Path) -> 
     workspace = create_none(launcher, tmp_path)
 
     ready_call = []
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
         launcher.ensure_running(workspace.id, on_ready=lambda port: ready_call.append(port))
 
     docker.up.assert_called_once()
@@ -280,7 +299,9 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
     config.workspaces[0].api_key = "already-configured"
     store.save(config)
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
         launcher.ensure_running(workspace.id)
 
     docker.up.assert_called_once()
@@ -344,9 +365,7 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
         launcher = WorkspaceManager(
             store, docker, owner_booter=booter, api_factory=MagicMock(return_value=forbidden)
         )
-        workspace = launcher.create(
-            "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
-        )
+        workspace = launcher.create("Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED))
         config = store.load()
         config.workspaces[0].api_key = "old-key"
         store.save(config)
@@ -379,7 +398,9 @@ def test_ensure_running_imports_folder_workflows(tmp_path: Path) -> None:
     )
     workspace = launcher.create("Demo", workflows_dir, db=DbConfig(DbMode.NONE))
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
         launcher.ensure_running(workspace.id)
 
     fake_api.create_workflow.assert_called_once_with(
@@ -392,9 +413,13 @@ def test_ensure_running_propagates_bootstrap_error(tmp_path: Path) -> None:
     workspace = create_none(launcher, tmp_path)
     booter.side_effect = OwnerSetupError("boom")
 
-    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"):
-        with pytest.raises(OwnerSetupError, match="boom"):
-            launcher.ensure_running(workspace.id)
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
+        pytest.raises(OwnerSetupError, match="boom"),
+    ):
+        launcher.ensure_running(workspace.id)
 
     docker.up.assert_called_once()
 
@@ -653,7 +678,9 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
 
     init.assert_called_once_with(workspace.workflows_dir)
     ensure_ignore.assert_called_once_with(workspace.workflows_dir)
-    add_remote.assert_called_once_with(workspace.workflows_dir, "origin", "https://example.test/repo.git")
+    add_remote.assert_called_once_with(
+        workspace.workflows_dir, "origin", "https://example.test/repo.git"
+    )
     stored = store.load().workspaces[0]
     assert stored.git.enabled is True
     assert stored.git.remote_url == "https://example.test/repo.git"
@@ -695,7 +722,9 @@ def test_git_init_workspace_reuses_existing_repo(tmp_path: Path) -> None:
 
     is_repo.assert_called_once()
     init.assert_not_called()
-    set_url.assert_called_once_with(workspace.workflows_dir, "origin", "https://example.test/repo.git")
+    set_url.assert_called_once_with(
+        workspace.workflows_dir, "origin", "https://example.test/repo.git"
+    )
     assert store.load().workspaces[0].git.enabled is True
 
 
@@ -713,7 +742,9 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     ):
         launcher.configure_git(workspace, remote_url="https://example.test/other.git")
 
-    set_url.assert_called_once_with(workspace.workflows_dir, "origin", "https://example.test/other.git")
+    set_url.assert_called_once_with(
+        workspace.workflows_dir, "origin", "https://example.test/other.git"
+    )
     stored = store.load().workspaces[0]
     assert stored.git.enabled is True
     assert stored.git.remote_url == "https://example.test/other.git"
@@ -823,9 +854,7 @@ def test_configure_db_fills_missing_managed_defaults(tmp_path: Path) -> None:
 
 def test_configure_db_disables_managed(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
-    workspace = launcher.create(
-        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
-    )
+    workspace = launcher.create("Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED))
 
     updated = launcher.configure_db(workspace, DbConfig(DbMode.NONE))
 
@@ -835,9 +864,7 @@ def test_configure_db_disables_managed(tmp_path: Path) -> None:
 
 def test_configure_db_keeps_identity_of_existing_managed_db(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
-    workspace = launcher.create(
-        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
-    )
+    workspace = launcher.create("Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED))
     original = store.load().workspaces[0].db
 
     # A new password/name/user on an already-started managed DB would orphan
@@ -856,9 +883,7 @@ def test_configure_db_keeps_identity_of_existing_managed_db(tmp_path: Path) -> N
 
 def test_configure_db_managed_noop_when_identity_unchanged(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
-    workspace = launcher.create(
-        "Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED)
-    )
+    workspace = launcher.create("Demo", tmp_path / "workflows", db=DbConfig(DbMode.MANAGED))
     original = store.load().workspaces[0]
 
     # Re-saving the same identity must not flip restart_required.
@@ -895,7 +920,9 @@ def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> 
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"),
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_pull") as pull,
     ):
@@ -918,7 +945,9 @@ def test_ensure_running_skips_pull_when_git_disabled(tmp_path: Path) -> None:
     launcher.create("Demo", workflows_dir, db=DbConfig(DbMode.NONE))
 
     with (
-        patch("n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"),
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
         patch("n8n_launcher.workspaces.manager.git_pull") as pull,
     ):
         launcher.ensure_running(launcher.list()[0].id)
@@ -943,7 +972,10 @@ def test_enable_ci_writes_harness_and_commits(tmp_path: Path) -> None:
 
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
-        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="https://github.com/owner/repo.git"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
         patch.object(launcher, "_commit_and_push") as commit,
     ):
         enabled = launcher.enable_ci(workspace)
@@ -953,7 +985,9 @@ def test_enable_ci_writes_harness_and_commits(tmp_path: Path) -> None:
     assert (workspace.workflows_dir / ".n8n-tests" / "runner.py").is_file()
     assert (workspace.workflows_dir / ".n8n-tests" / "validate.py").is_file()
     assert (workspace.workflows_dir / ".n8n-tests" / "tests.json").is_file()
-    workflow = (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").read_text(encoding="utf-8")
+    workflow = (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").read_text(
+        encoding="utf-8"
+    )
     assert "n8n-launcher : généré" in workflow
     assert "N8N_CI_CREDENTIALS" in workflow
     commit.assert_called_once()
@@ -967,9 +1001,9 @@ def test_enable_ci_requires_git_repo(tmp_path: Path) -> None:
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
         patch.object(launcher, "_commit_and_push") as commit,
+        pytest.raises(WorkspaceError, match="dépôt Git"),
     ):
-        with pytest.raises(WorkspaceError, match="dépôt Git"):
-            launcher.enable_ci(workspace)
+        launcher.enable_ci(workspace)
 
     commit.assert_not_called()
     assert store.load().workspaces[0].git.ci_enabled is False
@@ -984,11 +1018,13 @@ def test_enable_ci_requires_github_remote(tmp_path: Path) -> None:
 
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
-        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="git@gitlab.com:u/r.git"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url", return_value="git@gitlab.com:u/r.git"
+        ),
         patch.object(launcher, "_commit_and_push") as commit,
+        pytest.raises(WorkspaceError, match="GitHub"),
     ):
-        with pytest.raises(WorkspaceError, match="GitHub"):
-            launcher.enable_ci(workspace)
+        launcher.enable_ci(workspace)
 
     commit.assert_not_called()
 
@@ -1002,7 +1038,10 @@ def test_enable_ci_preserves_existing_selection(tmp_path: Path) -> None:
 
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
-        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="https://github.com/owner/repo.git"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
         patch.object(launcher, "_commit_and_push"),
     ):
         launcher.enable_ci(workspace)
@@ -1015,7 +1054,10 @@ def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
     workspace = github_workspace(launcher, store, tmp_path)
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
-        patch("n8n_launcher.workspaces.manager.git_remote_url", return_value="https://github.com/owner/repo.git"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
         patch.object(launcher, "_commit_and_push"),
     ):
         launcher.enable_ci(workspace)
@@ -1034,7 +1076,7 @@ def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
 
 
 def test_save_ci_selection_persists_without_push(tmp_path: Path) -> None:
-    launcher, store, _, _ = manager(tmp_path)
+    launcher, _store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
     with patch.object(launcher, "_commit_and_push") as commit:
@@ -1047,7 +1089,7 @@ def test_save_ci_selection_persists_without_push(tmp_path: Path) -> None:
 
 
 def test_save_ci_selection_pushes_when_requested(tmp_path: Path) -> None:
-    launcher, store, _, _ = manager(tmp_path)
+    launcher, _store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
     with patch.object(launcher, "_commit_and_push") as commit:
@@ -1073,17 +1115,16 @@ def test_set_ci_credentials_records_metadata_only(tmp_path: Path) -> None:
 
 def test_ci_credentials_payload_reads_values_from_api(tmp_path: Path) -> None:
     fake_api = MagicMock()
-    fake_api.list_credentials.return_value = [
-        {"id": "c1", "name": "API", "type": "httpRequest"}
-    ]
+    fake_api.list_credentials.return_value = [{"id": "c1", "name": "API", "type": "httpRequest"}]
     fake_api.get_credential.return_value = {
-        "id": "c1", "name": "API", "type": "httpRequest", "data": {"user": "u", "password": "p"}
+        "id": "c1",
+        "name": "API",
+        "type": "httpRequest",
+        "data": {"user": "u", "password": "p"},
     }
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
-    launcher = WorkspaceManager(
-        store, MagicMock(), api_factory=MagicMock(return_value=fake_api)
-    )
+    launcher = WorkspaceManager(store, MagicMock(), api_factory=MagicMock(return_value=fake_api))
     workspace = create_none(launcher, tmp_path)
     config = store.load()
     config.workspaces[0].api_key = "key"
@@ -1148,4 +1189,3 @@ def test_set_github_token_treats_empty_string_as_clear(tmp_path: Path) -> None:
     launcher.set_github_token("")
 
     assert store.load().github_token is None
-

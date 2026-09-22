@@ -44,7 +44,7 @@ class GitConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "GitConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> GitConfig:
         if not data:
             return cls()
         return cls(
@@ -71,7 +71,7 @@ class DbConfig:
         return asdict(self) | {"mode": self.mode.value}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DbConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DbConfig:
         """Deserialize, mapping any unknown legacy mode to ``NONE``."""
         raw_mode = data.get("mode", DbMode.NONE)
         try:
@@ -118,7 +118,7 @@ class Workspace:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Workspace":
+    def from_dict(cls, data: dict[str, Any]) -> Workspace:
         """Deserialize, defaulting every optional/legacy field gracefully."""
         return cls(
             id=data["id"],
@@ -161,7 +161,7 @@ class AppConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+    def from_dict(cls, data: dict[str, Any]) -> AppConfig:
         """Deserialize an :class:`AppConfig` from parsed JSON."""
         return cls(
             owner_email=data["owner_email"],

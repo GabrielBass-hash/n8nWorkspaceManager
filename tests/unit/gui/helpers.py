@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from pathlib import Path
+from typing import ClassVar
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 
@@ -164,7 +165,7 @@ class FakeTk:
         cancel_on_wait = False
         # Every created dialog is recorded so tests can inspect widgets after
         # ``wait_window`` has driven the submit/cancel callback.
-        instances: list["FakeTk.Toplevel"] = []
+        instances: ClassVar[list["FakeTk.Toplevel"]] = []
 
         def __init__(self, _parent, **_kwargs):
             self.children: list[object] = []
@@ -287,7 +288,7 @@ class FakeTtk:
                 self._parent.children.append(self)
 
     class Button:
-        instances: list["FakeTtk.Button"] = []
+        instances: ClassVar[list["FakeTtk.Button"]] = []
 
         def __init__(self, _parent, **kwargs):
             self._parent = _parent
@@ -312,7 +313,7 @@ class FakeTtk:
             self._options.update(kwargs)
 
     class Treeview:
-        instances: list["FakeTtk.Treeview"] = []
+        instances: ClassVar[list["FakeTtk.Treeview"]] = []
 
         def __init__(self, _parent, **kwargs):
             self._options = dict(kwargs)
@@ -364,11 +365,7 @@ class FakeTtk:
                 self._items.pop(iid, None)
 
         def get_children(self, iid: str = "") -> list[str]:
-            return [
-                item_id
-                for item_id, entry in self._items.items()
-                if entry.get("parent") == iid
-            ]
+            return [item_id for item_id, entry in self._items.items() if entry.get("parent") == iid]
 
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
@@ -398,7 +395,7 @@ class FakeTtk:
             entry["values"][int(column)] = value
 
     class Notebook:
-        instances: list["FakeTtk.Notebook"] = []
+        instances: ClassVar[list["FakeTtk.Notebook"]] = []
 
         def __init__(self, _parent, **kwargs):
             self._parent = _parent
@@ -445,9 +442,7 @@ class FakeTtk:
         def _tab(self, tab_id):
             if isinstance(tab_id, int):
                 return self._tabs.get(tab_id)
-            return next(
-                (tab for tab in self._tabs.values() if tab["frame"] is tab_id), None
-            )
+            return next((tab for tab in self._tabs.values() if tab["frame"] is tab_id), None)
 
 
 class FakeRoot:
@@ -497,7 +492,7 @@ class SyncThread:
 class HoldingThread:
     """Captures threads so tests can run their payloads explicitly."""
 
-    instances: list["HoldingThread"] = []
+    instances: ClassVar[list["HoldingThread"]] = []
 
     def __init__(self, *, target=None, **kwargs):
         self.target = target
@@ -588,7 +583,7 @@ def row_chip_colors(app, workspace_id: str, attr: str) -> tuple[str, str]:
 
 def row_action_button(app, workspace_id: str):
     frame = app.app._rows[workspace_id][0]
-    return getattr(frame, "action_button")
+    return frame.action_button
 
 
 def row_action_text(app, workspace_id: str) -> str:

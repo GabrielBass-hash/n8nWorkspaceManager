@@ -70,7 +70,7 @@ def _linux_candidate(name: str) -> Browser | None:
 
 def _mac_candidate(name: str) -> Browser | None:
     bundle, binary = _MAC_BUNDLES.get(name, (None, None))
-    if bundle is None:
+    if bundle is None or binary is None:
         return None
     path = Path("/Applications") / f"{bundle}.app" / "Contents" / "MacOS" / binary
     if not path.exists():

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import messagebox
-from typing import Callable
 
 from ..core.models import Workspace, WorkspaceState
 from ..n8n.api import N8nApiClient
@@ -51,10 +52,8 @@ class CloseController:
             return
         self._set_closing(True)
         self._set_status("Fermeture : synchronisation des workflows puis arrêt de n8n…")
-        try:
+        with contextlib.suppress(Exception):
             self.manager.reconcile_all()
-        except Exception:
-            pass
         self._next(self.manager.list())
 
     def _next(self, workspaces: list[Workspace]) -> None:
@@ -75,9 +74,7 @@ class CloseController:
                 self._export(workspace)
                 self.manager.sync_git(workspace, push=True)
             except Exception as exc:
-                self._post(
-                    (lambda exc=exc: self._ask_sync_retry(workspace, rest, exc)), None
-                )
+                self._post((lambda exc=exc: self._ask_sync_retry(workspace, rest, exc)), None)
             else:
                 if workspace.git_push_failed:
                     self._post(lambda: self._warn_push_failed(workspace), None)
@@ -99,7 +96,10 @@ class CloseController:
         )
 
     def _export(self, workspace: Workspace) -> None:
-        api = N8nApiClient(f"http://127.0.0.1:{workspace.port}/api/v1", workspace.api_key)
+        api_key = workspace.api_key
+        if api_key is None:
+            return
+        api = N8nApiClient(f"http://127.0.0.1:{workspace.port}/api/v1", api_key)
         pipelines_dir = workspace.workflows_dir / "n8nPipelines"
         SyncRunner(api, pipelines_dir).export_all()
 
@@ -110,9 +110,7 @@ class CloseController:
             try:
                 self.manager.stop(workspace.id)
             except Exception as exc:
-                self._post(
-                    (lambda exc=exc: self._ask_stop_failed(workspace, rest, exc)), None
-                )
+                self._post((lambda exc=exc: self._ask_stop_failed(workspace, rest, exc)), None)
             else:
                 self._post(lambda: self._next(rest), None)
 

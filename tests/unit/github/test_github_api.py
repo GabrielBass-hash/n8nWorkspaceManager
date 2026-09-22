@@ -40,7 +40,9 @@ class FakeSession:
 
 
 def test_github_owner_returns_login() -> None:
-    session = FakeSession({("GET", "https://api.github.com/user"): FakeResponse(200, {"login": "octo"})})
+    session = FakeSession(
+        {("GET", "https://api.github.com/user"): FakeResponse(200, {"login": "octo"})}
+    )
     client = GitHubClient("ghp_token", session=session)
 
     assert client.github_owner() == "octo"
@@ -83,7 +85,9 @@ def test_create_repo_public_and_description() -> None:
 
 
 def test_create_repo_under_organization() -> None:
-    session = FakeSession({("POST", "https://api.github.com/orgs/acme/repos"): FakeResponse(201, {})})
+    session = FakeSession(
+        {("POST", "https://api.github.com/orgs/acme/repos"): FakeResponse(201, {})}
+    )
     client = GitHubClient("ghp_token", session=session)
 
     url = client.create_repo("flows", owner="acme")
@@ -144,13 +148,8 @@ def test_request_wraps_network_errors() -> None:
 
 
 def test_list_workflow_runs_url_and_params() -> None:
-    url = (
-        "https://api.github.com/repos/octo/repo/actions/workflows/"
-        "n8n-ci.yml/runs"
-    )
-    session = FakeSession(
-        {("GET", url): FakeResponse(200, {"workflow_runs": [{"id": 11}]})}
-    )
+    url = "https://api.github.com/repos/octo/repo/actions/workflows/n8n-ci.yml/runs"
+    session = FakeSession({("GET", url): FakeResponse(200, {"workflow_runs": [{"id": 11}]})})
     client = GitHubClient("ghp_token", session=session)
 
     runs = client.list_workflow_runs("octo/repo")
@@ -162,10 +161,7 @@ def test_list_workflow_runs_url_and_params() -> None:
 
 
 def test_list_workflow_runs_rejects_non_list_payload() -> None:
-    url = (
-        "https://api.github.com/repos/octo/repo/actions/workflows/"
-        "n8n-ci.yml/runs"
-    )
+    url = "https://api.github.com/repos/octo/repo/actions/workflows/n8n-ci.yml/runs"
     session = FakeSession({("GET", url): FakeResponse(200, {"workflow_runs": {}})})
     client = GitHubClient("ghp_token", session=session)
 
@@ -196,9 +192,7 @@ def test_list_run_jobs_rejects_non_list_payload() -> None:
 
 def test_fetch_job_logs_returns_response_text() -> None:
     url = "https://api.github.com/repos/octo/repo/actions/jobs/21/logs"
-    session = FakeSession(
-        {("GET", url): FakeResponse(200, {}, text="[runner] a.json : success")}
-    )
+    session = FakeSession({("GET", url): FakeResponse(200, {}, text="[runner] a.json : success")})
     client = GitHubClient("ghp_token", session=session)
 
     assert client.fetch_job_logs("octo/repo", 21) == "[runner] a.json : success"
@@ -206,9 +200,7 @@ def test_fetch_job_logs_returns_response_text() -> None:
 
 def test_fetch_job_logs_raises_with_status_on_error() -> None:
     url = "https://api.github.com/repos/octo/repo/actions/jobs/21/logs"
-    session = FakeSession(
-        {("GET", url): FakeResponse(404, {"message": "Not Found"})}
-    )
+    session = FakeSession({("GET", url): FakeResponse(404, {"message": "Not Found"})})
     client = GitHubClient("ghp_token", session=session)
 
     with pytest.raises(GitHubError) as excinfo:
@@ -220,9 +212,7 @@ def test_fetch_job_logs_raises_with_status_on_error() -> None:
 
 def test_error_message_without_json_body_is_still_readable() -> None:
     url = "https://api.github.com/repos/octo/repo/actions/jobs/21/logs"
-    session = FakeSession(
-        {("GET", url): FakeResponse(500, ValueError("not json"))}
-    )
+    session = FakeSession({("GET", url): FakeResponse(500, ValueError("not json"))})
     client = GitHubClient("ghp_token", session=session)
 
     with pytest.raises(GitHubError) as excinfo:
@@ -257,16 +247,11 @@ def test_repo_url_path_keeps_literal_slash() -> None:
 
 
 def test_dispatch_workflow_posts_bare_file_name_for_full_path() -> None:
-    url = (
-        "https://api.github.com/repos/octo/repo"
-        "/actions/workflows/n8n-ci.yml/dispatches"
-    )
+    url = "https://api.github.com/repos/octo/repo/actions/workflows/n8n-ci.yml/dispatches"
     session = FakeSession({("POST", url): FakeResponse(200, {})})
     client = GitHubClient("ghp_token", session=session)
 
-    client.dispatch_workflow(
-        "octo/repo", ".github/workflows/n8n-ci.yml", ref="release"
-    )
+    client.dispatch_workflow("octo/repo", ".github/workflows/n8n-ci.yml", ref="release")
 
     method, _url, kwargs = session.calls[0]
     assert method == "POST"
@@ -274,21 +259,17 @@ def test_dispatch_workflow_posts_bare_file_name_for_full_path() -> None:
 
 
 def test_list_workflow_runs_accepts_full_path() -> None:
-    url = (
-        "https://api.github.com/repos/octo/repo"
-        "/actions/workflows/n8n-ci.yml/runs"
-    )
+    url = "https://api.github.com/repos/octo/repo/actions/workflows/n8n-ci.yml/runs"
     session = FakeSession({("GET", url): FakeResponse(200, {"workflow_runs": []})})
     client = GitHubClient("ghp_token", session=session)
 
-    assert client.list_workflow_runs("octo/repo", workflow_file=".github/workflows/n8n-ci.yml") == []
+    assert (
+        client.list_workflow_runs("octo/repo", workflow_file=".github/workflows/n8n-ci.yml") == []
+    )
 
 
 def test_dispatch_workflow_forwards_inputs() -> None:
-    url = (
-        "https://api.github.com/repos/octo/repo"
-        "/actions/workflows/wf.yml/dispatches"
-    )
+    url = "https://api.github.com/repos/octo/repo/actions/workflows/wf.yml/dispatches"
     session = FakeSession({("POST", url): FakeResponse(200, {})})
     client = GitHubClient("ghp_token", session=session)
 
@@ -298,10 +279,7 @@ def test_dispatch_workflow_forwards_inputs() -> None:
 
 
 def test_dispatch_workflow_raises_with_status_on_422() -> None:
-    url = (
-        "https://api.github.com/repos/octo/repo"
-        "/actions/workflows/wf.yml/dispatches"
-    )
+    url = "https://api.github.com/repos/octo/repo/actions/workflows/wf.yml/dispatches"
     session = FakeSession(
         {("POST", url): FakeResponse(422, {"message": "Workflow does not exist"})}
     )

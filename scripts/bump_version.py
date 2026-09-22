@@ -60,9 +60,7 @@ def read_version(path: Path = VERSION_FILE) -> str:
 def next_version(current: str, part: str) -> str:
     """Return the SemVer successor of ``current`` for the requested part."""
     if part not in PARTS:
-        raise ValueError(
-            f"unknown bump part {part!r} (expected {'|'.join(PARTS)})"
-        )
+        raise ValueError(f"unknown bump part {part!r} (expected {'|'.join(PARTS)})")
     major, minor, patch = semver_parts(current)
     if part == "patch":
         return f"{major}.{minor}.{patch + 1}"
@@ -109,14 +107,12 @@ def _check_guards(new_version: str) -> None:
     dirty = _git("status", "--porcelain", check=False).stdout.strip()
     if dirty:
         raise SystemExit(
-            "working tree is dirty — commit or stash changes before bumping "
-            "(override with --force)"
+            "working tree is dirty — commit or stash changes before bumping (override with --force)"
         )
     existing = _git("tag", "-l", f"v{new_version}", check=False).stdout.strip()
     if existing:
         raise SystemExit(
-            f"tag v{new_version} already exists — this version was released "
-            "(override with --force)"
+            f"tag v{new_version} already exists — this version was released (override with --force)"
         )
 
 
@@ -139,9 +135,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="print the new version, write nothing"
     )
-    parser.add_argument(
-        "--force", action="store_true", help="skip the dirty-tree and tag guards"
-    )
+    parser.add_argument("--force", action="store_true", help="skip the dirty-tree and tag guards")
     args = parser.parse_args(argv)
 
     if (args.part is None) == (args.to is None):

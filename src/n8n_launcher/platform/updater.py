@@ -21,14 +21,15 @@ release page instead of attempting an install.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import requests
 
@@ -101,7 +102,7 @@ def parse_version(text: str) -> Version:
 
 def current_version() -> str:
     """Return the compiled-in version of the running launcher."""
-    from .. import __version__  # noqa: PLC0415 – avoid circular import
+    from .. import __version__
 
     return __version__
 
@@ -208,9 +209,10 @@ def download_asset(
     temporary = dest.with_name(dest.name + ".part")
     received = 0
     try:
-        with http.get(url, stream=True, timeout=(10.0, 60.0)) as response, temporary.open(
-            "wb"
-        ) as handle:
+        with (
+            http.get(url, stream=True, timeout=(10.0, 60.0)) as response,
+            temporary.open("wb") as handle,
+        ):
             response.raise_for_status()
             for chunk in response.iter_content(chunk_size=1 << 16):
                 if not chunk:
@@ -224,9 +226,7 @@ def download_asset(
         raise UpdateError(f"update download failed: {exc}") from exc
     if expected_size is not None and received != expected_size:
         temporary.unlink(missing_ok=True)
-        raise UpdateError(
-            f"update download is incomplete: {received}/{expected_size} bytes"
-        )
+        raise UpdateError(f"update download is incomplete: {received}/{expected_size} bytes")
     os.replace(temporary, dest)
 
 
@@ -257,10 +257,8 @@ def cleanup_stale() -> None:
     target = install_target()
     if target is None or platform.system() != "Windows":
         return
-    try:
+    with contextlib.suppress(OSError):
         Path(str(target) + ".old").unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def installer_script(
@@ -301,19 +299,24 @@ def installer_command(script: Path) -> list[str]:
 
 def spawn_installer(script: Path) -> None:
     """Launch the helper fully detached so it outlives the launcher process."""
-    kwargs: dict[str, object] = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "close_fds": True,
-    }
     if platform.system() == "Windows":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(
+            installer_command(script),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
-    else:
-        kwargs["start_new_session"] = True
-    subprocess.Popen(installer_command(script), **kwargs)
+        return
+    subprocess.Popen(
+        installer_command(script),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
 
 
 def _macos_source(asset_path: Path, target: Path, pid: int) -> str:
@@ -380,10 +383,10 @@ def _windows_source(asset_path: Path, target: Path, pid: int) -> str:
         [
             "@echo off",
             "rem n8n Launcher auto-update helper (Windows).",
-            f"set \"PID={pid}\"",
-            f"set \"OLD={old}\"",
-            f"set \"NEW={new}\"",
-            "set \"OLD_BAK=%OLD%.old\"",
+            f'set "PID={pid}"',
+            f'set "OLD={old}"',
+            f'set "NEW={new}"',
+            'set "OLD_BAK=%OLD%.old"',
             "",
             ":wait",
             'tasklist /FI "PID eq %PID%" 2>nul | findstr /C:"%PID%" >nul',

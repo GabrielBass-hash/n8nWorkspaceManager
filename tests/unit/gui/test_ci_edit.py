@@ -6,6 +6,8 @@ from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from helpers import FakeRoot, FakeTk, FakeTtk, fake_runs_panel_bases, make_workspace
+
 from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui.ci_edit import (
     RUNS_POLL_ACTIVE_MS,
@@ -18,8 +20,6 @@ from n8n_launcher.gui.ci_edit import (
 from n8n_launcher.gui.ci_runs import RunsPanel
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
 from n8n_launcher.workspaces import ci_runs
-
-from helpers import FakeRoot, FakeTk, FakeTtk, fake_runs_panel_bases, make_workspace  # noqa: E402
 
 
 def ci_mocks(workspace, credentials=None):
@@ -234,8 +234,7 @@ def test_prompt_ci_credentials_copies_json_then_records_metadata(tmp_path) -> No
     status = next(
         child
         for child in children
-        if isinstance(child, tk_fake.Label)
-        and "JSON copié" in child._options.get("text", "")
+        if isinstance(child, tk_fake.Label) and "JSON copié" in child._options.get("text", "")
     )
     assert "N8N_CI_CREDENTIALS" in status._options["text"]
     launcher.set_ci_credentials.assert_not_called()
@@ -349,9 +348,12 @@ def test_prompt_ci_workflows_adds_runs_tab_when_source_provided(tmp_path) -> Non
     FakeTtk.Notebook.instances.clear()
     RunsPanel.instances.clear()
 
-    with fake_runs_panel_bases(), patch(
-        "n8n_launcher.gui.ci_runs.tk", FakeTk()
-    ), patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()), _patch_ci_editor(FakeTk()):
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+        _patch_ci_editor(FakeTk()),
+    ):
         result = prompt_ci_workflows(
             FakeRoot(),
             workspace,
@@ -412,9 +414,11 @@ def _active_run_snapshot() -> ci_runs.RunsSnapshot:
 
 def _panel_for_poll(snapshot):
     dialog = FakeTk.Toplevel(None)
-    with fake_runs_panel_bases(), patch(
-        "n8n_launcher.gui.ci_runs.tk", FakeTk()
-    ), patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()):
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
         panel = RunsPanel(dialog, refresh=lambda: None, open_run=lambda _r: None)
         panel.apply(snapshot)
     return dialog, panel
@@ -483,8 +487,9 @@ def test_prompt_run_ci_submits_prefilled_ref() -> None:
 
 
 def test_prompt_run_ci_returns_trimmed_typed_ref() -> None:
-    with _patch_ci_editor(FakeTk()), patch.object(
-        FakeTk.Toplevel, "wait_window", _drive_run_dialog("  release  ")
+    with (
+        _patch_ci_editor(FakeTk()),
+        patch.object(FakeTk.Toplevel, "wait_window", _drive_run_dialog("  release  ")),
     ):
         ref = prompt_run_ci(FakeRoot(), "wf.yml", "main")
 
@@ -492,8 +497,9 @@ def test_prompt_run_ci_returns_trimmed_typed_ref() -> None:
 
 
 def test_prompt_run_ci_returns_none_on_cancel() -> None:
-    with _patch_ci_editor(FakeTk()), patch.object(
-        FakeTk.Toplevel, "wait_window", _drive_run_dialog(None)
+    with (
+        _patch_ci_editor(FakeTk()),
+        patch.object(FakeTk.Toplevel, "wait_window", _drive_run_dialog(None)),
     ):
         ref = prompt_run_ci(FakeRoot(), "wf.yml", "main")
 
@@ -501,8 +507,9 @@ def test_prompt_run_ci_returns_none_on_cancel() -> None:
 
 
 def test_prompt_run_ci_returns_none_on_blank_ref() -> None:
-    with _patch_ci_editor(FakeTk()), patch.object(
-        FakeTk.Toplevel, "wait_window", _drive_run_dialog("   ")
+    with (
+        _patch_ci_editor(FakeTk()),
+        patch.object(FakeTk.Toplevel, "wait_window", _drive_run_dialog("   ")),
     ):
         ref = prompt_run_ci(FakeRoot(), "wf.yml", "main")
 
@@ -616,12 +623,14 @@ def test_refresh_ci_runs_prompts_token_then_applies_on_main_thread(app) -> None:
     client.list_workflow_runs.return_value = []
     panel = MagicMock()
 
-    with patch(
-        "n8n_launcher.gui.app.auth.resolve_github_token", return_value=None
-    ), patch(
-        "n8n_launcher.gui.app.prompt_github_token",
-        return_value=GitHubTokenPlan(token="ghp_new"),
-    ) as prompt, patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+    with (
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch(
+            "n8n_launcher.gui.app.prompt_github_token",
+            return_value=GitHubTokenPlan(token="ghp_new"),
+        ) as prompt,
+        patch("n8n_launcher.gui.app.GitHubClient", return_value=client),
+    ):
         app.app._refresh_ci_runs(workspace, panel)
 
     prompt.assert_called_once()
@@ -640,8 +649,9 @@ def test_refresh_ci_runs_reuses_cached_token(app) -> None:
     client.list_workflow_runs.return_value = []
     panel = MagicMock()
 
-    with patch("n8n_launcher.gui.app.prompt_github_token") as prompt, patch(
-        "n8n_launcher.gui.app.GitHubClient", return_value=client
+    with (
+        patch("n8n_launcher.gui.app.prompt_github_token") as prompt,
+        patch("n8n_launcher.gui.app.GitHubClient", return_value=client),
     ):
         app.app._refresh_ci_runs(workspace, panel)
 
@@ -656,11 +666,11 @@ def test_refresh_ci_runs_skips_when_token_cancelled(app) -> None:
     app.app._ci_token = None
     panel = MagicMock()
 
-    with patch(
-        "n8n_launcher.gui.app.auth.resolve_github_token", return_value=None
-    ), patch("n8n_launcher.gui.app.prompt_github_token", return_value=None), patch(
-        "n8n_launcher.gui.app.GitHubClient"
-    ) as client:
+    with (
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.gui.app.prompt_github_token", return_value=None),
+        patch("n8n_launcher.gui.app.GitHubClient") as client,
+    ):
         app.app._refresh_ci_runs(workspace, panel)
     app.app._drain_events()
 
@@ -715,20 +725,18 @@ def test_ci_runs_run_dispatches_chosen_ref_and_refreshes(app) -> None:
     client = MagicMock()
     panel = MagicMock()
 
-    with patch(
-        "n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="release"
-    ) as prompt, patch("n8n_launcher.gui.app.GitHubClient", return_value=client), patch(
-        "n8n_launcher.gui.app.ci.WORKFLOW_FILE", "wf.yml"
-    ), patch.object(app.app, "_refresh_ci_runs") as refresh, patch.object(
-        app.app, "set_status"
-    ) as status:
+    with (
+        patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="release") as prompt,
+        patch("n8n_launcher.gui.app.GitHubClient", return_value=client),
+        patch("n8n_launcher.gui.app.ci.WORKFLOW_FILE", "wf.yml"),
+        patch.object(app.app, "_refresh_ci_runs") as refresh,
+        patch.object(app.app, "set_status") as status,
+    ):
         app.app._ci_runs_run(workspace, panel)
         app.app._drain_events()
 
     prompt.assert_called_once_with(app.app.root, "wf.yml", "main")
-    client.dispatch_workflow.assert_called_once_with(
-        "octo/repo", "wf.yml", ref="release"
-    )
+    client.dispatch_workflow.assert_called_once_with("octo/repo", "wf.yml", ref="release")
     status.assert_called_once_with("CI lancée sur « release ».")
     refresh.assert_called_once_with(workspace, panel)
 
@@ -738,9 +746,10 @@ def test_ci_runs_run_cancelled_ref_is_noop(app) -> None:
     app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
     app.app._ci_token = "ghp_x"
 
-    with patch(
-        "n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value=None
-    ), patch("n8n_launcher.gui.app.GitHubClient") as client:
+    with (
+        patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value=None),
+        patch("n8n_launcher.gui.app.GitHubClient") as client,
+    ):
         app.app._ci_runs_run(workspace, MagicMock())
 
     client.assert_not_called()
@@ -750,9 +759,10 @@ def test_ci_runs_run_without_remote_warns(app) -> None:
     workspace = app.manager.list.return_value[1]
     app.manager.git_remote_url.return_value = None
 
-    with patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci") as prompt, patch(
-        "n8n_launcher.gui.app.GitHubClient"
-    ) as client:
+    with (
+        patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci") as prompt,
+        patch("n8n_launcher.gui.app.GitHubClient") as client,
+    ):
         app.app._ci_runs_run(workspace, MagicMock())
 
     prompt.assert_not_called()
@@ -767,9 +777,10 @@ def test_ci_runs_run_reports_dispatch_error(app) -> None:
     client = MagicMock()
     client.dispatch_workflow.side_effect = GitHubError("boom")
 
-    with patch(
-        "n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="main"
-    ), patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+    with (
+        patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="main"),
+        patch("n8n_launcher.gui.app.GitHubClient", return_value=client),
+    ):
         app.app._ci_runs_run(workspace, MagicMock())
         app.app._drain_events()
 
@@ -783,21 +794,24 @@ def test_ci_runs_run_blocks_when_cache_has_active_run(app) -> None:
     app.app._ci_token = "ghp_x"
     app.app._ci_runs_cache[workspace.id] = ci_runs.RunsSnapshot(
         repo_path="octo/repo",
-        runs=(ci_runs.RunSummary(
-            id=13,
-            run_number=13,
-            branch="main",
-            head_sha="a" * 40,
-            status="in_progress",
-            conclusion=None,
-            created_at="2026-01-01T00:00:00Z",
-            url="https://github.com/octo/repo/actions/runs/13",
-        ),),
+        runs=(
+            ci_runs.RunSummary(
+                id=13,
+                run_number=13,
+                branch="main",
+                head_sha="a" * 40,
+                status="in_progress",
+                conclusion=None,
+                created_at="2026-01-01T00:00:00Z",
+                url="https://github.com/octo/repo/actions/runs/13",
+            ),
+        ),
     )
 
-    with patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci") as prompt, patch(
-        "n8n_launcher.gui.app.GitHubClient"
-    ) as client:
+    with (
+        patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci") as prompt,
+        patch("n8n_launcher.gui.app.GitHubClient") as client,
+    ):
         app.app._ci_runs_run(workspace, MagicMock())
 
     prompt.assert_not_called()
@@ -813,9 +827,10 @@ def test_ci_runs_run_allows_dispatch_when_cache_has_only_finished_runs(app) -> N
     app.app._ci_runs_cache[workspace.id] = _runs_snapshot()
     client = MagicMock()
 
-    with patch(
-        "n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="main"
-    ), patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+    with (
+        patch("n8n_launcher.gui.app.ci_edit.prompt_run_ci", return_value="main"),
+        patch("n8n_launcher.gui.app.GitHubClient", return_value=client),
+    ):
         app.app._ci_runs_run(workspace, MagicMock())
         app.app._drain_events()
 

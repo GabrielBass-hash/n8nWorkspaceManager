@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from helpers import FakeTk, FakeTtk, fake_runs_panel_bases
+
 from n8n_launcher.gui.ci_runs import RunsPanel, _format_fetched_at, runs_summary_text
 from n8n_launcher.workspaces import ci_runs
-
-from helpers import FakeTk, FakeTtk, fake_runs_panel_bases  # noqa: E402
 
 
 def _run(run_id: int = 11, *, conclusion: str | None = "success", status: str = "completed"):
@@ -61,9 +61,7 @@ def _build(refresh=None, open_run=None, run=None):
     """Create a panel wired to recording callbacks and return both."""
     refresh = refresh or MagicMock()
     open_run = open_run or MagicMock()
-    panel = RunsPanel(
-        FakeTk.Frame(None), refresh=refresh, open_run=open_run, run=run
-    )
+    panel = RunsPanel(FakeTk.Frame(None), refresh=refresh, open_run=open_run, run=run)
     return panel, refresh, open_run
 
 
@@ -74,8 +72,10 @@ def test_apply_renders_runs_jobs_and_pipelines() -> None:
         pipelines={21: (_pipeline(detail="3 nœuds"),)},
     )
 
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(snapshot)
@@ -106,8 +106,10 @@ def test_apply_marks_failed_run_and_waiting_pipeline() -> None:
         pipelines={21: (_pipeline(status="waiting"),)},
     )
 
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(snapshot)
@@ -119,8 +121,10 @@ def test_apply_marks_failed_run_and_waiting_pipeline() -> None:
 
 
 def test_apply_empty_snapshot_shows_placeholder() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(_snapshot())
@@ -131,8 +135,10 @@ def test_apply_empty_snapshot_shows_placeholder() -> None:
 
 
 def test_apply_error_snapshot_shows_message() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(_snapshot(error="HTTP 401"))
@@ -144,8 +150,10 @@ def test_apply_error_snapshot_shows_message() -> None:
 def test_apply_preserves_expansion_state() -> None:
     snapshot = _snapshot(runs=[_run(11)], jobs={11: (_job(21),)})
 
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(snapshot)
@@ -162,8 +170,10 @@ def test_apply_preserves_expansion_state() -> None:
 
 
 def test_apply_replaces_previous_rows() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(_snapshot(runs=[_run(11), _run(12)]))
@@ -174,8 +184,10 @@ def test_apply_replaces_previous_rows() -> None:
 
 
 def test_refresh_forwards_to_host_callback() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, refresh, _open = _build()
         panel.refresh()
@@ -184,8 +196,10 @@ def test_refresh_forwards_to_host_callback() -> None:
 
 
 def test_run_button_absent_without_host_callback() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
 
@@ -194,8 +208,10 @@ def test_run_button_absent_without_host_callback() -> None:
 
 def test_run_button_forwards_to_host_callback() -> None:
     run = MagicMock()
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build(run=run)
         assert panel._run_btn.text == "Lancer la CI"
@@ -206,8 +222,10 @@ def test_run_button_forwards_to_host_callback() -> None:
 
 
 def test_double_click_opens_selected_run() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, open_run = _build()
         panel.apply(_snapshot(runs=[_run(11)]))
@@ -219,8 +237,10 @@ def test_double_click_opens_selected_run() -> None:
 
 
 def test_open_without_selection_does_nothing() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, open_run = _build()
         panel.apply(_snapshot(runs=[_run(11)]))
@@ -230,14 +250,8 @@ def test_open_without_selection_does_nothing() -> None:
 
 
 def test_runs_summary_text_variants() -> None:
-    assert (
-        runs_summary_text(_snapshot(error="boom"))
-        == "GitHub Actions indisponible : boom"
-    )
-    assert (
-        runs_summary_text(_snapshot())
-        == "Aucun run GitHub Actions pour ce workspace."
-    )
+    assert runs_summary_text(_snapshot(error="boom")) == "GitHub Actions indisponible : boom"
+    assert runs_summary_text(_snapshot()) == "Aucun run GitHub Actions pour ce workspace."
     summary = runs_summary_text(
         _snapshot(
             runs=[
@@ -250,16 +264,16 @@ def test_runs_summary_text_variants() -> None:
 
 
 def test_runs_summary_text_includes_last_poll_time() -> None:
-    summary = runs_summary_text(
-        _snapshot(runs=[_run(11)], fetched_at="2026-09-18T14:03:05+02:00")
-    )
+    summary = runs_summary_text(_snapshot(runs=[_run(11)], fetched_at="2026-09-18T14:03:05+02:00"))
 
     assert summary == "1 run(s) · 1 terminé(s) — à jour 14:03:05"
 
 
 def test_has_active_run_tracks_last_snapshot() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         assert panel.has_active_run is False
@@ -272,8 +286,10 @@ def test_has_active_run_tracks_last_snapshot() -> None:
 
 
 def test_run_button_state_follows_snapshot() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build(run=MagicMock())
 
@@ -285,8 +301,10 @@ def test_run_button_state_follows_snapshot() -> None:
 
 
 def test_run_button_toggle_is_noop_without_host() -> None:
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.set_run_enabled(False)
@@ -314,8 +332,10 @@ def test_apply_auto_expands_active_run_and_live_job() -> None:
         },
     )
 
-    with fake_runs_panel_bases(), patch("n8n_launcher.gui.ci_runs.tk", FakeTk()), patch(
-        "n8n_launcher.gui.ci_runs.ttk", FakeTtk()
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
     ):
         panel, _refresh, _open = _build()
         panel.apply(snapshot)

@@ -6,11 +6,14 @@ import json
 import os
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TypeVar, overload
 
 from .models import AppConfig
 from .paths import config_dir, config_file
+
+T = TypeVar("T")
 
 
 class ConfigError(RuntimeError):
@@ -60,11 +63,15 @@ class ConfigStore:
                 _restrict_file(self.path)
             except OSError as exc:
                 temporary_path.unlink(missing_ok=True)
-                raise ConfigError(
-                    f"Could not save launcher configuration: {self.path}"
-                ) from exc
+                raise ConfigError(f"Could not save launcher configuration: {self.path}") from exc
 
-    def mutate(self, fn) -> Any:
+    @overload
+    def mutate(self, fn: Callable[[AppConfig], None]) -> AppConfig: ...
+
+    @overload
+    def mutate(self, fn: Callable[[AppConfig], T]) -> T: ...
+
+    def mutate(self, fn: Callable[[AppConfig], T | None]) -> AppConfig | T:
         """Serialize one read-modify-write cycle and return its result.
 
         Under the lock, loads the config, passes it to *fn*, saves it again and
