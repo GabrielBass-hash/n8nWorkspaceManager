@@ -16,14 +16,15 @@ from n8n_launcher.git import (
     git_has_unpushed_commits,
     git_init,
     git_is_repo,
+    git_list_remote_branches,
     git_pull,
+    git_pull_new_repo,
     git_push,
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
-    git_list_remote_branches,
-    git_pull_new_repo
 )
+from n8n_launcher.git.manager import git_current_branch
 
 
 def completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -482,12 +483,14 @@ def test_git_list_remote_branches_returns_empty_when_no_heads(tmp_path: Path) ->
 
 
 def test_git_list_remote_branches_raises_on_failure(tmp_path: Path) -> None:
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        return_value=completed(128, "", "fatal: repository not found"),
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            return_value=completed(128, "", "fatal: repository not found"),
+        ),
+        pytest.raises(GitError, match="repository not found"),
     ):
-        with pytest.raises(GitError, match="repository not found"):
-            git_list_remote_branches("https://bad.test/repo.git", cwd=tmp_path)
+        git_list_remote_branches("https://bad.test/repo.git", cwd=tmp_path)
 
 
 def test_git_pull_new_repo_clones_without_branch(tmp_path: Path) -> None:
@@ -521,12 +524,14 @@ def test_git_pull_new_repo_clones_selected_branch(tmp_path: Path) -> None:
 
 def test_git_pull_new_repo_propagates_git_error(tmp_path: Path) -> None:
     dest = tmp_path / "workspace"
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        return_value=completed(128, "", "fatal: destination path already exists"),
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            return_value=completed(128, "", "fatal: destination path already exists"),
+        ),
+        pytest.raises(GitError, match="destination path already exists"),
     ):
-        with pytest.raises(GitError, match="destination path already exists"):
-            git_pull_new_repo("https://example.test/repo.git", dest)
+        git_pull_new_repo("https://example.test/repo.git", dest)
 
 
 def test_git_pull_new_repo_then_list_round_trip(tmp_path: Path) -> None:
@@ -547,3 +552,19 @@ def test_git_pull_new_repo_then_list_round_trip(tmp_path: Path) -> None:
         ["git", "ls-remote", "--heads", "https://example.test/repo.git"],
         ["git", "clone", "--branch", "main", "https://example.test/repo.git", str(dest)],
     ]
+
+
+def test_git_current_branch_returns_active_branch(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, "release\n"),
+    ):
+        assert git_current_branch(tmp_path) == "release"
+
+
+def test_git_current_branch_empty_when_detached(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(1, "", "fatal: ref HEAD is not a symbolic ref"),
+    ):
+        assert git_current_branch(tmp_path) == ""

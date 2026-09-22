@@ -323,7 +323,7 @@ def git_list_remote_branches(url: str, *, cwd: Path | None = None) -> list[str]:
         _, _, ref = line.partition("\t")
         ref = ref.strip()
         if ref.startswith(prefix):
-            branches.add(ref[len(prefix):])
+            branches.add(ref[len(prefix) :])
     return sorted(branches)
 
 
@@ -348,4 +348,7 @@ def git_pull_new_repo(url: str, dest: Path, *, branch: str | None = None) -> Non
         dest,
     )
 
-    
+
+def git_current_branch(path: Path) -> str:
+    """Return the active branch name (public alias of :func:`_current_branch`)."""
+    return _current_branch(path)
