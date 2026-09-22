@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import secrets
 import tkinter as tk
@@ -24,6 +25,7 @@ from .theme import (
     SURFACE,
     TEXT_MUTED,
     TEXT_PRIMARY,
+    configure_fonts,
 )
 
 
@@ -67,6 +69,11 @@ def _finish_dialog_setup(
     dialog: tk.Toplevel, root: tk.Tk, *, focus: tk.Widget | None = None
 ) -> None:
     """Center a modal dialog over its parent, grab input and focus a widget."""
+    # A dialog can be the first window against a freshly created Tk root (the
+    # creation flow opens directly from the top bar); make sure the named UI
+    # fonts exist on that interpreter so FONT_* strings render correctly.
+    with contextlib.suppress(Exception):
+        configure_fonts(root)
     try:
         dialog.transient(root)
         dialog.grab_set()

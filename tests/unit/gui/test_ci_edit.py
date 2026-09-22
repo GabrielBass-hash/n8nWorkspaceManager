@@ -12,6 +12,7 @@ from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui.ci_edit import (
     RUNS_POLL_ACTIVE_MS,
     RUNS_POLL_IDLE_MS,
+    _finish_dialog_setup,
     _schedule_runs_poll,
     prompt_ci_credentials,
     prompt_ci_workflows,
@@ -30,6 +31,16 @@ def ci_mocks(workspace, credentials=None):
     launcher.api_factory.return_value = api
     workspace.api_key = "key"
     return launcher, api
+
+
+def test_finish_dialog_setup_registers_fonts_on_root() -> None:
+    dialog = FakeTk.Toplevel(None)
+    root = FakeRoot()
+
+    with patch("n8n_launcher.gui.ci_edit.configure_fonts") as fonts:
+        _finish_dialog_setup(dialog, root)
+
+    fonts.assert_called_once_with(root)
 
 
 class _ReturnTk(FakeTk):

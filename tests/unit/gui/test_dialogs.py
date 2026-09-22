@@ -21,6 +21,7 @@ from n8n_launcher.gui.dialogs import (
     GitHubCreatePlan,
     GitHubRepoPick,
     GitHubTokenPlan,
+    _finish_dialog_setup,
     _repo_name_from,
     default_creation_db,
     prompt_ask_string,
@@ -33,6 +34,16 @@ from n8n_launcher.gui.dialogs import (
     prompt_github_token,
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
+
+
+def test_finish_dialog_setup_registers_fonts_on_root() -> None:
+    dialog = FakeTk.Toplevel(None)
+    root = FakeRoot()
+
+    with patch("n8n_launcher.gui.dialogs.configure_fonts") as fonts:
+        _finish_dialog_setup(dialog, root)
+
+    fonts.assert_called_once_with(root)
 
 
 def test_prompt_create_uses_plan_name_and_db(app, tmp_path) -> None:

@@ -1,5 +1,6 @@
 """GUI shell tests: row rendering, selection, launch, poll and delete."""
 
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -9,8 +10,11 @@ from helpers import (
     INACTIVE_CHIP,
     WARN_CHIP,
     FakeRoot,
+    FakeTk,
+    FakeTtk,
     HoldingThread,
     _drain_queue,
+    fake_runs_panel_bases,
     make_workspace,
     row_action_button,
     row_action_text,
@@ -25,8 +29,10 @@ from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
 from n8n_launcher.gui.app import window_size
+from n8n_launcher.gui.ci_runs import RunsPanel
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
 from n8n_launcher.gui.display import GitRowStatus
+from n8n_launcher.workspaces import ci_runs
 
 
 def test_window_size_scales_with_screen() -> None:
@@ -826,6 +832,84 @@ def test_refresh_ci_runs_does_not_reprompt_after_cancel(app) -> None:
         app.app._refresh_ci_runs(stopped, panel)
 
     prompt.assert_called_once()
+
+
+def _runs_snapshot() -> ci_runs.RunsSnapshot:
+    run = ci_runs.RunSummary(
+        id=11,
+        run_number=11,
+        branch="main",
+        head_sha="a" * 40,
+        status="completed",
+        conclusion="success",
+        created_at="2026-01-01T00:00:00Z",
+        url="https://github.com/octo/repo/actions/runs/11",
+    )
+    return ci_runs.RunsSnapshot(repo_path="octo/repo", runs=(run,))
+
+
+@contextlib.contextmanager
+def _runs_panel(parent):
+    """Build a RunsPanel against the fake Tk layer (no real interpreter)."""
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        yield RunsPanel(parent, refresh=lambda: None, open_run=lambda _r: None)
+
+
+def test_apply_ci_runs_snapshot_caches_and_renders_on_live_panel(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    snapshot = _runs_snapshot()
+
+    dialog = FakeTk.Toplevel(None)
+    with _runs_panel(dialog) as panel:
+        with patch.object(panel, "apply") as spy:
+            app.app._apply_ci_runs_snapshot(workspace.id, panel, snapshot)
+
+        spy.assert_called_once_with(snapshot)
+        assert app.app._ci_runs_cache[workspace.id] is snapshot
+
+
+def test_apply_ci_runs_snapshot_skips_rendering_on_destroyed_panel(app) -> None:
+    # Reproduction of the TclError "invalid command name …toplevel…" crash: the
+    # runs fetch runs on a background thread that can outlive the CI dialog it
+    # belonged to. A snapshot landing after the dialog's destruction must be
+    # cached (so the next open shows it), but never rendered on dead widgets.
+    workspace = app.manager.list.return_value[1]
+    snapshot = _runs_snapshot()
+
+    dialog = FakeTk.Toplevel(None)
+    with _runs_panel(dialog) as panel:
+        panel.destroy()
+        with patch.object(panel, "apply") as spy:
+            app.app._apply_ci_runs_snapshot(workspace.id, panel, snapshot)
+
+        spy.assert_not_called()
+        assert app.app._ci_runs_cache[workspace.id] is snapshot
+
+
+def test_tooltip_leave_recovers_from_tip_destroyed_under_cursor(app) -> None:
+    # The tooltip owns no lifecycle of its own: a dialog closing while the
+    # cursor is still over a chip leaves a stale ``tip`` whose destroy raises
+    # ``invalid command name`` on the next leave event. The handler must clear
+    # the reference silently so a later Enter rebuilds the tooltip.
+    widget = app.mocks.tk.Label(None)
+    app.app._attach_tooltip(widget, "hint")
+    enter = widget._bindings["<Enter>"]
+    leave = widget._bindings["<Leave>"]
+
+    FakeTk.Toplevel.instances.clear()
+    enter(None)
+    tip = FakeTk.Toplevel.instances[0]
+
+    with patch.object(tip, "destroy", side_effect=RuntimeError("invalid command name")):
+        leave(None)  # must not raise
+
+    FakeTk.Toplevel.instances.clear()
+    enter(None)
+    assert len(FakeTk.Toplevel.instances) == 1
 
 
 def test_configure_github_token_updates_and_persists_when_ticked(app) -> None:

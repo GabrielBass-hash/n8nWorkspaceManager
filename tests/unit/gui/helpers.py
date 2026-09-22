@@ -36,6 +36,10 @@ class FakeTk:
             self.destroyed = True
             self.children.clear()
 
+        def winfo_exists(self) -> int:
+            """Mirror Tk: report 0 as soon as ``destroy`` has run."""
+            return 0 if self.destroyed else 1
+
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
 
@@ -66,6 +70,15 @@ class FakeTk:
 
         def unbind(self, sequence: str) -> None:
             self._bindings.pop(sequence, None)
+
+        def winfo_rootx(self) -> int:
+            return 0
+
+        def winfo_rooty(self) -> int:
+            return 0
+
+        def winfo_height(self) -> int:
+            return 0
 
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
@@ -183,6 +196,9 @@ class FakeTk:
             # Pending ``after`` timers, keyed by id (tests drive them manually).
             self._after_callbacks: list[tuple[int, object]] = []
             FakeTk.Toplevel.instances.append(self)
+
+        def wm_overrideredirect(self, _value: bool) -> None:
+            pass
 
         def title(self, _value: str) -> None:
             pass

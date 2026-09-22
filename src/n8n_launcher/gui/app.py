@@ -750,9 +750,15 @@ class LauncherApp:
 
         def on_leave(_event: tk.Event) -> None:
             nonlocal tip
-            if tip is not None:
+            if tip is None:
+                return
+            # The tip window can disappear under the cursor (e.g. the dialog it
+            # belongs to is closed while a leave event fires); destroying a
+            # widget from a torn-down interpreter raises ``invalid command
+            # name``, which must never surface from a hover handler.
+            with contextlib.suppress(Exception):
                 tip.destroy()
-                tip = None
+            tip = None
 
         widget.bind("<Enter>", on_enter)
         widget.bind("<Leave>", on_leave)
@@ -1345,9 +1351,22 @@ class LauncherApp:
     def _apply_ci_runs_snapshot(
         self, workspace_id: str, panel: RunsPanel, snapshot: RunsSnapshot
     ) -> None:
-        """Cache and render a fetched CI snapshot, always on the main thread."""
+        """Cache and render a fetched CI snapshot, always on the main thread.
+
+        The fetch runs in a background thread and can outlive the dialog that
+        hosts the panel: a snapshot landing after the user closed the dialog
+        must be cached (the next open shows it instantly) but never rendered on
+        destroyed widgets — Tk would raise ``invalid command name
+        ".!toplevel…!treeview"`` and the drain would surface a spurious error
+        dialog.
+        """
         self._ci_runs_cache[workspace_id] = snapshot
-        panel.apply(snapshot)
+        try:
+            if not panel.winfo_exists():
+                return
+            panel.apply(snapshot)
+        except Exception:
+            return
 
     def configure_github_token(self) -> None:
         """Let the user replace the GitHub token used for the API calls.

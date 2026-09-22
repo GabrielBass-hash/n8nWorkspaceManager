@@ -52,12 +52,12 @@ def state_label(state: WorkspaceState) -> str:
     return STATE_LABELS.get(state, state.value)
 
 
-# The UI renders through *named* fonts registered at startup by
-# ``configure_fonts``: widgets reference the ``FONT_*`` constants (plain font
-# names), and the actual family/size is decided once against the running Tk
-# root. Sizes are in *points*, so Tk converts them to pixels through the
-# DPI-aware ``tk scaling`` factor and the UI reflows responsively instead of
-# scaling pixel values by hand.
+# The UI renders through *named* fonts registered by ``configure_fonts``:
+# widgets reference the ``FONT_*`` constants (plain font names), and the actual
+# family/size is decided at runtime against the running Tk root. Sizes are in
+# *points*, so Tk converts them to pixels through the DPI-aware ``tk scaling``
+# factor and the UI reflows responsively instead of scaling pixel values by
+# hand.
 #
 # The family is deliberately resolved at runtime rather than guessed: on Linux
 # a hard-coded "DejaVu Sans" misses whenever Tk does not expose that family
@@ -103,21 +103,34 @@ FONT_FAMILY_ORDER = (
     "Sans",
 )
 
-_FONTS_CONFIGURED = False
+
+def _registered_font_names(root: tk.Misc) -> set[str]:
+    """Return the named fonts already created in *root*'s Tcl interpreter.
+
+    Named fonts are per-interpreter: ``font create`` against one ``tk.Tk()`` is
+    invisible in a second one, so idempotency must be probed per root rather
+    than against a process-wide flag. A missing/headless ``tk`` (unit-test
+    fakers) yields an empty set so the caller falls back to registering.
+    """
+    try:
+        return set(root.tk.call("font", "names"))
+    except Exception:
+        return set()
 
 
 def configure_fonts(root: tk.Misc) -> bool:
     """Register the named UI fonts against *root*; True when registered.
 
-    Idempotent: the first successful call wins, so later windows share the
-    same fonts. If no preferred family is available, ``TkDefaultFont`` keeps
-    every widget resolvable instead of crashing on a missing font name.
-    Fake/headless roots (unit tests) leave the names unregistered — widgets
-    still carry the ``FONT_*`` strings and the fakes ignore them.
+    Idempotent per Tcl interpreter: a root that already holds every ``FONT_*``
+    named font (the app's own, after a first call) returns ``True`` without
+    re-creating them, while a *fresh* root — e.g. the ``tk.Tk()`` the first
+    launch wizard owns before ``LauncherApp`` exists — still receives them, so
+    the same runtime family detection applies to every interface of the app. If
+    no preferred family is available, ``TkDefaultFont`` keeps every widget
+    resolvable instead of crashing on a missing font name. Fake/headless roots
+    (unit tests) leave the names unregistered — widgets still carry the
+    ``FONT_*`` strings and the fakes ignore them.
     """
-    global _FONTS_CONFIGURED
-    if _FONTS_CONFIGURED:
-        return True
     try:
         import tkinter.font as tkfont
 
@@ -128,13 +141,15 @@ def configure_fonts(root: tk.Misc) -> bool:
         (known[preferred.lower()] for preferred in FONT_FAMILY_ORDER if preferred.lower() in known),
         "TkDefaultFont",
     )
+    registered = _registered_font_names(root)
+    if all(name in registered for name, _, _ in _FONT_SPECS):
+        return True
     try:
         for name, size, weight in _FONT_SPECS:
             spec: list[object] = ["font", "create", name, "-family", family, "-size", size]
             if weight is not None:
                 spec += ["-weight", weight]
             root.tk.call(*spec)
-        _FONTS_CONFIGURED = True
         return True
     except Exception:
         return False

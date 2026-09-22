@@ -40,6 +40,7 @@ from .theme import (
     SURFACE,
     TEXT_MUTED,
     TEXT_PRIMARY,
+    configure_fonts,
 )
 
 # Colours used for the tree tags (dark theme).
@@ -58,6 +59,10 @@ RUNS_POLL_IDLE_MS = 30000
 
 def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk) -> None:
     """Center a modal dialog over its parent and make it modal (best-effort)."""
+    # Same guarantee as gui/dialogs: a dialog can own its interpreter's first
+    # font registration, so make the named UI fonts resolvable on that root.
+    with contextlib.suppress(Exception):
+        configure_fonts(root)
     try:
         dialog.transient(root)
         dialog.grab_set()
