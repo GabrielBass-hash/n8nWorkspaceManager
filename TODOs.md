@@ -1,5 +1,37 @@
 # TODOs — retours de l'audit de code
 
+## Migration de l'outillage (terminée)
+
+Le projet est passé de pip/venv + `setup.py` à **uv** + une configuration unique
+dans `pyproject.toml` (Ruff lint+format, basedpyright, pytest-cov, pre-commit,
+`dependency-groups`, version dynamique). Points clés :
+
+- [x] **Packaging** : `pyproject.toml` unique (métadonnées + tests + packaging) ;
+  setup.py/setup.cfg/requirements\*/tox.ini/flake8/mypy/isort/pylintrc supprimés.
+- [x] **Ruff** : config unique dans `pyproject.toml` ; `ruff check` → 0 erreur,
+  `ruff format --check` → propre. Les règles ANN401 ont été **typées
+  explicitement** (pas d'ignore global) : `github/api.py`, `n8n/api.py`,
+  `core/config.py` (`mutate` → `TypeVar` + `@overload`), `gui/ci_runs.py`,
+  `workspaces/ci*`, etc.
+- [x] **basedpyright** (`typeCheckingMode = "standard"`, 0 erreur projet) :
+  tous les fichiers `src/n8n_launcher/` typecheckent ; `tests/**` et
+  `scripts/**` restent exclus par politique (fixtures FakeTk/MagicMock volontairement
+  lâches, non livrées) — ne pas élargir l'exclusion vers `src/`.
+- [x] **pre-commit** : hooks à jour (`ruff-check` + `ruff-format` @
+  astral-sh/ruff-pre-commit v0.16.8, pre-commit-hooks v6.0.0) ;
+  `pre-commit run --all-files` → vert.
+- [x] **CI** (`ci.yml`, `release.yml`) : `setup-uv@v5`, `uv sync --frozen`,
+  + ruff/format/basedpyright/pytest/build.
+- [x] Tout le code source est passé sur les ANN001/ANN003 (événements tk,
+  callables, `ClassVar`, etc.) ; `gui/app.py` gagne un `RowFrame` `Protocol`
+  + `cast` pour les attributs de ligne typés sans casser le patching `FakeTk`
+  des tests.
+- [ ] `uv run pre-commit run --all-files` versionné en CI (à ajouter si souhaité).
+
+---
+
+# TODOs — retours de l'audit de code (bugs)
+
 Suivi des bugs identifiés lors de l'état des lieux du 2026-09-14 (103 tests unitaires verts).
 Chaque entrée suit le schéma : `- [ ] description` → `- [x] description` quand corrigé.
 Les vérifications se font avec `pytest` (unit) et `pytest -m integration` (Docker requis).

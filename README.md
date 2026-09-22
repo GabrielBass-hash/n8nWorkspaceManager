@@ -48,26 +48,34 @@ exported pipelines as GitHub Actions tests, configured entirely from the GUI:
 
 ## Development
 
-Requires Python 3.12 or newer.
+Requires Python 3.12 or newer. The project uses **uv** as the single package
+manager; every command below runs inside the uv-managed virtualenv.
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -e '.[test]'
-pytest
+uv sync --extra test
+uv run pytest
+```
+
+Lint, format, and typecheck (Ruff + basedpyright, mirroring CI):
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run basedpyright
+uv run pre-commit run --all-files
 ```
 
 Integration tests are opt-in:
 
 ```bash
-pytest -m integration
+uv run pytest -m integration
 ```
 
 Build the desktop distribution locally with:
 
 ```bash
-python -m pip install -e '.[packaging]'
-python scripts/build.py
+uv sync --extra packaging
+uv run python scripts/build.py
 ```
 
 On macOS the onedir `.app` bundle embeds the app icon and a full `Info.plist`

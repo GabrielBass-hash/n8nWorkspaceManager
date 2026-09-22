@@ -11,35 +11,44 @@ The launcher version is a single-source SemVer (`MAJOR.MINOR.PATCH`) declared in
 ## Commands
 
 ```bash
-# Setup
-python -m venv .venv && . .venv/bin/activate
-python -m pip install -e '.[test]'
+# Setup (uv is the single package manager; .python-version pins 3.12)
+uv sync --extra test            # runtime + test group
+uv sync --extra packaging       # build tooling
 
 # Run unit tests (default — excludes integration)
-pytest
+uv run pytest
 
 # Run integration tests (requires Docker daemon running)
-pytest -m integration
+uv run pytest -m integration
 
 # Run a single test file
-pytest tests/unit/docker/test_compose.py
+uv run pytest tests/unit/docker/test_compose.py
 
 # Run a single test
-pytest tests/unit/docker/test_compose.py::test_render_compose_managed -v
+uv run pytest tests/unit/docker/test_compose.py::test_render_compose_managed -v
+
+# Lint / format / typecheck (single config in pyproject.toml)
+uv run ruff check .
+uv run ruff format --check .
+uv run basedpyright            # src/n8n_launcher/ is fully typed (0 errors); tests/ and scripts/ are excluded by policy
+
+# All checks at once (what CI runs)
+uv run pre-commit run --all-files
 
 # Build desktop executable (macOS: .dmg via dmgbuild; Linux/Windows: one-file exe)
-python -m pip install -e '.[packaging]'
-python scripts/build.py
+uv run python scripts/build.py
 
 # Bump the launcher SemVer (single source: src/n8n_launcher/__init__.py)
-python scripts/bump_version.py patch|minor|major        # or: --to X.Y.Z
-python scripts/bump_version.py --dry-run patch          # preview without writing
+uv run python scripts/bump_version.py patch|minor|major        # or: --to X.Y.Z
+uv run python scripts/bump_version.py --dry-run patch          # preview without writing
 
 # Additional Linux AppImage (after scripts/build.py produced dist/n8n-launcher)
 bash scripts/build_appimage.sh
 ```
 
-There is **no lint, typecheck, or formatter** configured in this repo. CI only runs `pytest` (matrix: ubuntu, macOS, windows) and `scripts/build.py`.
+The stack is **uv** (dependency management + virtualenv), **Ruff** (lint + format), **basedpyright** (typecheck, `typeCheckingMode = "standard"`), **pytest + pytest-cov**, and **pre-commit**. Everything is configured in `pyproject.toml` (project metadata, `dependency-groups`, `[tool.ruff]`, `[tool.pytest.ini_options]`, `[tool.basedpyright]`); hooks live in `.pre-commit-config.yaml`. CI runs `uv sync --frozen`, `ruff check`, `ruff format --check`, `basedpyright`, `pytest` (matrix: ubuntu, macOS, windows) and `scripts/build.py`.
+
+`basedpyright` is configured with `exclude = ["tests/**", "scripts/**"]`: every module under `src/` must typecheck, but the test fixtures and build scripts are deliberately loose (FakeTk stand-ins, MagicMock return values) and are not shipped, so they are out of scope. Do not widen the exclusion back to `src/`.
 
 ## Test structure
 
