@@ -35,13 +35,19 @@ from .close import CloseController
 from .dialogs import (
     CreatePlan,
     GitHubCreatePlan,
+    GitHubRepoPick,
+    _repo_name_from,
     default_creation_db,
+    prompt_clone_dest,
+    prompt_clone_plan,
     prompt_create_dir,
     prompt_create_plan,
+    prompt_create_source,
     prompt_db_config,
     prompt_git_config,
     prompt_git_remote,
     prompt_github_create,
+    prompt_github_repo_picker,
     prompt_github_token,
 )
 from .theme import (
@@ -794,6 +800,13 @@ class LauncherApp:
             self._menu.tk_popup(event.x_root, event.y_root)
 
     def prompt_create_workflow(self) -> None:
+        """Ask the source first, then route to the matching creation flow."""
+        source = prompt_create_source(self.root)
+        if source is None:
+            return
+        if source == "clone":
+            self._clone_workspace_flow()
+            return
         workflows_dir = prompt_create_dir(self.root)
         if workflows_dir is None:
             return
@@ -802,6 +815,63 @@ class LauncherApp:
         if plan is None:
             return
         self._create_from_plan(plan, workflows_dir)
+
+    def _clone_workspace_flow(self) -> None:
+        """Clone a repo into a new workspace.
+
+        Prefers the linked GitHub account: the resolved token lists the
+        user's repositories and the picker dialog lets them choose one
+        without typing a URL. Falls back to the manual URL dialog when no
+        token is available or GitHub is unreachable. The token, when used,
+        only travels through the one-shot tokenized clone URL — the
+        workspace's recorded remote stays clean.
+        """
+        token = self._ensure_ci_token()
+        repos: list[dict[str, Any]] = []
+        gh_client: GitHubClient | None = None
+        if token:
+            gh_client = GitHubClient(token)
+            try:
+                repos = gh_client.list_user_repos()
+            except GitHubError as exc:
+                messagebox.showwarning(
+                    "n8n Launcher",
+                    f"Impossible de lister vos dépôts GitHub : {exc}\n"
+                    "Vous pouvez saisir une URL manuellement.",
+                    parent=self.root,
+                )
+
+        clone_url: str | None = None
+        branch: str | None = None
+        if repos:
+            branches_loader: Callable[[str], list[str]] | None = (
+                (lambda full_name: gh_client.list_repo_branches(full_name))
+                if gh_client is not None
+                else None
+            )
+            pick: GitHubRepoPick | None = prompt_github_repo_picker(
+                self.root,
+                repos=repos,
+                branches_loader=branches_loader,
+            )
+            if pick is None:
+                return
+            clone_url, branch = pick.clone_url, pick.branch
+        else:
+            plan = prompt_clone_plan(self.root)
+            if plan is None:
+                return
+            clone_url, branch = plan.url, plan.branch
+
+        repo_name = clone_url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
+        dest = prompt_clone_dest(self.root, _repo_name_from(repo_name))
+        if dest is None:
+            return
+
+        def action() -> None:
+            self.workspace_manager.clone_from_git(clone_url, dest, branch=branch, token=token)
+
+        self._run_async(action, on_success=self._refresh_with_selection)
 
     def _create_from_plan(self, plan: CreatePlan, workflows_dir: Path) -> None:
         """Create the workspace from a creation plan, initializing git if asked."""

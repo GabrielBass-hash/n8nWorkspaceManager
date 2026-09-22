@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 import secrets
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 from .. import git
 from ..core.models import DbConfig, DbMode
@@ -1022,5 +1024,202 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
     branch_entry.bind("<Return>", submit)
     dialog.bind("<Escape>", cancel)
     _finish_dialog_setup(dialog, root, focus=url_entry)
+    dialog.wait_window()
+    return result
+
+
+@dataclass(frozen=True)
+class GitHubRepoPick:
+    """Repository selected from the linked account, plus optional branch."""
+
+    clone_url: str
+    branch: str | None = None
+
+
+def prompt_clone_dest(root: tk.Tk, repo_name: str) -> Path | None:
+    """Ask for a parent folder; the repo is cloned into ``<parent>/<name>``.
+
+    The folder name is sanitized the same way a created workspace's name would
+    be (``_repo_name_from``), so "Mon Repo!*" clones into ``mon-repo``.
+    """
+    parent = filedialog.askdirectory(
+        title=f"Dossier parent où cloner « {repo_name} »",
+        parent=root,
+    )
+    if not parent:
+        return None
+    return Path(parent) / _repo_name_from(repo_name)
+
+
+def prompt_github_repo_picker(
+    root: tk.Tk,
+    *,
+    repos: list[dict[str, Any]],
+    branches_loader: Callable[[str], list[str]] | None = None,
+) -> GitHubRepoPick | None:
+    """Let the user pick a repository from the linked GitHub account.
+
+    *repos* is the already-fetched ``GET /user/repos`` payload (the caller
+    performs the network call off the Tk thread, so this dialog is pure UI).
+    *branches_loader*, when provided, is called with an ``owner/repo`` path
+    to fill the branch status; failures are displayed inline and never block
+    validation. Returns the clone URL plus the typed/preselected branch, or
+    ``None`` on cancel.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Cloner depuis GitHub")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(True, True)
+
+    result: GitHubRepoPick | None = None
+    selected: dict[str, Any] = {}
+    branch_var = tk.StringVar(value="")
+
+    tk.Label(
+        dialog,
+        text="Choisissez un dépôt du compte GitHub lié :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+    ).pack(fill="x", padx=18, pady=(14, 4))
+
+    tree = ttk.Treeview(
+        dialog,
+        columns=("visibility", "branch", "updated"),
+        show="tree headings",
+        height=14,
+    )
+    tree.heading("#0", text="Dépôt")
+    tree.heading("visibility", text="Visibilité")
+    tree.heading("branch", text="Branche par défaut")
+    tree.heading("updated", text="Mis à jour")
+    tree.column("#0", width=280, stretch=True)
+    tree.column("visibility", width=90, anchor="w")
+    tree.column("branch", width=150, anchor="w")
+    tree.column("updated", width=120, anchor="w")
+    tree.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+
+    # Sorted most-recently-updated first: matches the GitHub web default.
+    for repo in sorted(
+        repos,
+        key=lambda item: str(item.get("updated_at") or ""),
+        reverse=True,
+    ):
+        full_name = repo.get("full_name")
+        if not isinstance(full_name, str) or not full_name:
+            continue
+        tree.insert(
+            "",
+            "end",
+            iid=full_name,
+            text=full_name,
+            values=(
+                "privé" if repo.get("private") else "public",
+                str(repo.get("default_branch") or "main"),
+                str(repo.get("updated_at") or "")[:10],
+            ),
+        )
+
+    tk.Label(
+        dialog,
+        text="Branche :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+    ).pack(fill="x", padx=18, pady=(0, 2))
+    branch_entry = tk.Entry(
+        dialog,
+        textvariable=branch_var,
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    branch_entry.pack(fill="x", padx=18, pady=(0, 4))
+
+    status = tk.Label(
+        dialog,
+        text="",
+        bg=APP_BACKGROUND,
+        fg=TEXT_MUTED,
+        font=FONT_SUBTITLE,
+        anchor="w",
+        wraplength=520,
+        justify="left",
+    )
+    status.pack(fill="x", padx=18)
+
+    def pick(full_name: str) -> None:
+        repo = next((item for item in repos if item.get("full_name") == full_name), None)
+        if repo is None:
+            return
+        selected.clear()
+        selected.update(repo)
+        branch_var.set(str(repo.get("default_branch") or "main"))
+        if branches_loader is not None:
+            try:
+                branches = branches_loader(full_name)
+            except Exception as exc:
+                status.config(text=f"Impossible de lister les branches : {exc}")
+            else:
+                label = ", ".join(branches) if branches else "Aucune branche."
+                status.config(text=f"Branches : {label}")
+
+    def on_select(_event: tk.Event | None = None) -> None:
+        selection = tree.selection()
+        if selection:
+            pick(selection[0])
+
+    tree.bind("<<TreeviewSelect>>", on_select)
+    tree.bind("<Double-1>", on_select)
+
+    def submit(_event: tk.Event | None = None) -> None:
+        nonlocal result
+        if not selected:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showwarning(
+                    "Cloner depuis GitHub", "Sélectionnez un dépôt.", parent=dialog
+                )
+                return
+            pick(selection[0])
+            if not selected:
+                return
+        clone_url = selected.get("clone_url")
+        if not isinstance(clone_url, str) or not clone_url:
+            messagebox.showwarning(
+                "Cloner depuis GitHub",
+                "Ce dépôt n'expose pas d'URL de clone HTTPS.",
+                parent=dialog,
+            )
+            return
+        result = GitHubRepoPick(
+            clone_url=clone_url,
+            branch=branch_var.get().strip() or None,
+        )
+        dialog.destroy()
+
+    def cancel(_event: tk.Event | None = None) -> None:
+        dialog.destroy()
+
+    # <Return> sur le champ branche valide (comme dans prompt_clone_plan) ;
+    # la sélection de la liste pré-remplit déjà la branche via « pick ».
+    branch_entry.bind("<Return>", submit)
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(6, 14))
+    ttk.Button(buttons, text="Annuler", style="Secondary.TButton", command=cancel).pack(
+        side="right"
+    )
+    ttk.Button(buttons, text="Cloner", style="Accent.TButton", command=submit).pack(
+        side="right", padx=(8, 0)
+    )
+
+    dialog.bind("<Return>", submit)
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root, focus=branch_entry)
     dialog.wait_window()
     return result

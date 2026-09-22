@@ -13,19 +13,23 @@ from helpers import (
 
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, DbConfig, DbMode
+from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui import CreatePlan, LauncherApp
 from n8n_launcher.gui.dialogs import (
     GitClonePlan,
     GitConfigChoice,
     GitHubCreatePlan,
+    GitHubRepoPick,
     GitHubTokenPlan,
     _repo_name_from,
     default_creation_db,
     prompt_ask_string,
+    prompt_clone_dest,
     prompt_clone_plan,
     prompt_create_source,
     prompt_db_config,
     prompt_github_create,
+    prompt_github_repo_picker,
     prompt_github_token,
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
@@ -38,6 +42,7 @@ def test_prompt_create_uses_plan_name_and_db(app, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         app.app.prompt_create_workflow()
@@ -58,6 +63,7 @@ def test_prompt_create_uses_managed_db_from_plan(app, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         app.app.prompt_create_workflow()
@@ -80,6 +86,7 @@ def test_prompt_create_with_git_enabled_inits_repo(app, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         app.app.prompt_create_workflow()
@@ -99,6 +106,7 @@ def test_prompt_create_with_git_disabled_skips_init(app, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         app.app.prompt_create_workflow()
@@ -113,6 +121,7 @@ def test_prompt_create_cancels_when_plan_is_none(app, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=None),
     ):
         app.app.prompt_create_workflow()
@@ -122,7 +131,10 @@ def test_prompt_create_cancels_when_plan_is_none(app, tmp_path) -> None:
 
 
 def test_prompt_create_skips_when_user_cancels_directory(app) -> None:
-    with patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=""):
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
+        patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=""),
+    ):
         app.app.prompt_create_workflow()
 
     app.manager.create.assert_not_called()
@@ -173,6 +185,7 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         launcher.workspace_list._bindings["<Button-1>"](None)
@@ -195,6 +208,7 @@ def test_watermark_click_triggers_creation(gui_mocks, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         launcher._watermark._bindings["<Button-1>"](None)
@@ -219,6 +233,7 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
     gui_mocks.messagebox._yesno = True
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         launcher.prompt_create_workflow()
@@ -259,6 +274,7 @@ def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) 
     )
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
     ):
         launcher.prompt_create_workflow()
@@ -408,6 +424,7 @@ def test_prompt_create_with_github_creates_and_seeds(app, tmp_path) -> None:
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
         patch("n8n_launcher.gui.app.prompt_github_create", return_value=gh_plan),
         patch("n8n_launcher.gui.app.display.git_repo_status", return_value=False),
@@ -436,6 +453,7 @@ def test_prompt_create_github_cancel_degrades_to_local_git(app, tmp_path) -> Non
 
     with (
         patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
         patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
         patch("n8n_launcher.gui.app.prompt_github_create", return_value=None),
         patch("n8n_launcher.gui.app.GitHubClient") as client,
@@ -800,3 +818,192 @@ def test_prompt_clone_plan_load_branches_prefills_main(gui_mocks) -> None:
 
     assert captured["branch"] == "main"
     assert result == GitClonePlan(url="https://example.test/repo.git", branch="main")
+
+
+# --- GitHub repo picker + clone destination dialogs ---------------------------
+
+
+def test_prompt_clone_dest_joins_parent_and_sanitized_name(tmp_path) -> None:
+    with patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(tmp_path)):
+        result = prompt_clone_dest(FakeRoot(), "Mon Repo!")
+
+    assert result == tmp_path / "mon-repo"
+
+
+def test_prompt_clone_dest_cancel_returns_none() -> None:
+    with patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=""):
+        result = prompt_clone_dest(FakeRoot(), "Mon Repo!")
+
+    assert result is None
+
+
+def test_prompt_github_repo_picker_selects_repo_and_branch(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.ttk.Treeview.instances.clear()
+    repos = [
+        {
+            "full_name": "octo/flows",
+            "clone_url": "https://github.com/octo/flows.git",
+            "private": True,
+            "default_branch": "main",
+        },
+        {
+            "full_name": "octo/other",
+            "clone_url": "https://github.com/octo/other.git",
+            "private": False,
+            "default_branch": "develop",
+        },
+    ]
+
+    def drive(dialog) -> None:
+        tree = gui_mocks.ttk.Treeview.instances[0]
+        tree.selection_set("octo/flows")
+        tree._bindings["<<TreeviewSelect>>"](None)
+        entries = [child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry)]
+        assert len(entries) == 1, f"attendu 1 Entry (branche), obtenu {len(entries)}"
+        entries[0]._bindings["<Return>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_github_repo_picker(
+            FakeRoot(),
+            repos=repos,
+            branches_loader=lambda _path: ["main", "feature/x"],
+        )
+
+    assert result == GitHubRepoPick(clone_url="https://github.com/octo/flows.git", branch="main")
+
+
+# --- Clone wired into the app creation flow ----------------------------------
+
+
+def test_clone_with_repo_picker_clones_and_persists(app, tmp_path) -> None:
+    dest = tmp_path / "flows"
+    pick = GitHubRepoPick(clone_url="https://github.com/octo/flows.git", branch="develop")
+
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_tok"),
+        patch("n8n_launcher.gui.app.GitHubClient") as client_cls,
+        patch("n8n_launcher.gui.app.prompt_github_repo_picker", return_value=pick),
+        patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=dest),
+    ):
+        app.app.prompt_create_workflow()
+
+    client_cls.assert_called_once_with("ghp_tok")
+    app.manager.clone_from_git.assert_called_once_with(
+        "https://github.com/octo/flows.git", dest, branch="develop", token="ghp_tok"
+    )
+
+
+def test_clone_cancels_at_picker(app) -> None:
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_tok"),
+        patch("n8n_launcher.gui.app.GitHubClient") as client_cls,
+        patch("n8n_launcher.gui.app.prompt_github_repo_picker", return_value=None),
+    ):
+        app.app.prompt_create_workflow()
+
+    client_cls.assert_called_once_with("ghp_tok")
+    app.manager.clone_from_git.assert_not_called()
+
+
+def test_clone_cancels_at_url_plan(app) -> None:
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.gui.app.prompt_clone_plan", return_value=None),
+    ):
+        app.app.prompt_create_workflow()
+
+    app.manager.clone_from_git.assert_not_called()
+
+
+def test_clone_cancels_at_dest(app, tmp_path) -> None:
+    plan = GitClonePlan(url="https://example.test/repo.git", branch=None)
+
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.gui.app.prompt_clone_plan", return_value=plan),
+        patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=None),
+    ):
+        app.app.prompt_create_workflow()
+
+    app.manager.clone_from_git.assert_not_called()
+
+
+def test_clone_without_token_falls_back_to_url(app, tmp_path) -> None:
+    dest = tmp_path / "wf-clone-url"
+    plan = GitClonePlan(url="https://example.test/repo.git", branch="develop")
+
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.gui.app.GitHubClient") as client_cls,
+        patch("n8n_launcher.gui.app.prompt_clone_plan", return_value=plan),
+        patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=dest),
+    ):
+        app.app.prompt_create_workflow()
+
+    client_cls.assert_not_called()
+    app.manager.clone_from_git.assert_called_once_with(
+        "https://example.test/repo.git", dest, branch="develop", token=None
+    )
+
+
+def test_clone_github_error_falls_back_to_manual(app, tmp_path) -> None:
+    dest = tmp_path / "wf-clone-err"
+    plan = GitClonePlan(url="https://example.test/repo.git", branch=None)
+
+    client = MagicMock()
+    client.list_user_repos.side_effect = GitHubError("Bad credentials", status_code=401)
+
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_tok"),
+        patch("n8n_launcher.gui.app.GitHubClient", return_value=client),
+        patch("n8n_launcher.gui.app.prompt_clone_plan", return_value=plan),
+        patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=dest),
+    ):
+        app.app.prompt_create_workflow()
+
+    assert any("Impossible de lister" in msg for msg in app.mocks.messagebox.warnings)
+    app.manager.clone_from_git.assert_called_once_with(
+        "https://example.test/repo.git", dest, branch=None, token="ghp_tok"
+    )
+
+
+def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = WorkspaceManager(store, MagicMock())
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    dest = tmp_path / "flows"
+    dest.mkdir()
+    pick = GitHubRepoPick(clone_url="https://github.com/octo/flows.git", branch="develop")
+
+    with (
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="clone"),
+        patch("n8n_launcher.gui.app.auth.resolve_github_token", return_value="ghp_secret"),
+        patch("n8n_launcher.gui.app.GitHubClient"),
+        patch("n8n_launcher.gui.app.prompt_github_repo_picker", return_value=pick),
+        patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=dest),
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo"),
+        patch("n8n_launcher.workspaces.manager.git_set_remote_url"),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="develop"),
+        patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5680),
+        patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
+    ):
+        launcher.prompt_create_workflow()
+    launcher._drain_events()
+
+    workspace = store.load().workspaces[0]
+    assert workspace.name == "flows"
+    assert workspace.git.remote_url == "https://github.com/octo/flows.git"
+    assert workspace.git.branch == "develop"
+    assert "ghp_secret" not in str(workspace.to_dict())

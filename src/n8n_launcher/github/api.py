@@ -39,9 +39,11 @@ def repo_url_path(repo_path: str) -> str:
 class GitHubClient:
     """Token-authenticated client for the GitHub REST API.
 
-    The client covers three concerns: repository creation (:meth:`create_repo`),
-    read-only CI inspection (:meth:`list_workflow_runs`, :meth:`list_run_jobs`,
-    :meth:`fetch_job_logs`) and triggering a run (:meth:`dispatch_workflow`).
+    The client covers four concerns: repository creation (:meth:`create_repo`),
+    read-only discovery of the linked account's repositories and their branches
+    (:meth:`list_user_repos`, :meth:`list_repo_branches`), CI inspection
+    (:meth:`list_workflow_runs`, :meth:`list_run_jobs`, :meth:`fetch_job_logs`)
+    and triggering a run (:meth:`dispatch_workflow`).
     The token is never persisted by this class nor by its callers — it lives
     only in memory for the lifetime of the session. Errors are wrapped in
     :class:`GitHubError` with the HTTP status preserved so the GUI can explain
@@ -68,6 +70,46 @@ class GitHubClient:
         if not isinstance(login, str) or not login:
             raise GitHubError("GitHub n'a pas renvoyé l'identifiant du compte")
         return login
+
+    def list_user_repos(
+        self,
+        *,
+        per_page: int = 100,
+        affiliation: str = "owner,collaborator,organization_member",
+    ) -> list[dict[str, Any]]:
+        """Return the repositories visible to the authenticated account.
+
+        ``/user/repos`` answers with a top-level JSON array (unlike the
+        object-wrapped endpoints), so this goes through ``_request_list``.
+        The default affiliation covers personal repos, repos the user
+        collaborates on, and repos owned by orgs they belong to — exactly
+        the set the user expects under "my repos".
+        """
+        payload = self._request_list(
+            "GET",
+            "/user/repos",
+            params={
+                "per_page": str(per_page),
+                "sort": "updated",
+                "affiliation": affiliation,
+            },
+        )
+        return [item for item in payload if isinstance(item, dict)]
+
+    def list_repo_branches(self, repo_path: str, *, per_page: int = 100) -> list[str]:
+        """Return the branch names of a repository (sorted, de-duplicated)."""
+        payload = self._request_list(
+            "GET",
+            f"/repos/{repo_url_path(repo_path)}/branches",
+            params={"per_page": str(per_page)},
+        )
+        names: set[str] = set()
+        for item in payload:
+            if isinstance(item, dict):
+                name = item.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        return sorted(names)
 
     def create_repo(
         self,
@@ -243,6 +285,40 @@ class GitHubClient:
         except ValueError as exc:
             raise GitHubError("GitHub a renvoyé un JSON illisible") from exc
         if not isinstance(payload, dict):
+            raise GitHubError("GitHub a renvoyé une réponse inattendue")
+        return payload
+
+    def _request_list(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        """Perform a request whose success carries a top-level JSON array.
+
+        Mirrors :meth:`_request` but accepts ``list`` payloads (used by
+        ``/user/repos`` and ``/repos/.../branches``); anything else raises
+        :class:`GitHubError` with the HTTP status preserved.
+        """
+        url = self.BASE_URL + path
+        try:
+            response = self.session.request(
+                method,
+                url,
+                headers=self._headers(),
+                timeout=self.timeout,
+                params=params,
+            )
+        except requests.RequestException as exc:
+            raise GitHubError(f"requête GitHub impossible : {exc}") from exc
+        if response.status_code not in (200, 201):
+            raise GitHubError(_error_message(response), status_code=response.status_code)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GitHubError("GitHub a renvoyé un JSON illisible") from exc
+        if not isinstance(payload, list):
             raise GitHubError("GitHub a renvoyé une réponse inattendue")
         return payload
 

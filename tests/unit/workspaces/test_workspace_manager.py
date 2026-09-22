@@ -1293,3 +1293,57 @@ def test_clone_from_git_explicit_db_overrides_detection(tmp_path: Path) -> None:
         workspace = launcher.clone_from_git("https://example.test/repo.git", dest, db=chosen)
 
     assert workspace.db.mode is DbMode.NONE
+
+
+def test_clone_from_git_with_token_uses_tokenized_url_then_cleans_remote(
+    tmp_path: Path,
+) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    dest = tmp_path / "repo-token"
+
+    def fake_clone(url, path, *, branch=None):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "n8nPipelines").mkdir(exist_ok=True)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone) as clone,
+        patch("n8n_launcher.workspaces.manager.git_set_remote_url") as set_remote,
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="develop"),
+        patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5683),
+        patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
+    ):
+        workspace = launcher.clone_from_git(
+            "https://github.com/octo/flows.git",
+            dest,
+            branch="develop",
+            token="ghp_secret",
+        )
+
+    clone.assert_called_once_with(
+        "https://ghp_secret@github.com/octo/flows.git", dest, branch="develop"
+    )
+    set_remote.assert_called_once_with(dest, "origin", "https://github.com/octo/flows.git")
+    assert workspace.git.remote_url == "https://github.com/octo/flows.git"
+    assert "ghp_secret" not in str(store.load().workspaces[0].to_dict())
+
+
+def test_clone_from_git_without_token_keeps_original_url(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    dest = tmp_path / "repo-plain"
+
+    def fake_clone(url, path, *, branch=None):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "n8nPipelines").mkdir(exist_ok=True)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone) as clone,
+        patch("n8n_launcher.workspaces.manager.git_set_remote_url") as set_remote,
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="main"),
+        patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5684),
+        patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
+    ):
+        workspace = launcher.clone_from_git("https://github.com/octo/flows.git", dest)
+
+    clone.assert_called_once_with("https://github.com/octo/flows.git", dest, branch=None)
+    set_remote.assert_not_called()
+    assert workspace.git.remote_url == "https://github.com/octo/flows.git"
