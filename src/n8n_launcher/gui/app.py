@@ -290,7 +290,19 @@ class LauncherApp:
                 background=[("active", SURFACE_ACTIVE)],
             )
 
-            # Treeview — dark background for CI dialogs
+            # Treeview — dark background for CI dialogs.
+            # The clam theme sizes tree rows from the font metrics at style-build
+            # time; the point-sized named fonts grow with ``tk scaling`` (DPI),
+            # so on HiDPI the fixed default row height ends up shorter than the
+            # text and the lines of list dialogs (repo picker, CI trees) collapse
+            # onto each other. Measure the registered font's real line height and
+            # enforce it as an explicit rowheight.
+            try:
+                import tkinter.font as tkfont
+
+                rowheight = tkfont.nametofont(FONT_META).metrics("linespace") + 6
+            except Exception:
+                rowheight = 24
             style.configure(
                 "Treeview",
                 background=SURFACE,
@@ -298,6 +310,7 @@ class LauncherApp:
                 foreground=TEXT_PRIMARY,
                 bordercolor=BORDER,
                 font=FONT_META,
+                rowheight=max(20, rowheight),
             )
             style.configure(
                 "Treeview.Heading",
