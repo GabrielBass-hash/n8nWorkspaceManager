@@ -19,7 +19,10 @@ def test_detect_migrations_is_sorted_and_ignores_other_files(tmp_path: Path) -> 
     (migrations / "001-first.sql").write_text("select 1;", encoding="utf-8")
     (migrations / "README.md").write_text("ignored", encoding="utf-8")
 
-    assert [path.name for path in detect_migrations(tmp_path)] == ["001-first.sql", "002-second.sql"]
+    assert [path.name for path in detect_migrations(tmp_path)] == [
+        "001-first.sql",
+        "002-second.sql",
+    ]
 
 
 def test_has_db_layout_detects_schema_and_migrations(tmp_path: Path) -> None:
@@ -106,7 +109,9 @@ def test_apply_qualifies_schema_migrations_bookkeeping(tmp_path: Path) -> None:
         "CREATE SCHEMA IF NOT EXISTS app;\nCREATE TABLE app.things (id int);\n",
         encoding="utf-8",
     )
-    (migrations_dir / "002-more.sql").write_text("CREATE TABLE app.more (id int);\n", encoding="utf-8")
+    (migrations_dir / "002-more.sql").write_text(
+        "CREATE TABLE app.more (id int);\n", encoding="utf-8"
+    )
 
     applied = MigrationRunner(docker).apply(workspace, migrations_dir, tmp_path / "compose.yaml")
 
@@ -118,7 +123,9 @@ def test_apply_qualifies_schema_migrations_bookkeeping(tmp_path: Path) -> None:
     ]
     assert len(bodies) == 2
     assert "CREATE TABLE IF NOT EXISTS public.schema_migrations (" in bodies[0]
-    assert "\nINSERT INTO public.schema_migrations(filename) VALUES ('001-init.sql');\n" in bodies[0]
+    assert (
+        "\nINSERT INTO public.schema_migrations(filename) VALUES ('001-init.sql');\n" in bodies[0]
+    )
     assert "set_config('search_path'" not in bodies[0]
     assert "app.things" in bodies[0]
     assert "app.more" in bodies[1]
@@ -215,7 +222,11 @@ def test_data_db_target_keeps_explicit_parameters() -> None:
     target = data_db_target(workspace)
 
     assert target is not None
-    assert (target.database, target.user, target.password) == ("custom", "custom-user", "custom-pass")
+    assert (target.database, target.user, target.password) == (
+        "custom",
+        "custom-user",
+        "custom-pass",
+    )
 
 
 def test_data_db_target_is_none_without_managed_mode() -> None:

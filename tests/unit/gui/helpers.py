@@ -1,6 +1,8 @@
 """Shared fakes and helpers for the GUI unit tests."""
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import ClassVar
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 
@@ -163,7 +165,7 @@ class FakeTk:
         cancel_on_wait = False
         # Every created dialog is recorded so tests can inspect widgets after
         # ``wait_window`` has driven the submit/cancel callback.
-        instances: list["FakeTk.Toplevel"] = []
+        instances: ClassVar[list["FakeTk.Toplevel"]] = []
 
         def __init__(self, _parent, **_kwargs):
             self.children: list[object] = []
@@ -171,6 +173,8 @@ class FakeTk:
             self._bindings: dict[str, object] = {}
             self.destroyed = False
             self._clipboard = ""
+            # Pending ``after`` timers, keyed by id (tests drive them manually).
+            self._after_callbacks: list[tuple[int, object]] = []
             FakeTk.Toplevel.instances.append(self)
 
         def title(self, _value: str) -> None:
@@ -199,6 +203,18 @@ class FakeTk:
 
         def destroy(self) -> None:
             self.destroyed = True
+            self._after_callbacks.clear()
+
+        def after(self, delay: int, callback) -> int:
+            self._after_callbacks.append((delay, callback))
+            return len(self._after_callbacks) - 1
+
+        def after_cancel(self, _after_id: int) -> None:
+            self._after_callbacks.clear()
+
+        def winfo_exists(self) -> int:
+            """Mirror Tk's ``winfo_exists``: 0 on a destroyed widget, else 1."""
+            return 0 if self.destroyed else 1
 
         def wait_window(self) -> None:
             """Drive the dialog: act as if the user pressed Return, or Escape."""
@@ -216,6 +232,9 @@ class FakeTk:
 
         def clipboard_append(self, text: str) -> None:
             self._clipboard += text
+
+        def clipboard_get(self) -> str:
+            return self._clipboard
 
     class Entry:
         def __init__(self, parent, **kwargs):
@@ -259,13 +278,17 @@ class FakeTk:
 class FakeTtk:
     class Frame:
         def __init__(self, _parent, *_args, **_kwargs):
-            pass
+            self._parent = _parent
+            self.children: list[object] = []
+            self.packed = False
 
         def pack(self, *_args, **_kwargs) -> None:
-            pass
+            self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
 
     class Button:
-        instances: list["FakeTtk.Button"] = []
+        instances: ClassVar[list["FakeTtk.Button"]] = []
 
         def __init__(self, _parent, **kwargs):
             self._parent = _parent
@@ -282,14 +305,23 @@ class FakeTtk:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
+        def configure(self, **kwargs) -> None:
+            """Mirror ttk's ``configure`` for the handful of knobs we touch."""
+            for key in ("text", "command", "style", "state"):
+                if key in kwargs:
+                    setattr(self, key, kwargs.pop(key))
+            self._options.update(kwargs)
+
     class Treeview:
-        instances: list["FakeTtk.Treeview"] = []
+        instances: ClassVar[list["FakeTtk.Treeview"]] = []
 
         def __init__(self, _parent, **kwargs):
             self._options = dict(kwargs)
             self._items: dict[str, dict[str, object]] = {}
             self._bindings: dict[str, object] = {}
             self._headings: dict[str, object] = {}
+            self._selection: list[str] = []
+            self.element = "Treeitem.text"
             self.packed = False
             FakeTtk.Treeview.instances.append(self)
 
@@ -319,18 +351,38 @@ class FakeTtk:
                 self._items[iid].update(kwargs)
             return dict(self._items[iid])
 
+        def delete(self, *iids) -> None:
+            """Remove rows and every descendant that hangs below them."""
+            doomed: set[str] = set(iids)
+            for child, entry in list(self._items.items()):
+                parent = entry.get("parent")
+                while parent is not None:
+                    if parent in doomed:
+                        doomed.add(child)
+                        break
+                    parent = self._items.get(parent, {}).get("parent")
+            for iid in doomed:
+                self._items.pop(iid, None)
+
         def get_children(self, iid: str = "") -> list[str]:
-            return [
-                item_id
-                for item_id, entry in self._items.items()
-                if entry.get("parent") == iid
-            ]
+            return [item_id for item_id, entry in self._items.items() if entry.get("parent") == iid]
 
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
 
+        def selection(self) -> list[str]:
+            return list(self._selection)
+
+        def selection_set(self, *iids) -> None:
+            self._selection = list(iids)
+
         def identify(self, _region: str, _x: int, _y: int) -> str:
             return "tree"
+
+        def identify_element(self, _x: int, _y: int) -> str:
+            # Defaults to a row element; tests set ``element`` to
+            # "Treeitem.indicator" to simulate a click on the expander triangle.
+            return self.element
 
         def identify_row(self, _y: int) -> str | None:
             return next(iter(self._items), None)
@@ -341,6 +393,56 @@ class FakeTtk:
         def set(self, iid: str, column: str, value: object) -> None:
             entry = self._items[iid]
             entry["values"][int(column)] = value
+
+    class Notebook:
+        instances: ClassVar[list["FakeTtk.Notebook"]] = []
+
+        def __init__(self, _parent, **kwargs):
+            self._parent = _parent
+            self.children: list[object] = []
+            self._tabs: dict[int, dict[str, object]] = {}
+            self._next_index = 0
+            self._selected: int | None = None
+            self.packed = False
+            FakeTtk.Notebook.instances.append(self)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def add(self, frame, **kwargs) -> None:
+            self._tabs[self._next_index] = {"frame": frame, **dict(kwargs)}
+            self._next_index += 1
+            self.children.append(frame)
+            if self._selected is None:
+                self._selected = 0
+
+        def select(self, tab_id=None):
+            """Select a tab by index or frame; return the selected widget when asked."""
+            if tab_id is None:
+                selected = self._tab(self._selected)
+                return selected.get("frame") if selected is not None else None
+            if not isinstance(tab_id, int):
+                tab_id = next(
+                    (idx for idx, tab in self._tabs.items() if tab["frame"] is tab_id),
+                    tab_id,
+                )
+            self._selected = tab_id
+
+        def tab(self, tab_id, option=None, **kwargs):
+            """Get/update the options of one tab (by index or child frame)."""
+            entry = self._tab(tab_id)
+            if kwargs:
+                entry.update(kwargs)
+            if option is None:
+                return dict(entry)
+            return entry.get(option)
+
+        def _tab(self, tab_id):
+            if isinstance(tab_id, int):
+                return self._tabs.get(tab_id)
+            return next((tab for tab in self._tabs.values() if tab["frame"] is tab_id), None)
 
 
 class FakeRoot:
@@ -390,7 +492,7 @@ class SyncThread:
 class HoldingThread:
     """Captures threads so tests can run their payloads explicitly."""
 
-    instances: list["HoldingThread"] = []
+    instances: ClassVar[list["HoldingThread"]] = []
 
     def __init__(self, *, target=None, **kwargs):
         self.target = target
@@ -481,8 +583,27 @@ def row_chip_colors(app, workspace_id: str, attr: str) -> tuple[str, str]:
 
 def row_action_button(app, workspace_id: str):
     frame = app.app._rows[workspace_id][0]
-    return getattr(frame, "action_button")
+    return frame.action_button
 
 
 def row_action_text(app, workspace_id: str) -> str:
     return row_action_button(app, workspace_id).text
+
+
+@contextmanager
+def fake_runs_panel_bases():
+    """Rebind ``RunsPanel``'s ``tk.Frame`` base to :class:`FakeTk.Frame`.
+
+    ``RunsPanel`` captures its base class at import time, so patching the
+    module-level ``tk``/``ttk`` is not enough to build one without a real Tk
+    root. The base is swapped for the duration of the test and restored after,
+    keeping the production class untouched outside the ``with`` block.
+    """
+    from n8n_launcher.gui.ci_runs import RunsPanel
+
+    original = RunsPanel.__bases__
+    RunsPanel.__bases__ = (FakeTk.Frame,)
+    try:
+        yield RunsPanel
+    finally:
+        RunsPanel.__bases__ = original

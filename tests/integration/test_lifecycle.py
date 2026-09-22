@@ -73,12 +73,14 @@ def test_owner_setup_api_and_sync(running_workspace) -> None:
 
     api = N8nApiClient(f"{base_url}/api/v1", credentials.api_key, timeout=10.0)
     assert api.list_workflows() == []
-    api.create_workflow({
-    "name": "Integration smoke",
-    "nodes": [],
-    "connections": {},
-    "settings": {},
-})
+    api.create_workflow(
+        {
+            "name": "Integration smoke",
+            "nodes": [],
+            "connections": {},
+            "settings": {},
+        }
+    )
     assert len(api.list_workflows()) == 1
 
     report = SyncRunner(api, workspace.workflows_dir).sync_once()

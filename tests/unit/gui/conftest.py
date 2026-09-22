@@ -6,12 +6,25 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, WorkspaceState
+# ``src/n8n_launcher/gui`` imports ``tkinter`` at module level, but an
+# interpreter without Tk support (e.g. a bare system CPython on Ubuntu) cannot
+# even import it. Skip the whole GUI suite there instead of failing collection;
+# every CI matrix runner (and a venv built on uv's managed Python) ships Tk.
+pytest.importorskip("tkinter")
 
 # Re-export for test modules that import helpers by name from this dir.
-from helpers import FakeMessagebox  # noqa: F401
-from helpers import FakeRoot, FakeTk, FakeTtk, SyncThread, _safe_git_row_status, make_workspace
+from helpers import (
+    FakeMessagebox,
+    FakeRoot,
+    FakeTk,
+    FakeTtk,
+    SyncThread,
+    _safe_git_row_status,
+    make_workspace,
+)
+
+from n8n_launcher.core.config import ConfigStore
+from n8n_launcher.core.models import AppConfig, WorkspaceState
 from n8n_launcher.gui import LauncherApp
 
 

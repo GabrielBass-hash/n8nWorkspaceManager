@@ -44,7 +44,7 @@ class GitConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "GitConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> GitConfig:
         if not data:
             return cls()
         return cls(
@@ -71,7 +71,7 @@ class DbConfig:
         return asdict(self) | {"mode": self.mode.value}
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "DbConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DbConfig:
         """Deserialize, mapping any unknown legacy mode to ``NONE``."""
         raw_mode = data.get("mode", DbMode.NONE)
         try:
@@ -118,7 +118,7 @@ class Workspace:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Workspace":
+    def from_dict(cls, data: dict[str, Any]) -> Workspace:
         """Deserialize, defaulting every optional/legacy field gracefully."""
         return cls(
             id=data["id"],
@@ -145,6 +145,10 @@ class AppConfig:
     owner_password: str
     work_dir: Path
     workspaces: list[Workspace] = field(default_factory=list)
+    # Optional GitHub PAT override. Left empty in the normal case: the token is
+    # resolved from the OS Git credential helper (the one ``git push`` uses) or
+    # the ``gh`` CLI, and only stored here when the user ticks "Se souvenir".
+    github_token: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict."""
@@ -153,14 +157,16 @@ class AppConfig:
             "owner_password": self.owner_password,
             "work_dir": str(self.work_dir),
             "workspaces": [workspace.to_dict() for workspace in self.workspaces],
+            "github_token": self.github_token,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+    def from_dict(cls, data: dict[str, Any]) -> AppConfig:
         """Deserialize an :class:`AppConfig` from parsed JSON."""
         return cls(
             owner_email=data["owner_email"],
             owner_password=data["owner_password"],
             work_dir=Path(data["work_dir"]),
             workspaces=[Workspace.from_dict(item) for item in data.get("workspaces", [])],
+            github_token=data.get("github_token"),
         )

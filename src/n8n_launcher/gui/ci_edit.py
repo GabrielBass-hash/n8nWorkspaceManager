@@ -6,26 +6,34 @@ Two dialogs live here:
   default, with per-pipeline counters) letting the user check the *complete*
   pipelines to run in CI. Nodes under each pipeline are shown read-only
   (type, pinned badge); ineligible pipelines are greyed out with an explicit
-  reason and cannot be checked.
+  reason and cannot be checked. When a ``runs_source`` is provided the dialog
+  gains a ``ttk.Notebook`` with two tabs: the same "Sélection" tree and a
+  read-only "Déroulement" tab hosting a :class:`RunsPanel` fed by the host.
 * :func:`prompt_ci_credentials` — a checkable list of the workspace's n8n
   credentials whose values get copied to the clipboard as JSON, to be pasted
   once as the ``N8N_CI_CREDENTIALS`` GitHub Actions secret. Only the name/type
   metadata is recorded locally afterwards.
 
 Neither dialog reaches the network itself except through the workspace
-manager (credentials flow); eligibility is computed purely from the export
-files on disk.
+manager (credentials flow) and the runs tab's host callbacks; eligibility is
+computed purely from the export files on disk. The "Déroulement" tab has no
+manual refresh button: while the dialog lives, :func:`_schedule_runs_poll`
+re-fetches on a timer (5 s while a run is in flight, 30 s otherwise) through
+the host's ``runs_refresh`` callback.
 """
 
 from __future__ import annotations
 
+import contextlib
 import tkinter as tk
+from collections.abc import Callable
 from tkinter import messagebox, ttk
 from typing import Any
 
 from ..core.models import Workspace
-from ..workspaces import ci
+from ..workspaces import ci, ci_runs
 from ..workspaces.manager import WorkspaceManager
+from .ci_runs import RunsPanel
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -41,6 +49,11 @@ _COLOR_DISABLED = TEXT_MUTED
 _CHECKBOX = "\u2611"
 _CHECKBOX_EMPTY = "\u2610"
 _BLOCKED = "\u2013"
+
+# Auto-refresh cadence of the runs tab: quick while a run is in flight (that's
+# the phase the user watches), much slower otherwise to spare the API.
+RUNS_POLL_ACTIVE_MS = 5000
+RUNS_POLL_IDLE_MS = 30000
 
 
 def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk) -> None:
@@ -62,14 +75,63 @@ def _copy_text(widget: tk.Misc, text: str) -> None:
         pass
 
 
+def _schedule_runs_poll(
+    dialog: tk.Toplevel,
+    panel: RunsPanel,
+    runs_refresh: Callable[[RunsPanel], None],
+) -> None:
+    """Poll the runs panel on a timer while the dialog is open.
+
+    There is no manual refresh button: this replaces it. Each tick delegates
+    the actual fetch to the host (which runs it on a background thread) through
+    ``runs_refresh``; the cadence adapts to the last snapshot — 5 s while a
+    run is in flight, 30 s otherwise — so the GitHub API is not hammered when
+    nothing is running. The loop self-terminates once the dialog is destroyed:
+    the fake Toplevel drops pending timers on ``destroy``, while the real Tk
+    path hits the ``winfo_exists`` TclError guard on the next stale tick.
+    """
+
+    def tick() -> None:
+        try:
+            if not dialog.winfo_exists():
+                return
+            runs_refresh(panel)
+            cadence = RUNS_POLL_ACTIVE_MS if panel.has_active_run else RUNS_POLL_IDLE_MS
+            dialog.after(cadence, tick)
+        except Exception:
+            return
+
+    with contextlib.suppress(Exception):
+        dialog.after(RUNS_POLL_ACTIVE_MS, tick)
+
+
 def prompt_ci_workflows(
-    root: tk.Tk, workspace: Workspace
-) -> "tuple[set[str], bool] | None":
+    root: tk.Tk,
+    workspace: Workspace,
+    *,
+    runs_source: Callable[[], ci_runs.RunsSnapshot] | None = None,
+    runs_refresh: Callable[[RunsPanel], None] | None = None,
+    runs_open: Callable[[ci_runs.RunSummary], None] | None = None,
+    runs_run: Callable[[RunsPanel], None] | None = None,
+) -> tuple[set[str], bool] | None:
     """Let the user pick the pipelines to run in GitHub Actions.
 
     Returns ``(selected_paths, push_now)`` on save, or ``None`` when
     cancelled. The selection is *not* persisted here — the caller writes it
     through the workspace manager so git operations stay off the main thread.
+
+    When ``runs_source`` is provided, the dialog embeds a two-tab
+    ``ttk.Notebook``: "Sélection" holds the usual pipeline tree and
+    "Déroulement" a read-only :class:`RunsPanel` rendered from the host's
+    cached snapshot. ``runs_source()`` must be a synchronous, I/O-free callable
+    returning the latest snapshot; ``runs_refresh`` is invoked once on open and
+    then on a timer (:func:`_schedule_runs_poll`) so the host can re-fetch in a
+    background thread and call :meth:`RunsPanel.apply` on the main thread —
+    there is no manual refresh button. ``runs_open`` is called with a run when
+    the user double-clicks its row. ``runs_run``, when provided, adds the
+    panel's "Lancer la CI" button and is called with the panel on click so the
+    host can dispatch a run off-thread. Omitting ``runs_source`` keeps the
+    exact single-pane layout, which is what older callers still get.
     """
     provided = ci.provided_credentials(workspace.git.ci_credentials)
     exports: dict[str, dict[str, Any]] = {}
@@ -114,18 +176,36 @@ def prompt_ci_workflows(
         anchor="w",
     ).pack(fill="x", padx=18, pady=(0, 8))
 
-    tree = ttk.Treeview(dialog, columns=("detail",), show="tree headings", height=18)
+    # The single-pane dialog packs everything onto the Toplevel; the runs-aware
+    # variant nests the same widgets under a Notebook's "Sélection" tab so the
+    # pipeline tree's code path is shared verbatim between the two layouts.
+    body: tk.Misc = dialog
+    runs_tab: tk.Frame | None = None
+    if runs_source is not None:
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+        selection_tab = tk.Frame(notebook, bg=APP_BACKGROUND)
+        notebook.add(selection_tab, text="Sélection")
+        runs_tab = tk.Frame(notebook, bg=APP_BACKGROUND)
+        notebook.add(runs_tab, text="Déroulement")
+        body = selection_tab
+
+    tree = ttk.Treeview(body, columns=("detail",), show="tree headings", height=18)
     tree.heading("#0", text="Pipeline")
     tree.heading("detail", text="Détails")
     tree.column("#0", width=360, stretch=True)
     tree.column("detail", width=460, stretch=True, anchor="w")
     tree.configure(selectmode="none")
-    for tag, color in (("disabled", _COLOR_DISABLED), ("warn", _COLOR_WARN), ("muted", _COLOR_DISABLED)):
+    for tag, color in (
+        ("disabled", _COLOR_DISABLED),
+        ("warn", _COLOR_WARN),
+        ("muted", _COLOR_DISABLED),
+    ):
         tree.tag_configure(tag, foreground=color)
     tree.pack(fill="both", expand=True, padx=18, pady=(0, 8))
 
     counter_label = tk.Label(
-        dialog,
+        body,
         text="",
         bg=APP_BACKGROUND,
         fg=TEXT_PRIMARY,
@@ -183,10 +263,14 @@ def prompt_ci_workflows(
         update_row(rel)
         update_caption()
 
-    def on_tree_click(event) -> None:
+    def on_tree_click(event: tk.Event) -> None:
         # Only toggle when clicking the item area itself (not scrollbar gaps).
         try:
             if tree.identify("region", event.x, event.y) not in ("cell", "tree"):
+                return
+            # The expander triangle lives in the same "tree" region as the row:
+            # clicking it must only expand/collapse, never flip the checkbox.
+            if tree.identify_element(event.x, event.y) == "Treeitem.indicator":
                 return
             item = tree.identify_row(event.y)
         except Exception:
@@ -231,7 +315,7 @@ def prompt_ci_workflows(
     dialog.bind("<Return>", lambda _event: save())
     dialog.bind("<Escape>", lambda _event: cancel())
 
-    actions = tk.Frame(dialog, bg=APP_BACKGROUND)
+    actions = tk.Frame(body, bg=APP_BACKGROUND)
     actions.pack(fill="x", padx=18, pady=(0, 14))
     for text, command in (
         ("Tout cocher (éligibles)", select_all),
@@ -248,7 +332,7 @@ def prompt_ci_workflows(
         ).pack(side="right", padx=(6, 0))
 
     hint = tk.Label(
-        dialog,
+        body,
         text=(
             "En gris : pipeline non testable. Épinglez son déclencheur "
             "webhook/chat dans l'éditeur (☉ pinData) ou renseignez ses "
@@ -262,15 +346,120 @@ def prompt_ci_workflows(
     )
     hint.pack(fill="x", padx=18, pady=(0, 10))
 
+    # Runs view: a pure renderer wired to the host's closure. The panel is fed
+    # the cached snapshot synchronously (no I/O) then asked to refresh so the
+    # very first open already triggers a background fetch.
+    if runs_tab is not None and runs_source is not None:
+        panel = RunsPanel(
+            runs_tab,
+            refresh=lambda: None,
+            open_run=lambda _run: None,
+            # A placeholder is enough at construction time: the real callback
+            # (bound to the panel) is set right after, and the button cannot be
+            # clicked before the dialog is shown.
+            run=(lambda: None) if runs_run is not None else None,
+        )
+        panel.pack(fill="both", expand=True)
+        panel.apply(runs_source())
+        if runs_refresh is not None:
+            panel.refresh_cb = lambda: runs_refresh(panel)
+            runs_refresh(panel)
+            # No manual refresh button: keep the tab in sync on a timer while
+            # the dialog is open (fast while a run is in flight, slow otherwise).
+            _schedule_runs_poll(dialog, panel, runs_refresh)
+        if runs_open is not None:
+            panel.open_run_cb = runs_open
+        if runs_run is not None:
+            panel.run_cb = lambda: runs_run(panel)
+
     update_caption()
     _finish_dialog_setup(dialog, root)
     dialog.wait_window()
     return result
 
 
-def prompt_ci_credentials(
-    root: tk.Tk, manager: WorkspaceManager, workspace: Workspace
-) -> None:
+def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | None:
+    """Ask which branch/ref to run the CI workflow on.
+
+    Returns the trimmed ref, or ``None`` when cancelled or left empty. The
+    dialog is purely local: the caller performs the ``workflow_dispatch`` call
+    on a background thread once a ref is returned. *default_ref* is prefilled
+    so the common case is a single click.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Lancer la CI")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: str | None = None
+
+    tk.Label(
+        dialog,
+        text=f"Workflow « {workflow_file} » — branche à exécuter :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+    ).pack(fill="x", padx=18, pady=(16, 2))
+    ref_var = tk.StringVar(value=default_ref)
+    ref_entry = tk.Entry(
+        dialog,
+        textvariable=ref_var,
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    ref_entry.pack(fill="x", padx=18, pady=(0, 6))
+    tk.Label(
+        dialog,
+        text=(
+            "GitHub Actions exécute alors les pipelines sélectionnées sur cette "
+            "branche (fichier .n8n-tests/tests.json du dépôt)."
+        ),
+        bg=APP_BACKGROUND,
+        fg=TEXT_MUTED,
+        font=FONT_META,
+        anchor="w",
+        justify="left",
+        wraplength=360,
+    ).pack(fill="x", padx=18, pady=(0, 12))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def submit(_event: tk.Event | None = None) -> None:
+        nonlocal result
+        ref = ref_var.get().strip()
+        if ref:
+            result = ref
+        dialog.destroy()
+
+    def cancel(_event: tk.Event | None = None) -> None:
+        dialog.destroy()
+
+    ttk.Button(buttons, text="Annuler", style="Secondary.TButton", command=cancel).pack(
+        side="right"
+    )
+    ttk.Button(
+        buttons,
+        text="Lancer",
+        style="Accent.TButton",
+        cursor="hand2",
+        command=submit,
+    ).pack(side="right", padx=(8, 0))
+
+    ref_entry.bind("<Return>", submit)
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root)
+    with contextlib.suppress(Exception):
+        ref_entry.focus_set()
+    dialog.wait_window()
+    return result
+
+
+def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Workspace) -> None:
     """Let the user pick the credentials to include in the CI secret.
 
     Requires a running workspace (the values are read live from its n8n
@@ -358,9 +547,7 @@ def prompt_ci_credentials(
 
     def copy_json() -> None:
         selected = [
-            {"name": name, "type": ctype}
-            for variable, name, ctype in rows
-            if variable.get()
+            {"name": name, "type": ctype} for variable, name, ctype in rows if variable.get()
         ]
         if not selected:
             messagebox.showwarning(
@@ -382,9 +569,7 @@ def prompt_ci_credentials(
 
     def confirm_pasted() -> None:
         selected = [
-            {"name": name, "type": ctype}
-            for variable, name, ctype in rows
-            if variable.get()
+            {"name": name, "type": ctype} for variable, name, ctype in rows if variable.get()
         ]
         try:
             manager.set_ci_credentials(workspace, selected)

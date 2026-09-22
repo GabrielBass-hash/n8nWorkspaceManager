@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
+from n8n_launcher.core.models import (
+    AppConfig,
+    DbConfig,
+    DbMode,
+    GitConfig,
+    Workspace,
+    WorkspaceState,
+)
 
 
 def test_workspace_round_trip() -> None:
@@ -9,7 +16,9 @@ def test_workspace_round_trip() -> None:
         name="My workspace",
         workflows_dir=Path("/tmp/workflows"),
         port=5680,
-        db=DbConfig(mode=DbMode.MANAGED, database_name="data", username="n8ndata", password="secret"),
+        db=DbConfig(
+            mode=DbMode.MANAGED, database_name="data", username="n8ndata", password="secret"
+        ),
         state=WorkspaceState.RUNNING,
         restart_required=True,
     )
@@ -95,6 +104,29 @@ def test_app_config_round_trip(tmp_path: Path) -> None:
     )
 
     assert AppConfig.from_dict(config.to_dict()) == config
+
+
+def test_app_config_round_trip_keeps_github_token(tmp_path: Path) -> None:
+    config = AppConfig(
+        owner_email="owner@example.test",
+        owner_password="secret",
+        work_dir=tmp_path,
+        workspaces=[],
+        github_token="ghp_remembered",
+    )
+
+    assert AppConfig.from_dict(config.to_dict()) == config
+
+
+def test_app_config_without_github_token_defaults_to_none(tmp_path: Path) -> None:
+    legacy = {
+        "owner_email": "owner@example.test",
+        "owner_password": "secret",
+        "work_dir": str(tmp_path),
+        "workspaces": [],
+    }
+
+    assert AppConfig.from_dict(legacy).github_token is None
 
 
 def test_git_config_round_trip() -> None:

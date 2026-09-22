@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..core.models import DbMode, Workspace, DEFAULT_POSTGRES_IMAGE
+from ..core.models import DEFAULT_POSTGRES_IMAGE, DbMode, Workspace
 
 
 def compose_project_name(workspace: Workspace) -> str:
@@ -52,26 +52,22 @@ def write_compose(workspace: Workspace, output: Path) -> Path:
 
 
 def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
-    if workspace.db.mode is DbMode.NONE:
+    if workspace.db.mode is not DbMode.MANAGED:
         return "", "", ""
-
-    if workspace.db.mode is DbMode.MANAGED:
-        environment = """      DB_TYPE: postgresdb
+    environment = """      DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: \"5432\"
       DB_POSTGRESDB_DATABASE: n8n
       DB_POSTGRESDB_USER: n8n
       DB_POSTGRESDB_PASSWORD: launcher-managed
 """
-        postgres_image = workspace.postgres_image or DEFAULT_POSTGRES_IMAGE
-        # TimescaleDB must be listed in shared_preload_libraries before the
-        # server starts; without this the CREATE EXTENSION call fails hard.
-        command_block = ""
-        if workspace.postgres_preload_timescaledb:
-            command_block = (
-                "    command: [\"postgres\", \"-c\", \"shared_preload_libraries=timescaledb\"]\n"
-            )
-        service = f"""  postgres:
+    postgres_image = workspace.postgres_image or DEFAULT_POSTGRES_IMAGE
+    # TimescaleDB must be listed in shared_preload_libraries before the
+    # server starts; without this the CREATE EXTENSION call fails hard.
+    command_block = ""
+    if workspace.postgres_preload_timescaledb:
+        command_block = '    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]\n'
+    service = f"""  postgres:
     image: {postgres_image}
     restart: unless-stopped
 {command_block}    environment:
@@ -86,9 +82,9 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
       timeout: 3s
       retries: 20
 """
-        dependency = "    depends_on:\n      postgres:\n        condition: service_healthy\n"
-        return environment, service, dependency
+    dependency = "    depends_on:\n      postgres:\n        condition: service_healthy\n"
+    return environment, service, dependency
 
 
 def _compose_path(path: Path) -> str:
-    return str(path.resolve()).replace("\\", "/").replace("\"", "\\\"")
+    return str(path.resolve()).replace("\\", "/").replace('"', '\\"')

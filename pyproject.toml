@@ -5,8 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "n8n-launcher"
 
-
-version = "4.0.01"
+dynamic = ["version"]
 
 description = "Cross-platform desktop launcher for isolated n8n workspaces"
 requires-python = ">=3.12"
@@ -17,24 +16,106 @@ dependencies = [
     "requests>=2.31",
 ]
 
-[project.optional-dependencies]
-test = ["pytest>=8.0", "pytest-timeout>=2.2"]
-packaging = [
-    "pyinstaller>=6.0",
-    "dmgbuild>=1.6,<2; sys_platform == 'darwin'",
-]
-
 [project.scripts]
 n8n-launcher = "n8n_launcher.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.dynamic]
+version = {attr = "n8n_launcher.__version__"}
+
+# Dev tooling lives in dependency-groups (uv) instead of optional-dependencies.
+# `uv sync` installs `dev` by default; build tooling is opt-in via `--group packaging`.
+[dependency-groups]
+dev = [
+    "ruff",
+    "basedpyright",
+    "pytest",
+    "pytest-cov",
+    "pytest-timeout",
+    "pre-commit",
+]
+packaging = [
+    "pyinstaller>=6.0",
+    "dmgbuild>=1.6,<2; sys_platform == 'darwin'",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W: pycodestyle · F: pyflakes · I: isort · UP: pyupgrade
+# B: flake8-bugbear · SIM: flake8-simplify · RUF: ruff-specific
+# S: flake8-bandit (security) · ANN: flake8-annotations
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S", "ANN"]
+# self/cls are exempt by convention (already annotated in this codebase).
+ignore = []
+# Bandit subprocess rules are intentionally silenced: the launcher wraps
+# `docker`/`git` by design (docker/manager.py, git/manager.py, github/auth.py).
+# Each call site is a deliberate shell-out, not an injection vector.
+[tool.ruff.lint.per-file-ignores]
+# Bandit subprocess rules are intentionally silenced: the launcher wraps
+# `docker`/`git` by design (docker/manager.py, git/manager.py, github/auth.py).
+# Each call site is a deliberate shell-out, not an injection vector.
+"src/n8n_launcher/docker/**" = ["S603", "S604", "S607"]
+"src/n8n_launcher/git/**" = ["S603", "S604", "S607"]
+"src/n8n_launcher/github/**" = ["S603", "S604", "S607"]
+"src/n8n_launcher/platform/**" = ["S603", "S604", "S607"]
+# workspaces: includes subprocess (S603/S607) + S606 (no shell) + fail-graceful S110
+"src/n8n_launcher/workspaces/**" = ["S603", "S604", "S605", "S606", "S607", "S110"]
+# database: subprocess + SQL built via _sql_literal() (safe)
+"src/n8n_launcher/database/**" = ["S603", "S604", "S605", "S607", "S105", "S608"]
+# ci.py: template strings for generated validate.py/runner.py (long lines, token names)
+"src/n8n_launcher/workspaces/ci.py" = ["E501", "S105"]
+# __main__.py: fail-graceful import probing
+"src/n8n_launcher/__main__.py" = ["S110"]
+# gui/app.py: subprocess for browser launch + Tk callbacks with fail-graceful try/except/pass
+"src/n8n_launcher/gui/app.py" = ["S603", "S606", "S607", "S110"]
+# gui/ci_edit.py: fail-graceful JSON parsing in dialogs
+"src/n8n_launcher/gui/ci_edit.py" = ["S110"]
+# gui/ci_runs.py: fail-graceful JSON parsing
+"src/n8n_launcher/gui/ci_runs.py" = ["S110", "RUF001"]
+# RUF001 justification: _MARK_SKIPPED = "–" (EN DASH) is an intentional status
+# glyph in the runs tree, not a typo for a hyphen.
+# gui/close.py: fail-graceful cleanup on close
+"src/n8n_launcher/gui/close.py" = ["S110"]
+# gui/dialogs.py: fail-graceful clipboard access
+"src/n8n_launcher/gui/dialogs.py" = ["S110"]
+# gui/update_flow.py: fail-graceful update checks
+"src/n8n_launcher/gui/update_flow.py" = ["S110"]
+# tests: fake passwords, deliberate try/except/pass, subprocess, long fixture strings
+"tests/**" = ["S101", "ANN", "S603", "S604", "S605", "S607", "S105", "S106", "S110", "S108", "F841", "E501"]
+"scripts/**" = ["S603", "S604", "S605", "S607"]
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = false
+
 [tool.pytest.ini_options]
-pythonpath = ["src", "scripts"]
+pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "unit: tests that do not require external services",
     "integration: tests requiring Docker or PostgreSQL",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' --cov=src/n8n_launcher --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/n8n_launcher"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.basedpyright]
+# Every module under src/n8n_launcher/ must typecheck (0 errors). tests/** and
+# scripts/** are excluded by policy: they are deliberately loose (FakeTk
+# stand-ins, MagicMock return values, raised-in-test error paths) and are not
+# shipped, so strict typing there would only churn fixtures without catching
+# real defects.
+typeCheckingMode = "standard"
+exclude = [
+    "tests/**",
+    "scripts/**",
+]

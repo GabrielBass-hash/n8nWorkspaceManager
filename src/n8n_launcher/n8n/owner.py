@@ -111,7 +111,10 @@ class OwnerSetup:
                 message = str(exc).lower()
                 if "already" in message:
                     return
-                if any(marker in message for marker in ("must be", "invalid_type", "expected", "not allowed")):
+                if any(
+                    marker in message
+                    for marker in ("must be", "invalid_type", "expected", "not allowed")
+                ):
                     raise
                 last_error = exc
             except requests.RequestException as exc:
@@ -119,14 +122,14 @@ class OwnerSetup:
             time.sleep(2.0)
         raise last_error or OwnerSetupError("n8n did not become ready for owner setup")
 
-    def _request(self, method: str, url: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        response = self.session.request(method, url, json=payload, timeout=self.timeout, **kwargs)
+    def _request(self, method: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        response = self.session.request(method, url, json=payload, timeout=self.timeout)
         if not response.ok:
             detail = response.text[:300].strip() or response.reason
             raise OwnerSetupError(f"n8n returned HTTP {response.status_code}: {detail}")
         try:
             return response.json()
-        except ValueError:
+        except ValueError as exc:
             raise OwnerSetupError(
                 f"n8n returned a non-JSON response: {response.text[:120].strip()!r}"
-            )
+            ) from exc

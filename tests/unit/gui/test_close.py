@@ -1,11 +1,11 @@
 """GUI close-flow tests: stop-and-export sequence and push-failure warnings."""
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
+
+from helpers import FakeRoot
 
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig
-
-from helpers import FakeRoot  # noqa: E402
 from n8n_launcher.gui import LauncherApp
 
 

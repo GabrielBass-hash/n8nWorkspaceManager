@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import re
 import secrets
-import shutil
-import subprocess
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from ..core.models import DbConfig, DbMode
 from ..database import has_db_layout
+from ..github import auth
 from .theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -45,6 +44,14 @@ class GitConfigChoice:
 
 
 @dataclass(frozen=True)
+class GitHubTokenPlan:
+    """Token entered for the GitHub API, plus whether to persist it once."""
+
+    token: str
+    remember: bool = False
+
+
+@dataclass(frozen=True)
 class GitHubCreatePlan:
     """Choices for creating a new repository on GitHub."""
 
@@ -53,18 +60,16 @@ class GitHubCreatePlan:
     token: str = ""
 
 
-def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk, *, focus=None) -> None:
+def _finish_dialog_setup(
+    dialog: tk.Toplevel, root: tk.Tk, *, focus: tk.Widget | None = None
+) -> None:
     """Center a modal dialog over its parent, grab input and focus a widget."""
     try:
         dialog.transient(root)
         dialog.grab_set()
         dialog.update_idletasks()
-        x = root.winfo_rootx() + max(
-            (root.winfo_width() - dialog.winfo_reqwidth()) // 2, 0
-        )
-        y = root.winfo_rooty() + max(
-            (root.winfo_height() - dialog.winfo_reqheight()) // 3, 0
-        )
+        x = root.winfo_rootx() + max((root.winfo_width() - dialog.winfo_reqwidth()) // 2, 0)
+        y = root.winfo_rooty() + max((root.winfo_height() - dialog.winfo_reqheight()) // 3, 0)
         dialog.geometry(f"+{x}+{y}")
         if focus is not None:
             focus.focus_set()
@@ -103,9 +108,7 @@ def default_creation_db(workflows_dir: Path) -> DbConfig:
     return DbConfig(DbMode.NONE)
 
 
-def prompt_create_plan(
-    root: tk.Tk, workflows_dir: Path, default_db: DbConfig
-) -> CreatePlan | None:
+def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -> CreatePlan | None:
     """Show the single creation form; returns a plan or None when cancelled."""
     dialog = tk.Toplevel(root)
     dialog.title("Nouveau workspace")
@@ -232,11 +235,7 @@ def prompt_create_plan(
 
     def submit() -> None:
         nonlocal result
-        db = (
-            fresh_managed_db_config()
-            if db_var.get() == "managed"
-            else DbConfig(DbMode.NONE)
-        )
+        db = fresh_managed_db_config() if db_var.get() == "managed" else DbConfig(DbMode.NONE)
         result = CreatePlan(
             name=name_var.get().strip() or workflows_dir.name,
             db=db,
@@ -301,12 +300,12 @@ def prompt_ask_string(
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
 
-    def submit(_event=None) -> None:
+    def submit(_event: tk.Event | None = None) -> None:
         nonlocal result
         result = value_var.get()
         dialog.destroy()
 
-    def cancel(_event=None) -> None:
+    def cancel(_event: tk.Event | None = None) -> None:
         dialog.destroy()
 
     ttk.Button(
@@ -437,7 +436,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
 
-    def submit(_event=None) -> None:
+    def submit(_event: tk.Event | None = None) -> None:
         nonlocal result
         if mode_var.get() == "managed":
             result = DbConfig(
@@ -450,7 +449,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
             result = DbConfig(DbMode.NONE)
         dialog.destroy()
 
-    def cancel(_event=None) -> None:
+    def cancel(_event: tk.Event | None = None) -> None:
         dialog.destroy()
 
     ttk.Button(
@@ -473,9 +472,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     return result
 
 
-def prompt_git_remote(
-    root: tk.Tk, workspace_name: str, current_remote: str | None
-) -> str | None:
+def prompt_git_remote(root: tk.Tk, workspace_name: str, current_remote: str | None) -> str | None:
     """Ask for a new remote URL; ``None`` means the user cancelled."""
     message = (
         f"URL du dépôt distant pour « {workspace_name} »"
@@ -490,9 +487,7 @@ def prompt_git_remote(
     )
 
 
-def prompt_git_config(
-    root: tk.Tk, workspace_name: str
-) -> GitConfigChoice | None:
+def prompt_git_config(root: tk.Tk, workspace_name: str) -> GitConfigChoice | None:
     """Ask how to wire git for a workspace that has no remote yet.
 
     Returns ``None`` when cancelled, a :class:`GitConfigChoice` carrying the
@@ -538,12 +533,12 @@ def prompt_git_config(
         result = GitConfigChoice(create_github=True)
         dialog.destroy()
 
-    def submit(_event=None) -> None:
+    def submit(_event: tk.Event | None = None) -> None:
         nonlocal result
         result = GitConfigChoice(remote_url=url_var.get().strip() or None)
         dialog.destroy()
 
-    def cancel(_event=None) -> None:
+    def cancel(_event: tk.Event | None = None) -> None:
         dialog.destroy()
 
     ttk.Button(
@@ -572,13 +567,15 @@ def prompt_git_config(
 
 
 def prompt_github_create(
-    root: tk.Tk, workspace_name: str
+    root: tk.Tk, workspace_name: str, *, token: str | None = None
 ) -> GitHubCreatePlan | None:
     """Ask for a GitHub repository name, visibility and a personal access token.
 
-    Returns ``None`` when cancelled. The token is collected here but never
-    stored by the app: it is used once for the API call and one seed push.
-    A "Détecter via gh CLI" button fills the field from ``gh auth token``.
+    Returns ``None`` when cancelled. *token* prefills the field with the token
+    already resolved for the same GitHub account (git credential/``gh``), so
+    the user can normally just confirm. The token is used once for the API call
+    and one seed push, then discarded; a "Détecter via gh CLI" button refills
+    it from ``gh auth token``.
     """
     dialog = tk.Toplevel(root)
     dialog.title("Nouveau dépôt GitHub")
@@ -643,7 +640,7 @@ def prompt_github_create(
         justify="left",
         wraplength=380,
     ).pack(fill="x", padx=18)
-    token_var = tk.StringVar(value="")
+    token_var = tk.StringVar(value=token or "")
     token_entry = tk.Entry(
         dialog,
         textvariable=token_var,
@@ -659,13 +656,13 @@ def prompt_github_create(
         dialog,
         text="Détecter via gh CLI",
         style="Secondary.TButton",
-        command=lambda: token_var.set(_github_token_from_cli()),
+        command=lambda: token_var.set(auth.token_from_gh_cli() or ""),
     ).pack(fill="x", padx=18, pady=(0, 14))
 
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
 
-    def submit(_event=None) -> None:
+    def submit(_event: tk.Event | None = None) -> None:
         nonlocal result
         name = name_var.get().strip()
         token = token_var.get().strip()
@@ -685,7 +682,7 @@ def prompt_github_create(
         result = GitHubCreatePlan(name=name, private=visibility_var.get(), token=token)
         dialog.destroy()
 
-    def cancel(_event=None) -> None:
+    def cancel(_event: tk.Event | None = None) -> None:
         dialog.destroy()
 
     ttk.Button(
@@ -715,14 +712,119 @@ def _repo_name_from(workspace_name: str) -> str:
     return cleaned.strip(".-_ ") or "workspace"
 
 
-def _github_token_from_cli() -> str:
-    """Return a GitHub token via ``gh auth token``, or an empty string."""
-    if shutil.which("gh") is None:
-        return ""
+def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
+    """Ask for a GitHub personal access token to display Actions runs.
+
+    Returns a :class:`GitHubTokenPlan` (token plus whether to remember it), or
+    ``None`` when cancelled. The token is only persisted when the user ticks
+    "Se souvenir" — by default the caller keeps it in memory. A "Coller"
+    button fills the field from the clipboard so the token is never typed or
+    logged, and "Détecter via gh CLI" reuses an existing ``gh`` login.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Token GitHub")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: GitHubTokenPlan | None = None
+
+    tk.Label(
+        dialog,
+        text="Token GitHub (lecture des runs Actions) :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+    ).pack(fill="x", padx=18, pady=(16, 2))
+    token_var = tk.StringVar(value="")
+    token_entry = tk.Entry(
+        dialog,
+        textvariable=token_var,
+        show="*",
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    token_entry.pack(fill="x", padx=18, pady=(0, 6))
+    ttk.Button(
+        dialog,
+        text="Coller depuis le presse-papiers",
+        style="Secondary.TButton",
+        command=lambda: token_var.set(_clipboard_text(dialog)),
+    ).pack(fill="x", padx=18, pady=(0, 4))
+    ttk.Button(
+        dialog,
+        text="Détecter via gh CLI",
+        style="Secondary.TButton",
+        command=lambda: token_var.set(auth.token_from_gh_cli() or ""),
+    ).pack(fill="x", padx=18, pady=(0, 8))
+
+    remember_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+        dialog,
+        text="Se souvenir de ce token (enregistré dans la configuration)",
+        variable=remember_var,
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        selectcolor=SURFACE,
+        activebackground=APP_BACKGROUND,
+        activeforeground=TEXT_PRIMARY,
+        anchor="w",
+        highlightthickness=0,
+        font=FONT_SUBTITLE,
+    ).pack(fill="x", padx=18)
+    tk.Label(
+        dialog,
+        text=(
+            "Le token sert à lire vos runs GitHub Actions (permission « Actions »). "
+            "Sans « Se souvenir », il n'est gardé qu'en mémoire pour cette session."
+        ),
+        bg=APP_BACKGROUND,
+        fg=TEXT_MUTED,
+        font=FONT_SUBTITLE,
+        anchor="w",
+        justify="left",
+        wraplength=380,
+    ).pack(fill="x", padx=18, pady=(4, 12))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def submit(_event: tk.Event | None = None) -> None:
+        nonlocal result
+        token = token_var.get().strip()
+        if token:
+            result = GitHubTokenPlan(token=token, remember=remember_var.get())
+        dialog.destroy()
+
+    def cancel(_event: tk.Event | None = None) -> None:
+        dialog.destroy()
+
+    ttk.Button(
+        buttons,
+        text="Annuler",
+        style="Secondary.TButton",
+        command=cancel,
+    ).pack(side="right")
+    ttk.Button(
+        buttons,
+        text="Valider",
+        style="Accent.TButton",
+        command=submit,
+    ).pack(side="right", padx=(8, 0))
+
+    token_entry.bind("<Return>", submit)
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root, focus=token_entry)
+    dialog.wait_window()
+    return result
+
+
+def _clipboard_text(widget: tk.Misc) -> str:
+    """Return the widget's clipboard contents (best-effort for test fakes)."""
     try:
-        result = subprocess.run(
-            ["gh", "auth", "token"], capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.SubprocessError):
+        return widget.clipboard_get()
+    except Exception:
         return ""
-    return result.stdout.strip() if result.returncode == 0 else ""

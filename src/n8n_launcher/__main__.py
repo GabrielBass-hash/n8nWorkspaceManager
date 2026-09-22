@@ -1,6 +1,7 @@
 """Application entry point."""
 
 import atexit
+import contextlib
 import signal
 import sys
 import tkinter as tk
@@ -29,10 +30,8 @@ def stop_all(store: ConfigStore, docker: DockerManager) -> None:
     except Exception:
         return
     for workspace in config.workspaces:
-        try:
+        with contextlib.suppress(Exception):
             manager.stop(workspace.id)
-        except Exception:
-            pass
 
 
 def _signal_shutdown(store: ConfigStore, docker: DockerManager, *_args: object) -> None:

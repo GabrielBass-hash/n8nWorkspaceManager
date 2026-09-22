@@ -10,24 +10,25 @@ Linux / Windows: single-file windowed executable.
 
 from __future__ import annotations
 
-import plistlib
 import platform
+import plistlib
 import shutil
 import struct
 import subprocess
 import sys
-import tempfile
-import tomllib
 import zlib
 from pathlib import Path
+
+# Repository root, resolved from this file so the build works from any CWD.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 APP_NAME = "n8n-launcher"
 DISPLAY_NAME = "n8n Launcher"
 BUNDLE_ID = "io.launcher.n8n"
 # Thin root entry point used instead of src/n8n_launcher/__main__.py:
 # PyInstaller runs it correctly while the package keeps its relative imports.
-ENTRY_POINT = "run.py"
-ICON_SOURCE = Path("assets/icon.png")
+ENTRY_POINT = PROJECT_ROOT / "run.py"
+ICON_SOURCE = PROJECT_ROOT / "assets" / "icon.png"
 
 DMG_WINDOW_RECT = ((60, 80), (720, 490))  # 660 x 410
 DMG_BACKGROUND_SIZE = (660, 410)
@@ -39,8 +40,13 @@ def _run(command: list[str]) -> None:
 
 
 def project_version() -> str:
-    with open("pyproject.toml", "rb") as handle:
-        return str(tomllib.load(handle)["project"]["version"])
+    """Read the version from the package's single source of truth."""
+    src = str(PROJECT_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from n8n_launcher import __version__
+
+    return __version__
 
 
 def _png_chunk(tag: bytes, data: bytes) -> bytes:
@@ -77,9 +83,7 @@ def render_background(path: Path) -> None:
             row.append((*color, 255))
         rows.append(row)
 
-    raw = b"".join(
-        b"\x00" + b"".join(struct.pack("BBBB", *pixel) for pixel in row) for row in rows
-    )
+    raw = b"".join(b"\x00" + b"".join(struct.pack("BBBB", *pixel) for pixel in row) for row in rows)
     png = b"\x89PNG\r\n\x1a\n"
     png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
     png += _png_chunk(b"IDAT", zlib.compress(raw, 9))
@@ -89,7 +93,7 @@ def render_background(path: Path) -> None:
 
 def build_icns() -> Path:
     """Render ``assets/icon.png`` into a full-resolution ``.icns``."""
-    scratch = Path("build") / "icon"
+    scratch = PROJECT_ROOT / "build" / "icon"
     iconset = scratch / "icon.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
@@ -114,6 +118,7 @@ def build_icns() -> Path:
 
 
 HIDDEN_IMPORTS = [
+    "n8n_launcher.__main__",
     "n8n_launcher.core",
     "n8n_launcher.core.config",
     "n8n_launcher.core.models",
@@ -127,8 +132,13 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.docker.manager",
     "n8n_launcher.git",
     "n8n_launcher.git.manager",
+    "n8n_launcher.github",
+    "n8n_launcher.github.api",
+    "n8n_launcher.github.auth",
     "n8n_launcher.gui",
     "n8n_launcher.gui.app",
+    "n8n_launcher.gui.ci_edit",
+    "n8n_launcher.gui.ci_runs",
     "n8n_launcher.gui.close",
     "n8n_launcher.gui.dialogs",
     "n8n_launcher.gui.display",
@@ -145,6 +155,8 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.platform.shortcuts",
     "n8n_launcher.platform.updater",
     "n8n_launcher.workspaces",
+    "n8n_launcher.workspaces.ci",
+    "n8n_launcher.workspaces.ci_runs",
     "n8n_launcher.workspaces.manager",
     "tkinter",
     "tkinter.ttk",
@@ -165,7 +177,7 @@ def _hidden_import_args() -> list[str]:
 
 
 def build_onedir() -> Path:
-    app = Path("dist") / f"{APP_NAME}.app"
+    app = PROJECT_ROOT / "dist" / f"{APP_NAME}.app"
     if app.exists():
         shutil.rmtree(app)
     _run(
@@ -181,9 +193,9 @@ def build_onedir() -> Path:
             "--osx-bundle-identifier",
             BUNDLE_ID,
             "--paths",
-            "src",
+            str(PROJECT_ROOT / "src"),
             *_hidden_import_args(),
-            ENTRY_POINT,
+            str(ENTRY_POINT),
         ]
     )
     return app
@@ -200,9 +212,9 @@ def build_onefile() -> None:
             "--name",
             APP_NAME,
             "--paths",
-            "src",
+            str(PROJECT_ROOT / "src"),
             *_hidden_import_args(),
-            ENTRY_POINT,
+            str(ENTRY_POINT),
         ]
     )
 
@@ -232,42 +244,29 @@ def patch_info_plist(app: Path) -> None:
 
 def build_dmg(app: Path) -> None:
     """Package the signed .app into a styled drag-and-drop .dmg via dmgbuild."""
-    scratch = Path("build") / "dmg"
+    scratch = PROJECT_ROOT / "build" / "dmg"
     scratch.mkdir(parents=True, exist_ok=True)
-    icns = Path("build") / "icon" / "icon.icns"
+    icns = PROJECT_ROOT / "build" / "icon" / "icon.icns"
     background = scratch / "background.png"
     render_background(background)
     settings = scratch / "settings.py"
     left, top = DMG_WINDOW_RECT[0]
     right, bottom = DMG_WINDOW_RECT[1]
-    locations = ", ".join(
-        f"'{name}': ({x}, {y})" for name, (x, y) in DMG_ICON_POSITIONS.items()
-    )
+    locations = ", ".join(f"'{name}': ({x}, {y})" for name, (x, y) in DMG_ICON_POSITIONS.items())
     settings.write_text(
-        "app_name = '%s'\n"
-        "files = ['%s']\n"
+        f"app_name = '{DISPLAY_NAME}'\n"
+        f"files = ['{app.resolve()}']\n"
         "symlinks = {'Applications': '/Applications'}\n"
-        "icon = '%s'\n"
-        "background = '%s'\n"
-        "window_rect = ((%d, %d), (%d, %d))\n"
+        f"icon = '{icns.resolve()}'\n"
+        f"background = '{background.resolve()}'\n"
+        f"window_rect = (({left}, {top}), ({right}, {bottom}))\n"
         "icon_size = 110\n"
         "text_size = 12\n"
-        "icon_locations = {%s}\n"
-        "format = 'UDZO'\n"
-        % (
-            DISPLAY_NAME,
-            app.resolve(),
-            icns.resolve(),
-            background.resolve(),
-            left,
-            top,
-            right,
-            bottom,
-            locations,
-        ),
+        f"icon_locations = {{{locations}}}\n"
+        "format = 'UDZO'\n",
         encoding="utf-8",
     )
-    dmg = Path("dist") / f"{APP_NAME}-macos.dmg"
+    dmg = PROJECT_ROOT / "dist" / f"{APP_NAME}-macos.dmg"
     if dmg.exists():
         dmg.unlink()
     _run(

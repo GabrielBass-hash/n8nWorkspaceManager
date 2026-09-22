@@ -1,5 +1,5 @@
-from n8n_launcher.docker.compose import render_compose
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
+from n8n_launcher.docker.compose import render_compose
 
 
 def test_managed_compose_is_isolated(managed_workspace) -> None:
@@ -61,7 +61,7 @@ def test_managed_compose_preloads_timescaledb_only_on_request(tmp_path) -> None:
     rendered = render_compose(workspace)
 
     assert "image: imresamu/postgis:16-3.5-bundle0-bookworm" in rendered
-    assert "command: [\"postgres\", \"-c\", \"shared_preload_libraries=timescaledb\"]" in rendered
+    assert 'command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]' in rendered
 
 
 def test_managed_compose_omits_preload_command_by_default(tmp_path) -> None:

@@ -7,21 +7,21 @@ The public surface is re-exported here so consumers can import from
 
 from .api import N8nApiClient, N8nApiError
 from .owner import (
+    REQUIRED_WORKFLOW_SCOPES,
     ApiCredentials,
     OwnerSetup,
     OwnerSetupError,
-    REQUIRED_WORKFLOW_SCOPES,
     hash_owner_password,
 )
 from .workflows import SyncPolicy, SyncReport, SyncRunner
 
 __all__ = [
+    "REQUIRED_WORKFLOW_SCOPES",
     "ApiCredentials",
     "N8nApiClient",
     "N8nApiError",
     "OwnerSetup",
     "OwnerSetupError",
-    "REQUIRED_WORKFLOW_SCOPES",
     "SyncPolicy",
     "SyncReport",
     "SyncRunner",

@@ -38,8 +38,6 @@ class N8nApiClient:
     def list_workflows(self) -> list[dict[str, Any]]:
         """Return all workflows visible to the API key."""
         payload = self._request("GET", "/workflows")
-        if isinstance(payload, list):
-            return list(payload)
         return list(payload.get("data", []))
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
@@ -66,8 +64,6 @@ class N8nApiClient:
     def list_credentials(self) -> list[dict[str, Any]]:
         """Return all credentials; a missing list is treated as empty."""
         payload = self._request("GET", "/credentials", ignore_not_found=True)
-        if isinstance(payload, list):
-            return list(payload)
         return list(payload.get("data", []))
 
     def get_credential(self, credential_id: str) -> dict[str, Any]:
@@ -111,21 +107,32 @@ class N8nApiClient:
             }
         )
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        ignore_not_found: bool = False,
+    ) -> dict[str, Any]:
         """Perform an authenticated request and decode the JSON response.
+        The n8n internal endpoints return objects, never bare arrays (the
+        public list endpoints wrap arrays in a ``data`` key); ``dict`` is
+        therefore the accurate return type.
 
-        Supports an ``ignore_not_found`` kwarg that turns ``404`` into an empty
-        ``{}`` instead of raising, which several callers rely on.
+        ``ignore_not_found=True`` turns ``404`` into an empty ``{}`` instead of
+        raising, which several callers rely on.
         """
         headers = {"X-N8N-API-KEY": self.api_key, "Accept": "application/json"}
-        ignore_not_found = kwargs.pop("ignore_not_found", False)
         try:
             response = self.session.request(
                 method,
                 f"{self.base_url}{path}",
                 headers=headers,
                 timeout=self.timeout,
-                **kwargs,
+                json=json,
+                params=params,
             )
         except requests.RequestException as exc:
             raise N8nApiError(f"n8n request failed: {exc}") from exc

@@ -37,7 +37,7 @@ class GitError(RuntimeError):
 
 def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result."""
-    cmd = ["git"] + args
+    cmd = ["git", *args]
     try:
         result = subprocess.run(
             cmd,
@@ -47,15 +47,15 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.Co
             timeout=30,
         )
     except FileNotFoundError:
-        raise GitError("git is not installed or not found in PATH")
-    except subprocess.TimeoutExpired:
-        raise GitError(f"git {' '.join(args)} timed out")
+        raise GitError("git is not installed or not found in PATH") from None
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"git {' '.join(args)} timed out") from exc
     # Windows can surface other OS-level failures (PermissionError, broken pipe,
     # transient locks) when spawning git — report them all as a GitError so
     # diagnostic probes such as git_is_repo() degrade to "not a repo" instead
     # of leaking a raw exception into the caller.
     except OSError as exc:
-        raise GitError(f"git {' '.join(args)} could not be executed: {exc}")
+        raise GitError(f"git {' '.join(args)} could not be executed: {exc}") from exc
     if check and result.returncode != 0:
         stderr = result.stderr.strip()
         raise GitError(f"git {' '.join(args)} failed: {stderr}")
@@ -133,7 +133,7 @@ def git_commit(path: Path, message: str) -> bool:
     status = _run_git(["status", "--porcelain"], cwd=path)
     if not status.stdout.strip():
         return False
-    _run_git(_commit_identity_args(path) + ["commit", "-m", message], cwd=path)
+    _run_git([*_commit_identity_args(path), "commit", "-m", message], cwd=path)
     logger.info("Committed in %s: %s", path, message)
     return True
 
@@ -171,11 +171,15 @@ def git_push(path: Path) -> None:
 
 def git_has_unpushed_commits(path: Path) -> bool:
     """Return True if the repo has commits not yet pushed to any remote."""
-    result = _run_git(["log", "--branches", "--not", "--remotes", "--oneline"], cwd=path, check=False)
+    result = _run_git(
+        ["log", "--branches", "--not", "--remotes", "--oneline"], cwd=path, check=False
+    )
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def git_seed_remote(path: Path, remote_url: str, token: str, *, message: str = "n8n-launcher: initial") -> None:
+def git_seed_remote(
+    path: Path, remote_url: str, token: str, *, message: str = "n8n-launcher: initial"
+) -> None:
     """Seed a freshly created remote with the current branch, authenticating once.
 
     When the branch is still unborn (no commit yet), an initial commit is
@@ -190,7 +194,7 @@ def git_seed_remote(path: Path, remote_url: str, token: str, *, message: str = "
     head = _run_git(["rev-parse", "--verify", "HEAD"], cwd=path, check=False)
     if head.returncode != 0:
         git_add(path)
-        _run_git(_commit_identity_args(path) + ["commit", "--allow-empty", "-m", message], cwd=path)
+        _run_git([*_commit_identity_args(path), "commit", "--allow-empty", "-m", message], cwd=path)
     # Pushing without ``-u`` on purpose: ``-u`` would store the tokenized URL as
     # the branch's upstream in .git/config, persisting the credential. The
     # launcher always spells origin (or an explicit URL) for pull/push, so no
@@ -230,10 +234,19 @@ def git_pull(path: Path) -> None:
         # that case, so force the merge only when git asks for it.
         if "unrelated histories" not in detail and "no common ancestor" not in detail:
             raise
-        logger.warning("Unrelated histories detected for %s; pulling with --allow-unrelated-histories", path)
+        logger.warning(
+            "Unrelated histories detected for %s; pulling with --allow-unrelated-histories", path
+        )
         if branch:
             _run_git(
-                ["pull", "--rebase", "--autostash", "--allow-unrelated-histories", "origin", branch],
+                [
+                    "pull",
+                    "--rebase",
+                    "--autostash",
+                    "--allow-unrelated-histories",
+                    "origin",
+                    branch,
+                ],
                 cwd=path,
             )
         else:

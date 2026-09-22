@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from n8n_launcher.workspaces import ci
@@ -132,7 +134,10 @@ def test_missing_credentials_ignores_pinned_nodes(tmp_path: Path) -> None:
     export = write_export(
         tmp_path,
         "n8nPipelines/p.json",
-        [manual_trigger(), http_node("Pinned API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}})],
+        [
+            manual_trigger(),
+            http_node("Pinned API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}}),
+        ],
         pinData={"Pinned API": {}},
     )
 
@@ -143,7 +148,10 @@ def test_missing_credentials_reports_uncovered_nodes(tmp_path: Path) -> None:
     export = write_export(
         tmp_path,
         "n8nPipelines/p.json",
-        [manual_trigger(), http_node("Live API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}})],
+        [
+            manual_trigger(),
+            http_node("Live API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}}),
+        ],
     )
 
     assert ci.missing_credentials(export, set()) == ["API (httpRequest)"]
@@ -210,7 +218,10 @@ def test_workflow_eligibility_blocked_by_missing_credentials(tmp_path: Path) -> 
     export = write_export(
         tmp_path,
         "n8nPipelines/p.json",
-        [manual_trigger(), http_node("API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}})],
+        [
+            manual_trigger(),
+            http_node("API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}}),
+        ],
     )
     ok, reason = ci.workflow_eligibility(export, set())
     assert ok is False
@@ -221,7 +232,10 @@ def test_workflow_eligibility_ok_with_schedule_and_covered_credentials(tmp_path:
     export = write_export(
         tmp_path,
         "n8nPipelines/p.json",
-        [schedule_trigger(), http_node("API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}})],
+        [
+            schedule_trigger(),
+            http_node("API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}}),
+        ],
     )
     assert ci.workflow_eligibility(export, {"httpRequest/API"}) == (True, "")
 
@@ -230,9 +244,10 @@ def test_workflow_eligibility_ok_with_schedule_and_covered_credentials(tmp_path:
 
 
 def test_start_description_reports_manual_then_schedule_then_pinned(tmp_path: Path) -> None:
-    assert ci.start_description(
-        write_export(tmp_path, "a.json", [manual_trigger("Bouton")])
-    ) == "déclencheur manuel « Bouton »"
+    assert (
+        ci.start_description(write_export(tmp_path, "a.json", [manual_trigger("Bouton")]))
+        == "déclencheur manuel « Bouton »"
+    )
     assert ci.start_description(write_export(tmp_path, "b.json", [schedule_trigger()])) == (
         "déclencheur programmé"
     )
@@ -323,10 +338,11 @@ def test_rendered_scripts_compile_and_validate_static_exports(tmp_path: Path) ->
     for rel in (ci.VALIDATE_FILE, ci.RUNNER_FILE):
         py_compile.compile(root / rel, doraise=True)
 
-    result = __import__("subprocess").run(
-        ["python", str(root / ci.VALIDATE_FILE)],
+    result = subprocess.run(
+        [sys.executable, str(root / ci.VALIDATE_FILE)],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0
+    assert "SystemExit" not in result.stderr

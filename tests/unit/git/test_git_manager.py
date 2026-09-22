@@ -147,13 +147,18 @@ def test_git_commit_returns_false_when_nothing_to_commit(tmp_path: Path) -> None
         committed = git_commit(tmp_path, "message")
 
     assert committed is False
-    run.assert_called_once
+    run.assert_called_once()
 
 
 def test_git_commit_commits_staged_changes(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
-        side_effect=[completed(0, " M file.json\n"), completed(0, ""), completed(0, ""), completed()],
+        side_effect=[
+            completed(0, " M file.json\n"),
+            completed(0, ""),
+            completed(0, ""),
+            completed(),
+        ],
     ) as run:
         committed = git_commit(tmp_path, "sync workflows")
 
@@ -266,16 +271,18 @@ def test_git_pull_falls_back_on_unrelated_histories(tmp_path: Path) -> None:
 
 
 def test_git_pull_re_raises_other_errors(tmp_path: Path) -> None:
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        side_effect=[
-            completed(0, "origin\n"),
-            completed(0, "main\n"),
-            completed(1, "", "fatal: network error"),
-        ],
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            side_effect=[
+                completed(0, "origin\n"),
+                completed(0, "main\n"),
+                completed(1, "", "fatal: network error"),
+            ],
+        ),
+        pytest.raises(GitError, match="network error"),
     ):
-        with pytest.raises(GitError, match="network error"):
-            git_pull(tmp_path)
+        git_pull(tmp_path)
 
 
 def test_git_pull_skips_when_no_remote(tmp_path: Path) -> None:
@@ -382,46 +389,54 @@ def test_git_remove_remote_is_noop_when_missing(tmp_path: Path) -> None:
 
 
 def test_git_error_raised_on_failure(tmp_path: Path) -> None:
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        return_value=completed(128, "", "fatal: repository not found"),
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            return_value=completed(128, "", "fatal: repository not found"),
+        ),
+        pytest.raises(GitError) as excinfo,
     ):
-        with pytest.raises(GitError) as excinfo:
-            git_clone("https://bad.test/repo.git", tmp_path / "dest")
+        git_clone("https://bad.test/repo.git", tmp_path / "dest")
 
     assert "fatal: repository not found" in str(excinfo.value)
 
 
 def test_git_error_raised_when_git_missing(tmp_path: Path) -> None:
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        side_effect=FileNotFoundError(),
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            side_effect=FileNotFoundError(),
+        ),
+        pytest.raises(GitError),
     ):
-        with pytest.raises(GitError):
-            git_init(tmp_path)
+        git_init(tmp_path)
 
 
 def test_git_error_raised_on_timeout(tmp_path: Path) -> None:
     from subprocess import TimeoutExpired
 
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        side_effect=TimeoutExpired("git", 30),
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            side_effect=TimeoutExpired("git", 30),
+        ),
+        pytest.raises(GitError) as excinfo,
     ):
-        with pytest.raises(GitError) as excinfo:
-            git_init(tmp_path)
+        git_init(tmp_path)
 
     assert "timed out" in str(excinfo.value)
 
 
 def test_git_error_raised_on_os_error(tmp_path: Path) -> None:
     """OSError from subprocess.run (e.g. PermissionError on Windows) is converted to GitError."""
-    with patch(
-        "n8n_launcher.git.manager.subprocess.run",
-        side_effect=PermissionError(13, "Permission denied"),
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            side_effect=PermissionError(13, "Permission denied"),
+        ),
+        pytest.raises(GitError, match="could not be executed"),
     ):
-        with pytest.raises(GitError, match="could not be executed"):
-            git_init(tmp_path)
+        git_init(tmp_path)
 
 
 def test_git_is_repo_false_on_os_error(tmp_path: Path) -> None:

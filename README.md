@@ -48,26 +48,40 @@ exported pipelines as GitHub Actions tests, configured entirely from the GUI:
 
 ## Development
 
-Requires Python 3.12 or newer.
+Requires Python 3.12 or newer. The project uses **uv** as the single package
+manager; every command below runs inside the uv-managed virtualenv.
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -e '.[test]'
-pytest
+uv sync
+uv run pytest
+```
+
+Lint, format, and typecheck (Ruff + basedpyright + repo hooks). The single
+pre-commit command runs exactly what CI runs for static checks:
+
+```bash
+uv run pre-commit run --all-files
+```
+
+The underlying tools are also available directly if you want to run one alone:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run basedpyright
 ```
 
 Integration tests are opt-in:
 
 ```bash
-pytest -m integration
+uv run pytest -m integration
 ```
 
 Build the desktop distribution locally with:
 
 ```bash
-python -m pip install -e '.[packaging]'
-python scripts/build.py
+uv sync --group packaging
+uv run python scripts/build.py
 ```
 
 On macOS the onedir `.app` bundle embeds the app icon and a full `Info.plist`
@@ -134,6 +148,16 @@ prefer option 1.
 
 ## Releases
 
-Pushing to `main` automatically runs unit tests (blocker) and builds the per-OS distribution above. If `version` in `pyproject.toml` has been bumped, a GitHub Release `v<version>` is created with all three artifacts attached.
+The launcher version is a strict SemVer (`MAJOR.MINOR.PATCH`), defined in a
+single place — `__version__` in `src/n8n_launcher/__init__.py`. `pyproject.toml`
+inherits it (`dynamic = ["version"]`), `scripts/build.py` embeds it into the
+bundle and `platform/updater.py` compares it against GitHub releases, so a bump
+never goes out of sync.
+
+Releases are published **only from `main`**. When a push to `main` carries a
+new source version, the release workflow tags it (`v<version>`), runs the tests,
+builds the per-OS distribution above and attaches all three artifacts to a
+GitHub Release. Pushes that do not change the version are skipped, so there is
+no automatic bumping and no release spam from `dev` or feature branches.
 
 The launcher is independent of the source repository that inspired some of its API and workflow-sync boundaries. It does not reuse that repository's weather database schema, runtime state, or Docker sync service.

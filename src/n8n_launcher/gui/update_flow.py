@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import threading
 import tkinter as tk
 import webbrowser
+from collections.abc import Callable
+from pathlib import Path
 from tkinter import messagebox
-from typing import Callable
+from typing import cast
 
 from ..core.paths import updates_dir
 from ..platform import updater
+from ..platform.updater import Asset, Release
 from .theme import ACCENT
 
 
@@ -29,7 +33,7 @@ class UpdateController:
         root: tk.Tk,
         events: queue.Queue,
         set_status: Callable[[str], None],
-        status_label: tk.Label,
+        status_label: tk.Label | None,
         is_closed: Callable[[], bool],
         finish_close: Callable[[], None],
     ) -> None:
@@ -43,10 +47,8 @@ class UpdateController:
     def setup(self) -> None:
         """Schedule the launch-time check when the app runs from a bundle."""
         if updater.install_target() is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._root.after(1500, self.check)
-            except Exception:
-                pass
 
     def check(self) -> None:
         """Kick off the update check on a background thread (never blocks launch)."""
@@ -81,7 +83,7 @@ class UpdateController:
         else:
             self._events.put((lambda: self._show_link(release), None))
 
-    def _show_link(self, release) -> None:
+    def _show_link(self, release: Release) -> None:
         """Point the status bar at the release page when the app is not writable.
 
         Clicking the message opens ``releases/latest`` in the browser; the
@@ -89,18 +91,17 @@ class UpdateController:
         """
         if self._is_closed():
             return
-        self._set_status(
-            f"Nouvelle version {release.tag_name} disponible — cliquer pour ouvrir"
-        )
+        self._set_status(f"Nouvelle version {release.tag_name} disponible — cliquer pour ouvrir")
+        label = self._status_label
+        if label is None:
+            return
         try:
-            self._status_label.config(cursor="hand2", fg=ACCENT)
-            self._status_label.bind(
-                "<Button-1>", lambda _event: webbrowser.open(updater.release_page_url())
-            )
+            label.config(cursor="hand2", fg=ACCENT)
+            label.bind("<Button-1>", lambda _event: webbrowser.open(updater.release_page_url()))
         except Exception:
             pass
 
-    def _offer(self, release, asset) -> None:
+    def _offer(self, release: Release, asset: Asset) -> None:
         if self._is_closed():
             return
         if not messagebox.askyesno(
@@ -121,7 +122,7 @@ class UpdateController:
             daemon=True,
         ).start()
 
-    def _download(self, asset, dest) -> None:
+    def _download(self, asset: Asset, dest: Path) -> None:
         """Stream the asset to ``dest`` and report a throttle progress message."""
         last_megabyte = 0
 
@@ -140,23 +141,19 @@ class UpdateController:
                 )
 
         try:
-            updater.download_asset(
-                asset.url, dest, expected_size=asset.size, progress=progress
-            )
+            updater.download_asset(asset.url, dest, expected_size=asset.size, progress=progress)
         except Exception as exc:
             message = f"Téléchargement impossible : {exc}"
             self._events.put(
                 (
-                    lambda: messagebox.showerror(
-                        "Mise à jour", message, parent=self._root
-                    ),
+                    lambda: messagebox.showerror("Mise à jour", message, parent=self._root),
                     None,
                 )
             )
             return
         self._events.put((lambda: self._confirm_install(dest), None))
 
-    def _confirm_install(self, dest) -> None:
+    def _confirm_install(self, dest: Path) -> None:
         if self._is_closed():
             return
         if not messagebox.askyesno(
@@ -169,7 +166,11 @@ class UpdateController:
             return
         try:
             target = updater.install_target()
-            script = updater.installer_script(dest, target)
+            # check() is only planned (and the worker only ever offers an
+            # update) when install_target() is not None, so target cannot be
+            # None at this point; the cast lets the None case keep flowing into
+            # installer_script's own failure path exactly as before.
+            script = updater.installer_script(dest, cast("Path", target))
             updater.spawn_installer(script)
         except Exception as exc:
             messagebox.showerror("Mise à jour", str(exc), parent=self._root)
