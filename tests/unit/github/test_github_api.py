@@ -144,6 +144,97 @@ def test_request_wraps_network_errors() -> None:
         client.github_owner()
 
 
+# --- Repository discovery (linked-account clone picker) -----------------------
+
+
+def test_list_user_repos_returns_filtered_payload() -> None:
+    url = "https://api.github.com/user/repos"
+    session = FakeSession(
+        {
+            ("GET", url): FakeResponse(
+                200,
+                [
+                    {"full_name": "octo/flows", "private": True},
+                    "not-a-dict",
+                    {"full_name": "octo/other", "private": False},
+                ],
+            )
+        }
+    )
+    client = GitHubClient("ghp_token", session=session)
+
+    repos = client.list_user_repos()
+
+    assert repos == [
+        {"full_name": "octo/flows", "private": True},
+        {"full_name": "octo/other", "private": False},
+    ]
+    method, _url, kwargs = session.calls[0]
+    assert method == "GET"
+    assert kwargs["params"]["per_page"] == "100"
+    assert kwargs["params"]["affiliation"] == "owner,collaborator,organization_member"
+    assert kwargs["headers"]["Authorization"] == "Bearer ghp_token"
+
+
+def test_list_user_repos_rejects_object_payload() -> None:
+    url = "https://api.github.com/user/repos"
+    session = FakeSession({("GET", url): FakeResponse(200, {"total_count": 2})})
+    client = GitHubClient("ghp_token", session=session)
+
+    with pytest.raises(GitHubError):
+        client.list_user_repos()
+
+
+def test_list_user_repos_raises_with_status_on_401() -> None:
+    url = "https://api.github.com/user/repos"
+    session = FakeSession({("GET", url): FakeResponse(401, {"message": "Bad credentials"})})
+    client = GitHubClient("ghp_token", session=session)
+
+    with pytest.raises(GitHubError) as excinfo:
+        client.list_user_repos()
+
+    assert excinfo.value.status_code == 401
+    assert "Bad credentials" in str(excinfo.value)
+
+
+def test_list_repo_branches_sorted_and_deduped() -> None:
+    url = "https://api.github.com/repos/octo/repo/branches"
+    session = FakeSession(
+        {
+            ("GET", url): FakeResponse(
+                200,
+                [
+                    {"name": "main"},
+                    {"name": "feature/x"},
+                    "not-a-dict",
+                    {"name": "main"},
+                    {"name": ""},
+                ],
+            )
+        }
+    )
+    client = GitHubClient("ghp_token", session=session)
+
+    assert client.list_repo_branches("octo/repo") == ["feature/x", "main"]
+    _method, _url, kwargs = session.calls[0]
+    assert kwargs["params"]["per_page"] == "100"
+
+
+def test_list_repo_branches_wraps_network_errors() -> None:
+    session = FakeSession({})
+    client = GitHubClient("ghp_token", session=session)
+
+    def boom(*_args, **_kwargs):
+        raise requests.Timeout("slow")
+
+    session.request = boom
+
+    with pytest.raises(GitHubError) as excinfo:
+        client.list_repo_branches("octo/repo")
+
+    assert "requête GitHub impossible" in str(excinfo.value)
+
+
 # --- CI inspection (runs / jobs / logs) --------------------------------------
 
 

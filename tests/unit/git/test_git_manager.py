@@ -23,6 +23,7 @@ from n8n_launcher.git import (
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
+    tokenize_remote_url,
 )
 from n8n_launcher.git.manager import git_current_branch
 
@@ -389,6 +390,23 @@ def test_git_remove_remote_is_noop_when_missing(tmp_path: Path) -> None:
         git_remove_remote(tmp_path, "origin")
 
     assert run.call_args.args[0] == ["git", "remote", "remove", "origin"]
+
+
+def test_tokenize_remote_url_embeds_token() -> None:
+    assert (
+        tokenize_remote_url("https://github.com/octo/flows.git", "ghp_secret")
+        == "https://ghp_secret@github.com/octo/flows.git"
+    )
+    assert (
+        tokenize_remote_url("https://a.test/repo.git", "t0k!n") == "https://t0k%21n@a.test/repo.git"
+    )
+
+
+def test_tokenize_remote_url_rejects_non_https() -> None:
+    with pytest.raises(GitError):
+        tokenize_remote_url("git@github.com:octo/flows.git", "ghp_secret")
+    with pytest.raises(GitError):
+        tokenize_remote_url("ssh://git@example.test/flows.git", "ghp_secret")
 
 
 def test_git_error_raised_on_failure(tmp_path: Path) -> None:

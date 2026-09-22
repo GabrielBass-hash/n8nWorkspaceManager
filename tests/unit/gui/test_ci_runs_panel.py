@@ -183,6 +183,27 @@ def test_apply_replaces_previous_rows() -> None:
         assert panel.tree.get_children() == ["run-13"]
 
 
+def test_apply_noops_on_destroyed_panel() -> None:
+    # The real-runs reproduction: a background fetch delivered while the CI
+    # dialog was being closed calls apply() on a frame whose interpreter is
+    # gone — every tree op would raise ``TclError: invalid command name``.
+    # apply() must bail out quietly instead of touching the dead widgets.
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(_snapshot(runs=[_run(11)]))
+        assert panel.tree.get_children() == ["run-11"]
+
+        panel.destroy()
+        panel.apply(_snapshot(runs=[_run(12)]))
+
+        # No new rows were rendered after destruction.
+        assert panel.tree.get_children() == ["run-11"]
+
+
 def test_refresh_forwards_to_host_callback() -> None:
     with (
         fake_runs_panel_bases(),

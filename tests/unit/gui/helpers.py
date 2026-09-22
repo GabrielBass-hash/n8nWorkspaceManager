@@ -36,11 +36,18 @@ class FakeTk:
             self.destroyed = True
             self.children.clear()
 
+        def winfo_exists(self) -> int:
+            """Mirror Tk: report 0 as soon as ``destroy`` has run."""
+            return 0 if self.destroyed else 1
+
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
 
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
+
+        def place_forget(self) -> None:
+            self._place_options = None
 
     class Label:
         def __init__(self, parent, **kwargs):
@@ -64,8 +71,20 @@ class FakeTk:
         def unbind(self, sequence: str) -> None:
             self._bindings.pop(sequence, None)
 
+        def winfo_rootx(self) -> int:
+            return 0
+
+        def winfo_rooty(self) -> int:
+            return 0
+
+        def winfo_height(self) -> int:
+            return 0
+
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
+
+        def place_forget(self) -> None:
+            self._place_options = None
 
     class Button:
         def __init__(self, parent, **kwargs):
@@ -101,7 +120,8 @@ class FakeTk:
             return self._window_id
 
         def itemconfigure(self, _item_id, **kwargs) -> None:
-            self._item_kwargs = dict(kwargs)
+            existing = getattr(self, "_item_kwargs", {})
+            self._item_kwargs = {**existing, **kwargs}
 
         def yview_scroll(self, _n: int, _what: str) -> None:
             self.scrolled += 1
@@ -176,6 +196,9 @@ class FakeTk:
             # Pending ``after`` timers, keyed by id (tests drive them manually).
             self._after_callbacks: list[tuple[int, object]] = []
             FakeTk.Toplevel.instances.append(self)
+
+        def wm_overrideredirect(self, _value: bool) -> None:
+            pass
 
         def title(self, _value: str) -> None:
             pass

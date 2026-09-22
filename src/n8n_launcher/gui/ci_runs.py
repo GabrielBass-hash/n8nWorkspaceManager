@@ -243,7 +243,20 @@ class RunsPanel(tk.Frame):
         return f"run-{run.id}"
 
     def apply(self, snapshot: ci_runs.RunsSnapshot) -> None:
-        """Render *snapshot*, preserving the user's job-level expansion."""
+        """Render *snapshot*, preserving the user's job-level expansion.
+
+        The panel can be hosted in a CI dialog that is closed while a
+        background fetch is in flight; a stale snapshot landing after the
+        dialog's destruction must not touch Tk widgets belonging to a dead
+        interpreter path (``TclError: invalid command name …``). The ``apply``
+        is re-entered on the main thread only, so checking existence up front
+        is enough — no destroy can interleave mid-render.
+        """
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
         self._last = snapshot
         self._summary.config(text=runs_summary_text(snapshot))
 

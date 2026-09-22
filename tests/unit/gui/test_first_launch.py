@@ -1,11 +1,33 @@
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+from helpers import FakeRoot
 
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig
-from n8n_launcher.gui.first_launch import SetupWizardError, run_first_launch
+from n8n_launcher.gui.first_launch import (
+    SetupWizardError,
+    run_first_launch,
+    run_interactive_first_launch,
+)
+
+
+def test_interactive_first_launch_registers_fonts_on_root() -> None:
+    # A caller-supplied root (the app's own) must still get the named UI fonts
+    # registered on it; the wizard cancel path exits right after, so nothing
+    # else can run on top of a root whose fonts are missing.
+    store = ConfigStore(Path("/tmp/unused-config.json"))
+    docker = MagicMock()
+    root = FakeRoot()
+
+    with (
+        patch("n8n_launcher.gui.first_launch.configure_fonts") as fonts,
+        patch("n8n_launcher.gui.first_launch.simpledialog.askstring", return_value=None),
+    ):
+        assert run_interactive_first_launch(store, docker, root=root) is None
+
+    fonts.assert_called_once_with(root)
 
 
 def test_first_launch_checks_docker_saves_config_and_installs_shortcut(tmp_path: Path) -> None:

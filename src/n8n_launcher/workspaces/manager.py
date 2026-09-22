@@ -42,6 +42,7 @@ from ..git import (
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
+    tokenize_remote_url,
 )
 from ..n8n.api import N8nApiClient, N8nApiError
 from ..n8n.owner import OwnerSetup
@@ -192,6 +193,7 @@ class WorkspaceManager:
         db: DbConfig | None = None,
         port: int | None = None,
         n8n_version: str = "2.40.0",
+        token: str | None = None,
     ) -> Workspace:
         """Clone *url* into *dest* and register the result as a workspace.
 
@@ -202,6 +204,11 @@ class WorkspaceManager:
         and the git remote is recorded so the auto-pull/auto-push flows work
         immediately. When *db* is omitted, a cloned ``db/`` layout means MANAGED,
         exactly like :meth:`create`.
+
+        When *token* is provided the clone authenticates with a one-shot
+        tokenized URL, then ``origin`` is rewritten to the clean *url* so the
+        credential never lands in ``.git/config`` — the same discipline as
+        :func:`git/manager.py::git_seed_remote` for created repos.
         """
         workflows_dir = Path(dest)
         if workflows_dir.exists() and any(workflows_dir.iterdir()):
@@ -209,7 +216,13 @@ class WorkspaceManager:
                 f"Le dossier « {workflows_dir} » n'est pas vide : clonez dans un dossier vide."
             )
         workflows_dir.parent.mkdir(parents=True, exist_ok=True)
-        git_pull_new_repo(url, workflows_dir, branch=branch)
+
+        clone_url = tokenize_remote_url(url, token) if token else url
+        git_pull_new_repo(clone_url, workflows_dir, branch=branch)
+        if token:
+            # ``git clone`` wrote the tokenized URL into origin; put the clean
+            # URL back so ``git push`` from the workspace never leaks the token.
+            git_set_remote_url(workflows_dir, "origin", url)
 
         if db is None:
             db = (

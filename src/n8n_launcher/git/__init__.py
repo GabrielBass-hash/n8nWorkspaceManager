@@ -24,6 +24,7 @@ from .manager import (
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
+    tokenize_remote_url,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "git_remote_url",
     "git_remove_remote",
     "git_set_remote_url",
+    "tokenize_remote_url",
 ]
