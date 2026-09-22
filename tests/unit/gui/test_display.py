@@ -183,8 +183,8 @@ def test_git_row_label_maps_status() -> None:
     assert git_row_label(GitRowStatus()) == "git"
     assert git_row_label(GitRowStatus(is_repo=True)) == "git"
     assert git_row_label(GitRowStatus(is_repo=True, dirty=True)) == "git"
-    assert git_row_label(GitRowStatus(is_repo=True, diverged=True)) == "git ⇅"
-    assert git_row_label(GitRowStatus(is_repo=True, push_failed=True)) == "git ✗"
+    assert git_row_label(GitRowStatus(is_repo=True, diverged=True)) == "git <>"
+    assert git_row_label(GitRowStatus(is_repo=True, push_failed=True)) == "git KO"
 
 
 def test_git_row_status_tooltip() -> None:

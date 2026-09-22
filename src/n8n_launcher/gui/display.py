@@ -100,9 +100,9 @@ def git_row_label(status: GitRowStatus) -> str:
     if not status.is_repo:
         return "git"
     if status.push_failed:
-        return "git ✗"
+        return "git KO"  # ASCII: ✗ (U+2717) is absent from Linux UI fonts
     if status.diverged:
-        return "git ⇅"
+        return "git <>"  # ASCII: ⇅ (U+21C5) is absent from Linux UI fonts
     return "git"
 
 
