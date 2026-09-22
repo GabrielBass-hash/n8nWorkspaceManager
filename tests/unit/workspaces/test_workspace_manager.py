@@ -1234,9 +1234,7 @@ def test_clone_from_git_defaults_to_managed_when_db_layout_present(tmp_path: Pat
     def fake_clone(url, path, *, branch=None):
         path.mkdir(parents=True, exist_ok=True)
         (path / "db" / "migrations").mkdir(parents=True)
-        (path / "db" / "migrations" / "001-init.sql").write_text(
-            "select 1;", encoding="utf-8"
-        )
+        (path / "db" / "migrations" / "001-init.sql").write_text("select 1;", encoding="utf-8")
 
     with (
         patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone),
