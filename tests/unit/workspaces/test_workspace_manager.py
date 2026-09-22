@@ -1189,3 +1189,107 @@ def test_set_github_token_treats_empty_string_as_clear(tmp_path: Path) -> None:
     launcher.set_github_token("")
 
     assert store.load().github_token is None
+
+
+def test_clone_from_git_clones_and_registers(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    dest = tmp_path / "repo-clone"
+
+    def fake_clone(url, path, *, branch=None):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "n8nPipelines").mkdir(exist_ok=True)
+        (path / "flow.json").write_text('{"name": "x", "nodes": []}', encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone) as clone,
+        patch(
+            "n8n_launcher.workspaces.manager.git_current_branch",
+            return_value="develop",
+        ),
+        patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5680),
+        patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
+    ):
+        workspace = launcher.clone_from_git(
+            "https://example.test/repo.git",
+            dest,
+            name="Imported",
+            branch="develop",
+        )
+
+    clone.assert_called_once_with("https://example.test/repo.git", dest, branch="develop")
+    assert workspace.name == "Imported"
+    assert workspace.workflows_dir == dest
+    assert workspace.git.enabled is True
+    assert workspace.git.remote_url == "https://example.test/repo.git"
+    assert workspace.git.branch == "develop"
+    assert workspace.db.mode is DbMode.NONE
+    assert (dest / "n8nPipelines").is_dir()
+    assert store.load().workspaces == [workspace]
+
+
+def test_clone_from_git_defaults_to_managed_when_db_layout_present(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    dest = tmp_path / "repo-with-db"
+
+    def fake_clone(url, path, *, branch=None):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "db" / "migrations").mkdir(parents=True)
+        (path / "db" / "migrations" / "001-init.sql").write_text("select 1;", encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="main"),
+        patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5681),
+    ):
+        workspace = launcher.clone_from_git("https://example.test/repo.git", dest)
+
+    assert workspace.db.mode is DbMode.MANAGED
+    assert workspace.db.password
+    assert (dest / "db" / "schema.sql").is_file()
+
+
+def test_clone_from_git_rejects_non_empty_folder(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    dest = tmp_path / "not-empty"
+    dest.mkdir()
+    (dest / "existing.txt").write_text("hi", encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo") as clone,
+        pytest.raises(WorkspaceError, match="n'est pas vide"),
+    ):
+        launcher.clone_from_git("https://example.test/repo.git", dest)
+
+    clone.assert_not_called()
+
+
+def test_clone_from_git_propagates_git_error(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.git_pull_new_repo",
+            side_effect=GitError("fatal: repository not found"),
+        ),
+        pytest.raises(GitError, match="repository not found"),
+    ):
+        launcher.clone_from_git("https://bad.test/repo.git", tmp_path / "dest")
+
+
+def test_clone_from_git_explicit_db_overrides_detection(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    dest = tmp_path / "repo"
+    chosen = DbConfig(DbMode.NONE)
+
+    def fake_clone(url, path, *, branch=None):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "db" / "migrations").mkdir(parents=True)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="main"),
+        patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5682),
+    ):
+        workspace = launcher.clone_from_git("https://example.test/repo.git", dest, db=chosen)
+
+    assert workspace.db.mode is DbMode.NONE

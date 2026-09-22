@@ -304,3 +304,51 @@ def _current_branch(path: Path) -> str:
     """
     result = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=path, check=False)
     return result.stdout.strip()
+
+
+def git_list_remote_branches(url: str, *, cwd: Path | None = None) -> list[str]:
+    """List the branches available at *url* without cloning it.
+
+    Uses ``git ls-remote --heads`` so callers can present a picker of the
+    repositories/branches offered by a remote before pulling a brand-new
+    repository into the workspace. The URL is passed verbatim, so it works
+    for HTTPS, SSH and local-path remotes, and no credentials are required
+    for public remotes. Results are de-duplicated and sorted.
+    """
+    # ls-remote does not require a repo, but _run_git needs a cwd.
+    result = _run_git(["ls-remote", "--heads", url], cwd=cwd or Path.cwd())
+    prefix = "refs/heads/"
+    branches: set[str] = set()
+    for line in result.stdout.splitlines():
+        _, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if ref.startswith(prefix):
+            branches.add(ref[len(prefix) :])
+    return sorted(branches)
+
+
+def git_pull_new_repo(url: str, dest: Path, *, branch: str | None = None) -> None:
+    """Clone (pull for the first time) a repository into *dest*.
+
+    Optionally selects a specific *branch* — typically one returned by
+    :func:`git_list_remote_branches` — so the launcher can let a user pick
+    which available repository to bring into the workspace. *dest* must not
+    already contain a repository; use :func:`git_pull` for an existing one.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    args = ["clone"]
+    if branch:
+        args += ["--branch", branch]
+    args += [url, str(dest)]
+    _run_git(args, cwd=dest.parent)
+    logger.info(
+        "Pulled new repo %s%s into %s",
+        url,
+        f" (branch {branch})" if branch else "",
+        dest,
+    )
+
+
+def git_current_branch(path: Path) -> str:
+    """Return the active branch name (public alias of :func:`_current_branch`)."""
+    return _current_branch(path)

@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..core.config import ConfigStore
-from ..core.models import AppConfig, DbConfig, DbMode, Workspace, WorkspaceState
+from ..core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
 from ..core.paths import compose_file
 from ..database import (
     DATA_DATABASE,
@@ -21,6 +21,7 @@ from ..database import (
     MigrationRunner,
     configure_db_credential,
     detect_migrations,
+    has_db_layout,
 )
 from ..docker.compose import write_compose
 from ..docker.manager import DockerManager, parse_compose_status
@@ -30,11 +31,13 @@ from ..git import (
     git_add,
     git_add_remote,
     git_commit,
+    git_current_branch,
     git_has_remote,
     git_has_unpushed_commits,
     git_init,
     git_is_repo,
     git_pull,
+    git_pull_new_repo,
     git_push,
     git_remote_url,
     git_remove_remote,
@@ -166,6 +169,71 @@ class WorkspaceManager:
             workflows_dir=workflows_dir,
             port=selected_port,
             db=db,
+            n8n_version=n8n_version,
+        )
+
+        def append(config: AppConfig) -> Workspace:
+            # Re-check under the lock: a concurrent creation may have claimed
+            # the port suggested from an earlier snapshot.
+            if workspace.port in {item.port for item in config.workspaces}:
+                raise WorkspaceError(f"Port is already used by another workspace: {workspace.port}")
+            config.workspaces.append(workspace)
+            return workspace
+
+        return self.store.mutate(append)
+
+    def clone_from_git(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        name: str | None = None,
+        branch: str | None = None,
+        db: DbConfig | None = None,
+        port: int | None = None,
+        n8n_version: str = "2.40.0",
+    ) -> Workspace:
+        """Clone *url* into *dest* and register the result as a workspace.
+
+        Unlike :meth:`create`, the folder is produced by ``git clone`` — nothing
+        is scaffolded before the clone runs, and *dest* must be empty (or
+        missing). After a successful clone the launcher's folders are created
+        idempotently (``n8nPipelines/``, and ``db/migrations/`` in managed mode)
+        and the git remote is recorded so the auto-pull/auto-push flows work
+        immediately. When *db* is omitted, a cloned ``db/`` layout means MANAGED,
+        exactly like :meth:`create`.
+        """
+        workflows_dir = Path(dest)
+        if workflows_dir.exists() and any(workflows_dir.iterdir()):
+            raise WorkspaceError(
+                f"Le dossier « {workflows_dir} » n'est pas vide : clonez dans un dossier vide."
+            )
+        workflows_dir.parent.mkdir(parents=True, exist_ok=True)
+        git_pull_new_repo(url, workflows_dir, branch=branch)
+
+        if db is None:
+            db = (
+                self._managed_db_config() if has_db_layout(workflows_dir) else DbConfig(DbMode.NONE)
+            )
+        if db.mode is DbMode.MANAGED and not db.password:
+            db = self._managed_db_config()
+        self._scaffold(workflows_dir, db)
+
+        reserved = {workspace.port for workspace in self.store.load().workspaces}
+        selected_port = port or suggest_port(reserved=reserved)
+        if selected_port in reserved:
+            raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
+
+        # ``git clone`` may have picked a default branch other than "main": read
+        # it back so the recorded GitConfig matches reality.
+        effective_branch = git_current_branch(workflows_dir) or branch or "main"
+        workspace = Workspace(
+            id=uuid4().hex[:8],
+            name=(name or workflows_dir.name).strip(),
+            workflows_dir=workflows_dir,
+            port=selected_port,
+            db=db,
+            git=GitConfig(enabled=True, remote_url=url, branch=effective_branch),
             n8n_version=n8n_version,
         )
 
