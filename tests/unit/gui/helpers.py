@@ -1,6 +1,6 @@
 """Shared fakes and helpers for the GUI unit tests."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import ClassVar
 
@@ -25,6 +25,13 @@ class FakeTk:
         def pack(self, *_args, **_kwargs) -> None:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
+            self.packed = True
+
+        def pack_forget(self) -> None:
+            self.packed = False
+            self.children.clear()
+            with suppress(ValueError):
+                self._parent.children.remove(self)
 
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
