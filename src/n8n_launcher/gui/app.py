@@ -181,6 +181,10 @@ class LauncherApp:
         self._closing = False
         self._closed = False
         self._poll_in_flight = False
+        # Re-entrancy guard for the creation wizard: a double-click on the
+        # list's free area fires two ``Button-1`` events and must open the
+        # dialog only once.
+        self._creating = False
         self._rows: dict[str, tuple[RowFrame, tk.Label]] = {}
         self._row_order: list[str] = []
         self._selected_id: str | None = None
@@ -405,7 +409,7 @@ class LauncherApp:
             0, 0, window=self.workspace_list, anchor="nw"
         )
         self.workspace_list.bind("<Return>", lambda _event: self.launch_selected())
-        self.workspace_list.bind("<Button-1>", self._on_empty_area_click)
+        self.workspace_list.bind("<Button-1>", self._on_list_click)
 
         # Scrolling with the mouse wheel only (no visible scrollbar): bindings
         # on the list also fire for wheel events over its child rows, so both
@@ -415,8 +419,13 @@ class LauncherApp:
             widget.bind("<Button-4>", self._on_wheel_linux)
             widget.bind("<Button-5>", self._on_wheel_linux)
         self._list_canvas.bind("<Configure>", self._on_canvas_resize)
+        # The canvas owns the dead zone *below* the last row (the inner frame's
+        # height collapses to the rows' own height), so it needs the creation
+        # binding too — otherwise that visible free area swallows clicks.
+        self._list_canvas.bind("<Button-1>", self._on_list_click)
 
         self._empty_state = self._build_empty_state()
+        self._create_affordance = self._build_create_affordance()
         self._toggle_empty_state()
 
         self._menu = tk.Menu(self.root, tearoff=0)
@@ -534,19 +543,48 @@ class LauncherApp:
             with contextlib.suppress(Exception):
                 widget.config(bg=SURFACE_HOVER)
 
-    def _toggle_empty_state(self) -> None:
-        """Show the creation card only while the workspace list is empty.
+    def _build_create_affordance(self) -> tk.Frame:
+        """Build the quiet "+" strip appended under the last workspace row.
 
-        The canvas window keeps an explicit height while empty so the card is
-        centered in the visible area; once rows exist the height must be reset
-        to ``0`` so Tk falls back to the content's own requested height.
+        Once rows exist the big empty-state card is hidden, so this strip is
+        the only visible hint that the free area is clickable. It is *not*
+        packed here: ``_toggle_empty_state`` packs it after the freshly rebuilt
+        rows on every refresh, which keeps it last (and therefore centered in
+        the space under the last row, scrolling with the content).
+        """
+        strip = tk.Frame(self.workspace_list, bg=SURFACE)
+        badge = tk.Label(
+            strip,
+            text="+",
+            bg=SURFACE,
+            fg=TEXT_MUTED,
+            font=FONT_EMPTY_BADGE,
+        )
+        badge.pack(anchor="center", padx=8, pady=6)
+        for widget in (strip, badge):
+            widget.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
+            with contextlib.suppress(Exception):
+                widget.config(cursor="hand2")
+        return strip
+
+    def _toggle_empty_state(self) -> None:
+        """Swap the big empty-state card and the quiet "+" strip.
+
+        The card shows only while the list is empty (the canvas window keeps an
+        explicit height so the card is centered); once rows exist the height is
+        reset to ``0`` so Tk falls back to the content's own requested height,
+        and the "+" strip is re-packed after the rebuilt rows — forgetting it
+        first so a refresh never leaves it stranded above the new rows.
         """
         if not self._row_order:
             self._empty_state.place(relx=0.5, rely=0.5, anchor="center")
+            self._create_affordance.pack_forget()
         else:
             self._empty_state.place_forget()
             with contextlib.suppress(Exception):
                 self._list_canvas.itemconfigure(self._list_window, height=0)
+            self._create_affordance.pack_forget()
+            self._create_affordance.pack(fill="x", padx=3, pady=(8, 6))
 
     def _build_row(self, workspace: Workspace) -> tuple[RowFrame, tk.Label]:
         if workspace.id == self._selected_id:
@@ -872,14 +910,15 @@ class LauncherApp:
     def _on_row_leave(self, workspace_id: str) -> None:
         self._set_row_background(workspace_id, hover=False)
 
-    def _on_empty_area_click(self, _event: tk.Event) -> None:
-        """Open the creation dialog only when the list is empty; otherwise deselect."""
-        if not self._row_order:
-            self.prompt_create_workflow()
-        else:
-            self._selected_id = None
-            self._apply_selection_styles()
-            self.set_status("")
+    def _on_list_click(self, _event: tk.Event) -> None:
+        """Open the creation wizard from any click on the list's free area.
+
+        Covers the frame's row gaps, the canvas dead zone under the last row
+        and the "+" strip: clicking empty space always means "create" — there
+        is no background deselection anymore. Row internals keep their own
+        bindings (select / launch / context menu) and never reach here.
+        """
+        self.prompt_create_workflow()
 
     def _apply_selection_styles(self) -> None:
         for workspace_id in self._rows:
@@ -943,21 +982,32 @@ class LauncherApp:
             self._menu.tk_popup(event.x_root, event.y_root)
 
     def prompt_create_workflow(self) -> None:
-        """Ask the source first, then route to the matching creation flow."""
-        source = prompt_create_source(self.root)
-        if source is None:
+        """Ask the source first, then route to the matching creation flow.
+
+        Guarded against re-entrancy: a double-click on the free area fires two
+        ``Button-1`` events, and the second must not open a second wizard while
+        the first one is still waiting on its dialog.
+        """
+        if self._creating:
             return
-        if source == "clone":
-            self._clone_workspace_flow()
-            return
-        workflows_dir = prompt_create_dir(self.root)
-        if workflows_dir is None:
-            return
-        default_db = default_creation_db(workflows_dir)
-        plan = prompt_create_plan(self.root, workflows_dir, default_db)
-        if plan is None:
-            return
-        self._create_from_plan(plan, workflows_dir)
+        self._creating = True
+        try:
+            source = prompt_create_source(self.root)
+            if source is None:
+                return
+            if source == "clone":
+                self._clone_workspace_flow()
+                return
+            workflows_dir = prompt_create_dir(self.root)
+            if workflows_dir is None:
+                return
+            default_db = default_creation_db(workflows_dir)
+            plan = prompt_create_plan(self.root, workflows_dir, default_db)
+            if plan is None:
+                return
+            self._create_from_plan(plan, workflows_dir)
+        finally:
+            self._creating = False
 
     def _clone_workspace_flow(self) -> None:
         """Clone a repo into a new workspace.

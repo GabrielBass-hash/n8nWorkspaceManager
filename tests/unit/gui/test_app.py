@@ -341,6 +341,27 @@ def test_empty_state_hidden_when_rows_exist(app) -> None:
     assert app.app._empty_state._place_options is None
 
 
+def test_create_affordance_shown_when_rows_exist(app) -> None:
+    app.app.refresh()
+
+    assert app.app._create_affordance.packed is True
+
+
+def test_create_affordance_hidden_when_list_empty(app) -> None:
+    app.manager.list.return_value = []
+    app.app.refresh()
+
+    assert app.app._create_affordance.packed is False
+
+
+def test_create_affordance_stays_below_rows_after_refresh(app) -> None:
+    app.app.refresh()
+    app.app.refresh()
+
+    assert app.app._create_affordance.packed is True
+    assert app.app.workspace_list.children[-1] is app.app._create_affordance
+
+
 def test_empty_state_claims_canvas_height_when_no_rows(app) -> None:
     app.manager.list.return_value = []
     app.app.refresh()
@@ -452,6 +473,27 @@ def test_no_auto_prompt_on_empty_list(gui_mocks, tmp_path) -> None:
     LauncherApp(store, manager, MagicMock(), root=root, browser_opener=MagicMock())
 
     assert not any(delay == 150 for delay, _ in root.after_callbacks)
+
+
+def test_create_workflow_guards_reentrant_click(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    launcher = LauncherApp(
+        store, MagicMock(), MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+    )
+
+    calls = 0
+
+    def source(root) -> None:
+        nonlocal calls
+        calls += 1
+        launcher.prompt_create_workflow()
+        return None
+
+    with patch("n8n_launcher.gui.app.prompt_create_source", side_effect=source):
+        launcher.prompt_create_workflow()
+
+    assert calls == 1
 
 
 def test_state_poll_runs_reconcile_and_reschedules(gui_mocks, tmp_path) -> None:
