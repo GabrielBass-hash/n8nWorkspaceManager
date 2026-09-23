@@ -21,6 +21,9 @@ workspaces/
 !src/n8n_launcher/workspaces/
 !tests/unit/workspaces/
 
+# Local structural snapshots for the parity test
+artifacts/
+
 # IDE
 .vscode/
 .idea/

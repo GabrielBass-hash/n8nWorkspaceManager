@@ -107,7 +107,7 @@ class UpdateController:
         if not messagebox.askyesno(
             "Mise à jour disponible",
             f"Une nouvelle version de n8n Launcher est disponible :\n\n"
-            f"{updater.current_version()} → {release.tag_name}\n\n"
+            f"{updater.current_version()} -> {release.tag_name}\n\n"
             "Voulez-vous la télécharger et l'installer ?\n"
             "L'application redémarrera automatiquement.",
             parent=self._root,

@@ -577,7 +577,7 @@ class LauncherApp:
 
         dirty_dot = self._chip(
             row,
-            text="●" if git_status.dirty else "",
+            text="•" if git_status.dirty else "",
             palette=CHIP_WARN if git_status.dirty else (SURFACE, SURFACE),
         )
         if git_status.dirty:

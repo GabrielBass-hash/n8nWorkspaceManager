@@ -121,6 +121,33 @@ bash scripts/build_appimage.sh
 | Linux | `dist/n8n-launcher` or `dist/n8n-launcher-linux-x86_64.AppImage` |
 | Windows | `dist/n8n-launcher.exe` |
 
+## Tests et CI
+
+### Lancer les tests en local
+
+```bash
+uv sync            # installe les deps runtime + dev
+uv run pytest      # tests unitaires (exclut les tests integration)
+```
+
+Les intégrations, opt-in et nécessitant Docker, se lancent avec `uv run pytest -m integration`.
+
+### Ce que fait la CI
+
+Le fichier `.github/workflows/ci.yml` enchaîne 4 jobs sur chaque PR (branches `dev`/`main`) :
+
+1. **`lint`** — `ubuntu-latest`. `ruff check .`, `ruff format --check .` et `basedpyright`. Échoue si le code est sale ; bloque tous les jobs suivants.
+2. **`test`** — matrix `ubuntu` / `windows` / `macos` (Python 3.12, `fail-fast: false`). Installe les deps via `uv sync --frozen`, lance `pytest` (sous `xvfb-run -a` sur Linux, DPI awareness géré dans le test sur Windows) et vérifie la couverture `--cov-fail-under=80`. Chaque OS upload en artefact son **snapshot structurel** (`structure-<os>.json`) et son rapport JUnit (`pytest-report-<os>.xml`).
+3. **`parity`** — `ubuntu-latest`, après `test`. Télécharge les 3 snapshots et lance `pytest tests/test_parity.py`. **Échoue si un widget du snapshot existe sur un OS mais pas sur les autres** ; sans les 3 fichiers il est simplement skippé.
+4. **`build`** — après `test`, produit le `.dmg`/`.exe`/binaire et les upload.
+
+### Ajouter un widget à surveiller
+
+1. Récupérez son chemin logique : lancez `uv run pytest tests/test_structure.py` (sur Linux sans écran : `xvfb-run -a uv run pytest tests/test_structure.py`) puis lisez `artifacts/structure-linux.json` — le champ `path` de votre widget.
+2. Ajoutez ce chemin à la constante `WATCHED_PATHS` dans `tests/test_parity.py` ; le job `parity` exigera alors sa présence sur les trois OS.
+
+L'union des chemins de tous les widgets est de toute façon vérifiée sur les 3 OS : `WATCHED_PATHS` rend la surveillance explicite et documentée, et c'est le seul endroit à éditer.
+
 ## Installation
 
 ### macOS — no paid Apple Developer account needed

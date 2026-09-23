@@ -47,9 +47,13 @@ from .theme import (
 _COLOR_WARN = "#fcd34d"
 _COLOR_DISABLED = TEXT_MUTED
 
-_CHECKBOX = "\u2611"
-_CHECKBOX_EMPTY = "\u2610"
-_BLOCKED = "\u2013"
+# Per-pipeline state markers. Plain ASCII on purpose: the box glyphs ☑/☐
+# (U+2610/U+2611) and the en dash fallback are absent from the Linux font
+# families the theme resolves to (Noto Sans, Liberation Sans, Cantarell), and
+# Tk/Xft does not fall back across fonts — they rendered blank on Linux.
+_CHECKBOX = "[x]"
+_CHECKBOX_EMPTY = "[ ]"
+_BLOCKED = "-"
 
 # Auto-refresh cadence of the runs tab: quick while a run is in flight (that's
 # the phase the user watches), much slower otherwise to spare the API.
@@ -340,7 +344,7 @@ def prompt_ci_workflows(
         body,
         text=(
             "En gris : pipeline non testable. Épinglez son déclencheur "
-            "webhook/chat dans l'éditeur (☉ pinData) ou renseignez ses "
+            "webhook/chat dans l'éditeur (pinData) ou renseignez ses "
             "credentials via « Gérer les credentials CI… »."
         ),
         bg=APP_BACKGROUND,
@@ -509,7 +513,7 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         dialog,
         text=(
             "Créez le secret GitHub Actions « N8N_CI_CREDENTIALS » sur votre "
-            "dépôt (Settings → Secrets and variables → Actions) puis collez-y "
+            "dépôt (Settings -> Secrets and variables -> Actions) puis collez-y "
             "ce JSON. Le launcher ne conserve que les noms — jamais les valeurs."
         ),
         bg=APP_BACKGROUND,

@@ -38,10 +38,15 @@ from .theme import (
     TEXT_MUTED,
 )
 
-_MARK_SUCCESS = "✔"
-_MARK_FAILURE = "✘"
-_MARK_WAITING = "◻"
-_MARK_SKIPPED = "–"
+# Leading marks for the runs panel. Plain ASCII on purpose: the glyph sets
+# (check marks, ballot X, medium square, en dash; U+2714/U+2718/U+25FB/U+2013)
+# are missing from the Linux font families the theme resolves to, and Tk/Xft
+# renders blank boxes for them, so the panel was unreadable on Linux while
+# fine on Windows/macOS.
+_MARK_SUCCESS = "+"
+_MARK_FAILURE = "!"
+_MARK_WAITING = "*"
+_MARK_SKIPPED = "-"
 
 _TAG_SUCCESS = SURFACE
 _TAG_FAILURE = "#3f1d1d"
@@ -340,10 +345,18 @@ class RunsPanel(tk.Frame):
                             tags=(step_tag,),
                         )
                 for pipeline in snapshot.pipelines.get(job.id, ()):
+                    # Map the outcome to the panel's ASCII marks instead of
+                    # echoing ``pipeline.mark`` (parsed from the runner log):
+                    # that source glyph set (✔/◻/✘) is absent from Linux fonts.
+                    pipeline_mark = {
+                        "success": _MARK_SUCCESS,
+                        "failure": _MARK_FAILURE,
+                        "waiting": _MARK_WAITING,
+                    }.get(pipeline.status, _MARK_SKIPPED)
                     self.tree.insert(
                         job_iid,
                         "end",
-                        text=f"        {pipeline.mark}  {pipeline.rel}",
+                        text=f"        {pipeline_mark}  {pipeline.rel}",
                         values=(pipeline.detail or pipeline.status,),
                         tags=("muted",) if pipeline.status == "waiting" else (),
                     )

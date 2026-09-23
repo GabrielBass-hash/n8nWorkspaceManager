@@ -42,7 +42,7 @@ def _job(
 
 
 def _pipeline(rel: str = "n8nPipelines/a.json", status: str = "success", detail: str = ""):
-    mark = {"success": "\u2714", "failure": "\u2718", "waiting": "\u25fb"}[status]
+    mark = {"success": "+", "failure": "!", "waiting": "*"}[status]
     return ci_runs.PipelineResult(rel=rel, status=status, detail=detail, mark=mark)
 
 
@@ -81,20 +81,20 @@ def test_apply_renders_runs_jobs_and_pipelines() -> None:
         panel.apply(snapshot)
 
     run_row = panel.tree.item("run-11")
-    assert run_row["text"].startswith("\u2714")
+    assert run_row["text"].startswith("+")
     assert "#11" in run_row["text"]
     assert "main" in run_row["text"]
     assert run_row["values"] == ["success"]
     assert run_row["tags"] == ["success"]
 
     job_row = panel.tree.item("job-11-21")
-    assert job_row["text"].strip().startswith("\u2714")
+    assert job_row["text"].strip().startswith("+")
     assert "validate" in job_row["text"]
     assert job_row["values"] == ["réussi"]
 
     pipeline_id = panel.tree.get_children("job-11-21")[0]
     pipeline_row = panel.tree.item(pipeline_id)
-    assert pipeline_row["text"].strip().startswith("\u2714")
+    assert pipeline_row["text"].strip().startswith("+")
     assert "n8nPipelines/a.json" in pipeline_row["text"]
     assert pipeline_row["values"] == ["3 nœuds"]
 
@@ -114,7 +114,7 @@ def test_apply_marks_failed_run_and_waiting_pipeline() -> None:
         panel, _refresh, _open = _build()
         panel.apply(snapshot)
 
-    assert panel.tree.item("run-11")["text"].startswith("\u2718")
+    assert panel.tree.item("run-11")["text"].startswith("!")
     assert panel.tree.item("run-11")["tags"] == ["failure"]
     pipeline_id = panel.tree.get_children("job-11-21")[0]
     assert panel.tree.item(pipeline_id)["tags"] == ["muted"]
@@ -371,12 +371,12 @@ def test_apply_auto_expands_active_run_and_live_job() -> None:
 
     step_iids = panel.tree.get_children("job-11-22")
     step_texts = [panel.tree.item(iid)["text"] for iid in step_iids]
-    assert step_texts[0].strip().startswith("\u2714")
+    assert step_texts[0].strip().startswith("+")
     assert "Checkout" in step_texts[0]
-    assert step_texts[1].strip().startswith("\u25fb")
+    assert step_texts[1].strip().startswith("*")
     assert "Lancer le runner" in step_texts[1]
     assert panel.tree.item(step_iids[1])["values"] == ["en cours"]
-    assert step_texts[2].strip().startswith("\u2013")
+    assert step_texts[2].strip().startswith("-")
     assert panel.tree.item(step_iids[2])["values"] == ["en attente"]
 
 
