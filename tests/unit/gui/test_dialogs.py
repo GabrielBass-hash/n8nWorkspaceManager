@@ -169,7 +169,7 @@ def test_default_creation_db_uses_none_when_no_migrations(tmp_path) -> None:
     assert db.mode is DbMode.NONE
 
 
-def test_empty_space_click_deselects_when_rows_exist(gui_mocks, tmp_path) -> None:
+def test_empty_space_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
     store = ConfigStore(tmp_path / "config.json")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
@@ -177,11 +177,64 @@ def test_empty_space_click_deselects_when_rows_exist(gui_mocks, tmp_path) -> Non
     manager.list.return_value = [ws]
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
     launcher._select_row("ws-existing")
+    folder = tmp_path / "wf-click"
+    folder.mkdir()
+    plan = CreatePlan(name="wf-click", db=DbConfig(DbMode.NONE))
 
-    launcher.workspace_list._bindings["<Button-1>"](None)
+    with (
+        patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
+        patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
+    ):
+        launcher.workspace_list._bindings["<Button-1>"](None)
+    launcher._drain_events()
 
-    assert launcher._selected_id is None
-    manager.create.assert_not_called()
+    database = manager.create.call_args.kwargs["db"]
+    assert manager.create.call_args.args == ("wf-click", folder)
+    assert database.mode is DbMode.NONE
+
+
+def test_canvas_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    ws = make_workspace(tmp_path, "Existing", 5678)
+    manager.list.return_value = [ws]
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    folder = tmp_path / "wf-canvas"
+    folder.mkdir()
+    plan = CreatePlan(name="wf-canvas", db=DbConfig(DbMode.NONE))
+
+    with (
+        patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
+        patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
+    ):
+        launcher._list_canvas._bindings["<Button-1>"](None)
+    launcher._drain_events()
+
+    assert manager.create.call_args.args == ("wf-canvas", folder)
+
+
+def test_create_affordance_click_creates(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    manager.list.return_value = [make_workspace(tmp_path, "Existing", 5678)]
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    folder = tmp_path / "wf-strip"
+    folder.mkdir()
+    plan = CreatePlan(name="wf-strip", db=DbConfig(DbMode.NONE))
+
+    with (
+        patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=str(folder)),
+        patch("n8n_launcher.gui.app.prompt_create_source", return_value="local"),
+        patch("n8n_launcher.gui.app.prompt_create_plan", return_value=plan),
+    ):
+        launcher._create_affordance._bindings["<Button-1>"](None)
+    launcher._drain_events()
+
+    assert manager.create.call_args.args[0] == "wf-strip"
 
 
 def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
