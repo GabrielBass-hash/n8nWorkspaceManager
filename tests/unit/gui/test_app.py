@@ -129,11 +129,11 @@ def test_git_row_status_chips(app, tmp_path) -> None:
     cases = [
         (GitRowStatus(), ("git", INACTIVE_CHIP, "")),
         (GitRowStatus(is_repo=True), ("git", ACTIVE_CHIP, "")),
-        (GitRowStatus(is_repo=True, dirty=True), ("git", WARN_CHIP, "●")),
-        (GitRowStatus(is_repo=True, dirty=True, diverged=True), ("git ⇅", WARN_CHIP, "●")),
-        (GitRowStatus(is_repo=True, diverged=True), ("git ⇅", WARN_CHIP, "")),
-        (GitRowStatus(is_repo=True, push_failed=True), ("git ✗", INACTIVE_CHIP, "")),
-        (GitRowStatus(is_repo=True, push_failed=True, dirty=True), ("git ✗", INACTIVE_CHIP, "●")),
+        (GitRowStatus(is_repo=True, dirty=True), ("git", WARN_CHIP, "•")),
+        (GitRowStatus(is_repo=True, dirty=True, diverged=True), ("git <>", WARN_CHIP, "•")),
+        (GitRowStatus(is_repo=True, diverged=True), ("git <>", WARN_CHIP, "")),
+        (GitRowStatus(is_repo=True, push_failed=True), ("git KO", INACTIVE_CHIP, "")),
+        (GitRowStatus(is_repo=True, push_failed=True, dirty=True), ("git KO", INACTIVE_CHIP, "•")),
     ]
     folder = tmp_path / "g"
     folder.mkdir()

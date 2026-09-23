@@ -172,14 +172,14 @@ def test_prompt_ci_workflows_greys_ineligible_and_toggles(tmp_path) -> None:
     blocked = tree.item("n8nPipelines/zz-hook.json")
     assert "disabled" not in eligible.get("tags", [])
     assert "disabled" in blocked.get("tags", [])
-    assert blocked["text"].startswith("\u2013")
+    assert blocked["text"].startswith("-")
 
     click = tree._bindings["<Button-1>"]
-    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("\u2610")
+    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("[ ]")
     click(SimpleNamespace(x=5, y=5))
-    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("\u2611")
+    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("[x]")
     click(SimpleNamespace(x=5, y=5))
-    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("\u2610")
+    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("[ ]")
 
 
 def test_prompt_ci_workflows_expander_click_does_not_toggle(tmp_path) -> None:
@@ -380,7 +380,7 @@ def test_prompt_ci_workflows_adds_runs_tab_when_source_provided(tmp_path) -> Non
     assert tabs == ["Sélection", "Déroulement"]
 
     panel = RunsPanel.instances[0]
-    assert panel.tree.item("run-11")["text"].startswith("\u2714")
+    assert panel.tree.item("run-11")["text"].startswith("+")
     assert refreshed == [panel]
 
     panel.refresh()

@@ -23,37 +23,111 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format check (ruff format)
+        run: uv run ruff format --check .
+
+      - name: Typecheck (basedpyright)
+        run: uv run basedpyright
+
   test:
+    needs: lint
     strategy:
+      # Three OSes must all report their result even if one of them fails.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.12"]
+        include:
+          - os: ubuntu-latest
+            os_name: linux
+            xvfb: true
+          - os: macos-latest
+            os_name: macos
+          - os: windows-latest
+            os_name: windows
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           enable-cache: true
 
       # The GUI imports ``tkinter`` at module level. uv's managed CPython bundles
       # Tk, but if uv ever resolves a bare system CPython (no ``python3-tk``),
       # collection would error instead of running the GUI suite — install it so
-      # the ubuntu matrix leg always runs those tests.
-      - name: Install tkinter (Linux)
+      # the ubuntu leg always runs those tests. ``xvfb`` gives the structural
+      # snapshot test a real display on headless runners.
+      - name: Install tkinter and xvfb (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
 
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run pre-commit (lint, format, typecheck)
-        run: uv run pre-commit run --all-files
+      - name: Run tests (Linux, under xvfb)
+        if: matrix.xvfb
+        run: xvfb-run -a uv run pytest --cov-fail-under=80 --junitxml=pytest-report-linux.xml
 
-      - name: Run unit tests
-        run: uv run pytest --cov-fail-under=80
+      - name: Run tests (macOS / Windows)
+        if: ${{ !matrix.xvfb }}
+        run: uv run pytest --cov-fail-under=80 --junitxml=pytest-report-${{ matrix.os_name }}.xml
+
+      - name: Upload structural snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: structure-${{ matrix.os_name }}
+          path: artifacts/structure-${{ matrix.os_name }}.json
+          if-no-files-found: error
+
+      - name: Upload pytest report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-${{ matrix.os_name }}
+          path: pytest-report-${{ matrix.os_name }}.xml
+          if-no-files-found: error
+
+  parity:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Download the three structural snapshots
+        uses: actions/download-artifact@v4
+        with:
+          name: structure-*
+          path: parity-snapshots
+          merge-multiple: true
+
+      # The single test that is allowed to fail a build for structural reasons:
+      # it must see all three snapshots or the job is skipped.
+      - name: Cross-OS structural parity
+        run: uv run pytest tests/test_parity.py --structure-dir parity-snapshots
 
   build:
     needs: test
