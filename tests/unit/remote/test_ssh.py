@@ -38,6 +38,7 @@ def test_ssh_run_builds_batch_ssh_command(tmp_path) -> None:
     assert "-i" in argv and "/home/me/.ssh/id_ed25519" in argv
     assert "-o" in argv and "BatchMode=yes" in argv
     assert "StrictHostKeyChecking=accept-new" in argv
+    assert "IdentitiesOnly=yes" in argv
     assert "deploy@prod.example.test" in argv
     assert argv[-1] == "echo hello"
     assert run.call_args.kwargs["timeout"] == 30

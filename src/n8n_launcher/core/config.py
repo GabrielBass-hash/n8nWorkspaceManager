@@ -187,7 +187,7 @@ class ConfigStore:
         """Open (once) the SQLite connection and ensure the schema exists."""
         if self._connection is not None:
             return self._connection
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _restrict_dir(self.path.parent)
         conn = sqlite3.connect(str(self.path), check_same_thread=False)
         try:
             conn.row_factory = sqlite3.Row
@@ -198,7 +198,7 @@ class ConfigStore:
         except (OSError, sqlite3.Error):
             conn.close()
             raise
-        _restrict_file(self.path)
+        _restrict_db_files(self.path)
         self._connection = conn
         return conn
 
@@ -272,6 +272,33 @@ def _restrict_file(path: Path) -> None:
         path.chmod(0o600)
 
 
+def _restrict_dir(path: Path) -> None:
+    """Create *path* and force ``0o700`` so the config tree is not traversable.
+
+    ``mkdir(mode=0o700)`` only applies the mode at creation time, so an
+    already-existing directory (created by an older launcher or by
+    ``platformdirs``) is chmodded explicitly as well.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
+def _restrict_db_files(path: Path) -> None:
+    """Restrict the SQLite database and its WAL/SHM sidecars to ``0o600``.
+
+    In WAL mode SQLite writes ``<name>-wal`` and ``<name>-shm`` next to the
+    database; those sidecars hold the same pages (owner password, GitHub
+    token, …) but are created with the default umask. They appear as soon as
+    the WAL pragma runs, so they are restricted here too — guarded by
+    ``exists()`` because a future schema-less open may not create them.
+    """
+    _restrict_file(path)
+    for sidecar in (Path(f"{path}-wal"), Path(f"{path}-shm")):
+        if sidecar.exists():
+            _restrict_file(sidecar)
+
+
 def ensure_directories() -> None:
     """Create the configuration directory if it does not exist yet."""
-    config_dir().mkdir(parents=True, exist_ok=True)
+    _restrict_dir(config_dir())

@@ -84,6 +84,10 @@ TEMPLATE_HOOK = r"""#!/usr/bin/env bash
 
 set -u
 
+# Git runs hooks with the cwd set to the bare repo; every path below is
+# home-relative (BASE, BARE, WORKFLOW, ...), so anchor them on $HOME first.
+cd "$HOME"
+
 BASE=__BASE__
 BARE=__BARE__
 WORKFLOW=__WORKFLOW__
@@ -124,7 +128,7 @@ PY
             marker "$new" "error" "git archive a échoué"
             exit 0
         fi
-        if ! docker compose -p "$PROJECT" up -d >> "$LOG" 2>&1; then
+        if ! docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d >> "$LOG" 2>&1; then
             marker "$new" "error" "docker compose up -d a échoué"
             exit 0
         fi
