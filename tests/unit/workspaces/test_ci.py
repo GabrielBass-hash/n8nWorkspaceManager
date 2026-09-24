@@ -87,6 +87,23 @@ def test_collect_workflows_mirrors_import_layout(tmp_path: Path) -> None:
     assert "package.json" not in found
 
 
+def test_collect_workflows_dedups_root_mirror_of_pipeline(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    sub = root / "n8nPipelines"
+    sub.mkdir(parents=True)
+    (sub / "Meteo-1.json").write_text("{}", encoding="utf-8")
+    # The close/stop/publish export mirrors pipelines files at the root too;
+    # only the canonical pipeline copy must be collected.
+    (root / "Meteo-1.json").write_text("{}", encoding="utf-8")
+    (root / "only-root.json").write_text("{}", encoding="utf-8")
+
+    found = ci.collect_workflows(root)
+
+    assert "n8nPipelines/Meteo-1.json" in found
+    assert "Meteo-1.json" not in found
+    assert "only-root.json" in found
+
+
 def test_load_export_returns_none_for_unreadable_or_invalid(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     root.mkdir()
@@ -315,6 +332,15 @@ def test_rendered_workflow_wires_secret_and_var() -> None:
     assert "vars.N8N_IMAGE" in workflow
     assert "workflow_dispatch" in workflow
     assert "python .n8n-tests/runner.py" in workflow
+
+
+def test_rendered_workflow_runs_on_workspace_branches_only() -> None:
+    workflow = ci.render_harness("2.35.0")[ci.WORKFLOW_FILE]
+
+    assert 'branches: ["n8n/**"]' in workflow
+    assert '"main"' not in workflow
+    assert '"dev"' not in workflow
+    assert "master" not in workflow
 
 
 def test_rendered_workflow_skips_test_job_when_empty_selection() -> None:

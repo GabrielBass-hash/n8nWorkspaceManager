@@ -25,7 +25,7 @@ from helpers import (
 )
 
 from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
+from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
 from n8n_launcher.gui.app import window_size
@@ -150,6 +150,51 @@ def test_git_row_status_chips(app, tmp_path) -> None:
         assert dot._options["text"] == expected_dot, status
 
 
+def test_refresh_updates_rows_in_place_when_order_unchanged(app) -> None:
+    rows_before = {
+        wid: (frame, frame.git_chip, frame.server_chip)
+        for wid, (frame, _label) in app.app._rows.items()
+    }
+    status = GitRowStatus(is_repo=True, diverged=True)
+    with patch("n8n_launcher.gui.display.git_row_status", return_value=status):
+        app.app.refresh()
+
+    # Same workspace set + order: nothing is destroyed, widgets are patched.
+    # ``server_chip`` is wired on the row frame, so the in-place refresh must
+    # reach it without raising (regression: it was never assigned in _build_row).
+    for wid, (frame, git_chip, server_chip) in rows_before.items():
+        assert app.app._rows[wid][0] is frame
+        assert not frame.destroyed
+        assert app.app._rows[wid][0].git_chip is git_chip
+        assert row_chip_text(app, wid, "git_chip") == "git <>"
+        assert row_chip_colors(app, wid, "git_chip") == WARN_CHIP
+        assert app.app._rows[wid][0].server_chip is server_chip
+        assert row_chip_text(app, wid, "server_chip") == "serv"
+
+
+def test_refresh_rebuilds_when_order_changes(app) -> None:
+    old_running_frame = app.app._rows["ws-running"][0]
+    reversed_workspaces = list(reversed(app.manager.list.return_value))
+    app.manager.list.return_value = reversed_workspaces
+
+    app.app.refresh()
+
+    assert old_running_frame.destroyed
+    assert app.app._rows["ws-running"][0] is not old_running_frame
+    assert app.app._row_order == ["ws-stopped", "ws-running"]
+
+
+def test_refresh_drops_removed_workspace(app) -> None:
+    running = app.manager.list.return_value[0]
+    app.manager.list.return_value = [running]
+
+    app.app.refresh()
+
+    assert app.app._row_order == ["ws-running"]
+    assert "ws-stopped" not in app.app._rows
+    assert "ws-stopped" not in app.app._row_order
+
+
 def test_each_row_has_db_and_git_chips_clickable_but_no_delete(app) -> None:
     for workspace_id in ("ws-running", "ws-stopped"):
         row = app.app._rows[workspace_id][0]
@@ -185,7 +230,7 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
     HoldingThread.instances.clear()
     with patch("n8n_launcher.gui.app.threading.Thread", HoldingThread):
         launcher.launch_selected()
-        assert launcher._launching == "ws-hold"
+        assert launcher._launching == {"ws-hold"}
         launcher.launch_selected()
 
     assert len(HoldingThread.instances) == 1
@@ -193,8 +238,80 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
     # The launch marker is cleared on the main thread, through the event
     # queue, never from the worker — drain it before asserting the reset.
     launcher._drain_events()
-    assert launcher._launching is None
+    assert launcher._launching == set()
     manager.ensure_running.assert_called_once_with("ws-hold", on_ready=launcher._wait_until_healthy)
+
+
+def test_other_workspace_launches_while_one_is_in_flight(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    first = make_workspace(tmp_path, "A", 5671)
+    first.state = WorkspaceState.STOPPED
+    second = make_workspace(tmp_path, "B", 5672)
+    second.state = WorkspaceState.STOPPED
+    manager.list.return_value = [first, second]
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+
+    launcher._select_row("ws-a")
+    launcher.launch_selected()
+    assert launcher._launching == {"ws-a"}
+    launcher._select_row("ws-b")
+    launcher.launch_selected()
+    launcher._drain_events()
+
+    assert manager.ensure_running.call_count == 2
+    assert launcher._launching == set()
+
+
+def test_double_click_launches_other_workspace_while_one_in_flight(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    held = make_workspace(tmp_path, "Hold", 5690)
+    other = make_workspace(tmp_path, "Other", 5691)
+    other.state = WorkspaceState.STOPPED
+    manager.list.return_value = [held, other]
+    launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
+    launcher._launching = {"ws-hold"}
+
+    # While "Hold" is booting, double-clicking another stopped workspace must
+    # still start it — only a second click on the same row is swallowed.
+    launcher._handle_double("ws-other")
+    launcher._drain_events()
+
+    manager.ensure_running.assert_called_once_with(
+        "ws-other", on_ready=launcher._wait_until_healthy
+    )
+
+
+def test_start_slot_released_even_when_boot_fails(gui_mocks, tmp_path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    manager = MagicMock()
+    held = make_workspace(tmp_path, "Hold", 5690)
+    manager.list.return_value = [held]
+    sem = MagicMock()
+    with patch("n8n_launcher.gui.app.threading.BoundedSemaphore", return_value=sem):
+        launcher = LauncherApp(
+            store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
+        )
+
+    launcher._select_row("ws-hold")
+    launcher.launch_selected()
+    launcher._drain_events()
+    assert sem.acquire.call_count == 1
+    assert sem.release.call_count == 1
+    assert manager.ensure_running.call_count == 1
+
+    # A boot failure must still free the slot, or the app would permanently
+    # starve the pool (a broken workspace would block every later start).
+    manager.ensure_running.side_effect = RuntimeError("boom")
+    launcher.launch_selected()
+    launcher._drain_events()
+    assert sem.acquire.call_count == 2
+    assert sem.release.call_count == 2
+    assert gui_mocks.messagebox.errors == ["boom"]
 
 
 def test_launch_dispatches_to_manager(app) -> None:
@@ -380,6 +497,8 @@ def test_empty_state_releases_canvas_height_when_rows_appear(app) -> None:
 
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app._show_context_menu(SimpleNamespace(x_root=0, y_root=0))
     labels = [label for label, _ in app.app._menu._items if label]
     assert labels == [
         "Ouvrir n8n",
@@ -390,8 +509,112 @@ def test_context_menu_has_launch_folder_and_delete(app) -> None:
         "Ouvrir les Actions GitHub…",
         "Désactiver les tests CI",
         "Configurer le token GitHub…",
+        "Configurer le serveur…",
         "Supprimer",
     ]
+
+
+def test_context_menu_hides_server_actions_when_disabled(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app._show_context_menu(SimpleNamespace(x_root=0, y_root=0))
+    labels = [label for label, _ in app.app._menu._items if label]
+    assert "Publier sur le serveur…" not in labels
+    assert "Désactiver le serveur" not in labels
+
+
+def test_context_menu_shows_server_actions_when_enabled(app) -> None:
+    stopped = next(w for w in app.manager.list() if w.id == "ws-stopped")
+    stopped.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.app._select_row("ws-stopped")
+    app.app._show_context_menu(SimpleNamespace(x_root=0, y_root=0))
+    labels = [label for label, _ in app.app._menu._items if label]
+    assert labels.index("Publier sur le serveur…") < labels.index("Désactiver le serveur")
+    assert labels.index("Désactiver le serveur") < labels.index("Configurer Git…")
+
+
+def test_publish_selected_deploys_when_server_enabled(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.app._select_row("ws-running")
+    app.app.publish_selected()
+    app.app._drain_events()
+    app.manager.publish.assert_called_once_with(running)
+
+
+def test_publish_selected_ignored_while_deploy_in_flight(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.app._select_row("ws-running")
+    app.app._deploying = True
+    app.app.publish_selected()
+    app.app._drain_events()
+    app.manager.publish.assert_not_called()
+
+
+def test_publish_selected_releases_guard_after_success(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.app._select_row("ws-running")
+    app.app.publish_selected()
+    assert app.app._deploying is True  # in flight while the worker runs
+    app.app._drain_events()
+    assert app.app._deploying is False
+    app.manager.publish.assert_called_once_with(running)
+
+
+def test_publish_selected_releases_guard_after_error(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.manager.publish.side_effect = RuntimeError("boom")
+    app.app._select_row("ws-running")
+    app.app.publish_selected()
+    app.app._drain_events()
+    assert app.app._deploying is False
+    assert "boom" in "\n".join(app.mocks.messagebox.errors)
+
+
+def test_publish_selected_skipped_when_server_disabled(app) -> None:
+    app.app._select_row("ws-running")
+    app.app.publish_selected()
+    app.manager.publish.assert_not_called()
+
+
+def test_disable_server_selected_confirms_and_disables(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.mocks.messagebox._yesno = True
+    app.app._select_row("ws-running")
+    app.app.disable_server_selected()
+    app.app._drain_events()
+    app.manager.disable_server.assert_called_once_with(running)
+
+
+def test_disable_server_selected_informs_when_not_configured(app) -> None:
+    app.app._select_row("ws-running")
+    app.app.disable_server_selected()
+    assert app.mocks.messagebox.infos
+
+
+def test_configure_server_selected_saves_and_installs(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    config = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    with patch("n8n_launcher.gui.app.prompt_server_config", return_value=config):
+        app.app._select_row("ws-running")
+        app.app.configure_server_selected()
+    app.app._drain_events()
+
+    app.manager.install_server.assert_called_once_with(running, config)
+    app.manager.update.assert_called_once_with("ws-running", server=config)
+
+
+def test_configure_server_selected_cancel_does_nothing(app) -> None:
+    with patch("n8n_launcher.gui.app.prompt_server_config", return_value=None):
+        app.app._select_row("ws-running")
+        app.app.configure_server_selected()
+    app.app._drain_events()
+
+    app.manager.install_server.assert_not_called()
+    app.manager.update.assert_not_called()
 
 
 def test_delete_per_row_confirms_then_removes_workspace(app) -> None:
@@ -627,7 +850,7 @@ def test_toggle_from_row_ignores_unknown_workspace(app) -> None:
 
 
 def test_toggle_from_row_blocks_while_launching(app) -> None:
-    app.app._launching = "ws-stopped"
+    app.app._launching = {"ws-stopped"}
     app.app.toggle_from_row("ws-stopped")
     app.app.toggle_from_row("ws-running")
     app.app._drain_events()
@@ -637,7 +860,7 @@ def test_toggle_from_row_blocks_while_launching(app) -> None:
 
 
 def test_handle_double_blocks_while_launching(app) -> None:
-    app.app._launching = "ws-stopped"
+    app.app._launching = {"ws-stopped"}
     app.app._handle_double("ws-stopped")
     app.app._drain_events()
 
@@ -645,7 +868,7 @@ def test_handle_double_blocks_while_launching(app) -> None:
 
 
 def test_launch_selected_blocks_while_launching(app) -> None:
-    app.app._launching = "ws-stopped"
+    app.app._launching = {"ws-stopped"}
     app.app.launch_selected()
     app.app._drain_events()
 
@@ -653,7 +876,7 @@ def test_launch_selected_blocks_while_launching(app) -> None:
 
 
 def test_row_shows_launching_while_in_progress(app) -> None:
-    app.app._launching = "ws-stopped"
+    app.app._launching = {"ws-stopped"}
     app.app.refresh()
 
     btn = row_action_button(app, "ws-stopped")
@@ -676,7 +899,7 @@ def test_launch_resets_flag_and_re_enables_button_after_success(app) -> None:
     app.app.launch_selected()
     app.app._drain_events()
 
-    assert app.app._launching is None
+    assert app.app._launching == set()
     btn = row_action_button(app, "ws-stopped")
     assert btn.text == "Démarrer"
     assert btn.command is not None

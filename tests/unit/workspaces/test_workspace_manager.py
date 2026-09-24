@@ -10,13 +10,15 @@ from n8n_launcher.core.models import (
     DbConfig,
     DbMode,
     GitConfig,
+    ServerConfig,
     Workspace,
     WorkspaceState,
 )
 from n8n_launcher.docker.manager import ComposeStatus, DockerError
-from n8n_launcher.git import GitError
+from n8n_launcher.git import GitError, workspace_branch
 from n8n_launcher.n8n.api import N8nApiError
 from n8n_launcher.n8n.owner import OwnerSetupError
+from n8n_launcher.remote.ssh import SshError
 from n8n_launcher.workspaces.manager import WorkspaceError, WorkspaceManager
 
 
@@ -52,6 +54,36 @@ def test_create_managed_workspace_when_migrations_exist(tmp_path: Path) -> None:
     assert workspace.db.password
     assert workspace.port == 5680
     assert store.load().workspaces == [workspace]
+
+
+def test_create_preserves_provided_managed_db_fields(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workflows_dir = tmp_path / "workflows"
+    provided = DbConfig(
+        mode=DbMode.MANAGED,
+        database_name="my-data",
+        username="my-user",
+        password="my-pass",
+    )
+
+    workspace = launcher.create("Demo", workflows_dir, db=provided)
+
+    assert workspace.db.mode is DbMode.MANAGED
+    assert workspace.db.database_name == "my-data"
+    assert workspace.db.username == "my-user"
+    assert workspace.db.password == "my-pass"
+
+
+def test_create_generates_password_only_for_missing_managed_fields(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workflows_dir = tmp_path / "workflows"
+    provided = DbConfig(mode=DbMode.MANAGED, database_name="my-data", username="my-user")
+
+    workspace = launcher.create("Demo", workflows_dir, db=provided)
+
+    assert workspace.db.database_name == "my-data"
+    assert workspace.db.username == "my-user"
+    assert workspace.db.password
 
 
 def test_create_scaffolds_pipelines_and_db_layout(tmp_path: Path) -> None:
@@ -118,6 +150,24 @@ def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
 
     assert stopped.state is WorkspaceState.STOPPED
     docker.down.assert_not_called()
+
+
+def test_stop_transitions_through_stopping_while_tearing_down(tmp_path: Path) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    def check_state_on_down(*_args, **_kwargs) -> None:
+        assert store.load().workspaces[0].state is WorkspaceState.STOPPING
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.start(workspace.id)
+        with patch.object(docker, "down", side_effect=check_state_on_down):
+            stopped = launcher.stop(workspace.id)
+
+    assert stopped.state is WorkspaceState.STOPPED
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
 
 
 def test_stop_is_idempotent_on_already_stopped(tmp_path: Path) -> None:
@@ -190,16 +240,14 @@ def test_reconcile_all_persists_live_states(tmp_path: Path) -> None:
     workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
-    docker.status.return_value = ComposeStatus(
-        raw_output='{"Service":"postgres","State":"running"}\n{"Service":"n8n","State":"running"}\n',
-        returncode=0,
-    )
+    docker.list_project_states.return_value = {f"n8n-ws-{workspace.id}": {"n8n": "running"}}
 
     with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
         changed = launcher.reconcile_all()
 
     assert changed == 1
     assert store.load().workspaces[0].state is WorkspaceState.RUNNING
+    docker.list_project_states.assert_called_once_with()
 
 
 def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
@@ -207,7 +255,7 @@ def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
     workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
-    docker.status.return_value = ComposeStatus(raw_output="", returncode=0)
+    docker.list_project_states.return_value = {}
 
     with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
         changed = launcher.reconcile_all()
@@ -485,7 +533,7 @@ def test_sync_git_commits_and_pushes(tmp_path: Path) -> None:
     ):
         launcher.sync_git(workspace)
 
-    is_repo.assert_called_once()
+    assert is_repo.call_count == 2
     add.assert_called_once_with(workspace.workflows_dir)
     commit.assert_called_once()
     push.assert_called_once()
@@ -625,7 +673,7 @@ def test_stop_with_sync_exports_and_syncs_before_stop(tmp_path: Path) -> None:
     ):
         launcher.stop_with_sync(workspace.id)
 
-    run.return_value.export_all.assert_called_once_with()
+    run.return_value.export_all.assert_called_once_with(mirror=workspace.workflows_dir)
     sync.assert_called_once()
     assert sync.call_args.args[0].id == workspace.id
     assert sync.call_args.kwargs == {"push": True}
@@ -683,7 +731,7 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
     ):
         launcher.git_init_workspace(workspace, remote_url="https://example.test/repo.git")
 
-    init.assert_called_once_with(workspace.workflows_dir)
+    init.assert_called_once_with(workspace.workflows_dir, branch=workspace_branch(workspace.id))
     ensure_ignore.assert_called_once_with(workspace.workflows_dir)
     add_remote.assert_called_once_with(
         workspace.workflows_dir, "origin", "https://example.test/repo.git"
@@ -1209,10 +1257,6 @@ def test_clone_from_git_clones_and_registers(tmp_path: Path) -> None:
 
     with (
         patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone) as clone,
-        patch(
-            "n8n_launcher.workspaces.manager.git_current_branch",
-            return_value="develop",
-        ),
         patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5680),
         patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
     ):
@@ -1228,7 +1272,7 @@ def test_clone_from_git_clones_and_registers(tmp_path: Path) -> None:
     assert workspace.workflows_dir == dest
     assert workspace.git.enabled is True
     assert workspace.git.remote_url == "https://example.test/repo.git"
-    assert workspace.git.branch == "develop"
+    assert workspace.git.branch == workspace_branch(workspace.id)
     assert workspace.db.mode is DbMode.NONE
     assert (dest / "n8nPipelines").is_dir()
     assert store.load().workspaces == [workspace]
@@ -1354,3 +1398,446 @@ def test_clone_from_git_without_token_keeps_original_url(tmp_path: Path) -> None
     clone.assert_called_once_with("https://github.com/octo/flows.git", dest, branch=None)
     set_remote.assert_not_called()
     assert workspace.git.remote_url == "https://github.com/octo/flows.git"
+
+
+# ---------------------------------------------------------------------------
+# Serveur de déploiement
+# ---------------------------------------------------------------------------
+
+
+def server_cfg() -> ServerConfig:
+    return ServerConfig(
+        enabled=True,
+        host="prod.example.test",
+        ssh_port=22,
+        user="deploy",
+        key_path="/home/me/.ssh/id_ed25519",
+        base_dir="n8n-launcher/demo",
+        n8n_port=5689,
+    )
+
+
+def test_update_accepts_server_without_restart(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    updated = launcher.update(workspace.id, server=server_cfg())
+
+    assert updated.server.enabled is True
+    assert updated.server.host == "prod.example.test"
+    assert updated.restart_required is False
+    assert store.load().workspaces[0].server.host == "prod.example.test"
+
+
+def test_update_refuses_server_port_used_by_another_workspace(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    first = create_none(launcher, tmp_path, port=5681)
+    second = create_none(launcher, tmp_path / "other", port=5682)
+    launcher.update(first.id, server=server_cfg())
+
+    with pytest.raises(WorkspaceError, match="utilise déjà"):
+        launcher.update(second.id, server=server_cfg())
+
+    assert launcher.store.load().workspaces[1].server.enabled is False
+
+
+def test_update_accepts_same_server_for_the_same_workspace(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    launcher.update(workspace.id, server=server_cfg())
+
+    updated = launcher.update(workspace.id, server=server_cfg())
+
+    assert updated.server.host == "prod.example.test"
+
+
+def test_install_server_refuses_duplicate_host_port(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    first = create_none(launcher, tmp_path, port=5681)
+    second = create_none(launcher, tmp_path / "other", port=5682)
+    launcher.update(first.id, server=server_cfg())
+
+    with (
+        patch("n8n_launcher.workspaces.manager.test_connection") as probe,
+        pytest.raises(WorkspaceError, match="utilise déjà"),
+    ):
+        launcher.install_server(second, server_cfg())
+
+    probe.assert_not_called()
+
+
+def test_update_rejects_unknown_fields(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with pytest.raises(WorkspaceError, match="Unsupported"):
+        launcher.update(workspace.id, server_enabled=True)
+
+
+def test_install_server_pushes_hook_and_deploy_script(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace.git = GitConfig(enabled=True, remote_url="https://github.com/x/y.git")
+    launcher.git_init_workspace(workspace, remote_url="https://github.com/x/y.git")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.test_connection") as probe,
+        patch("n8n_launcher.workspaces.manager.ssh_run") as ssh,
+        patch("n8n_launcher.workspaces.manager.render_hook", return_value="#hook#") as hook,
+        patch(
+            "n8n_launcher.workspaces.manager.render_deploy_script", return_value="#deploy#"
+        ) as script,
+        patch("n8n_launcher.workspaces.manager.mkdir_remote") as mkdir,
+        patch("n8n_launcher.workspaces.manager.write_remote_file") as write,
+        patch("n8n_launcher.workspaces.manager.chmod_remote") as chmod,
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_add_remote") as add_remote,
+    ):
+        launcher.install_server(workspace, server_cfg())
+
+    probe.assert_called_once()
+    # The bare repository is created first so the hook directory exists.
+    assert ssh.call_args.args[1].startswith("git init --bare ")
+    assert "launcher/demo.git" in ssh.call_args.args[1]
+    mkdir.assert_called_once()
+    hook.assert_called_once()
+    write.assert_any_call(
+        server_cfg(),
+        "n8n-launcher/demo.git/hooks/post-receive",
+        "#hook#",
+    )
+    write.assert_any_call(server_cfg(), "n8n-launcher/demo/deploy.py", "#deploy#")
+    assert chmod.call_count == 2
+    add_remote.assert_called_once()
+
+
+def test_install_server_failure_raises_without_persisting(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.test_connection", side_effect=SshError("denied")),
+        pytest.raises(SshError),
+    ):
+        launcher.install_server(workspace, server_cfg())
+
+    assert store.load().workspaces[0].server.enabled is False
+
+
+def test_install_server_requires_connection_by_default(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.test_connection", side_effect=SshError("denied")
+        ) as probe,
+        patch("n8n_launcher.workspaces.manager.write_remote_file") as write,
+        pytest.raises(SshError),
+    ):
+        launcher.install_server(workspace, server_cfg(), test=False)
+
+    probe.assert_not_called()
+    write.assert_not_called()
+
+
+def test_publish_requires_server_enabled(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with pytest.raises(WorkspaceError, match="Aucun serveur"):
+        launcher.publish(workspace)
+
+
+def test_publish_requires_git(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    def apply(config: AppConfig) -> Workspace:
+        current = next(w for w in config.workspaces if w.id == workspace.id)
+        current.server = server_cfg()
+        return current
+
+    workspace = launcher.store.mutate(apply)
+    workspace.server = server_cfg()
+
+    with pytest.raises(WorkspaceError, match="Git"):
+        launcher.publish(workspace)
+
+
+def test_publish_blocks_when_credentials_not_exportable(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    def apply(config: AppConfig) -> Workspace:
+        current = next(w for w in config.workspaces if w.id == workspace.id)
+        current.server = server_cfg()
+        current.git = GitConfig(enabled=True, remote_url="https://github.com/x/y.git")
+        return current
+
+    workspace = launcher.store.mutate(apply)
+    workspace.server = server_cfg()
+    workspace.git = GitConfig(enabled=True)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        pytest.raises(WorkspaceError, match="démarré une fois"),
+    ):
+        launcher.publish(workspace)
+
+
+def test_publish_exports_pushes_main_and_records_status(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    def apply(config: AppConfig) -> Workspace:
+        current = next(w for w in config.workspaces if w.id == workspace.id)
+        current.server = server_cfg()
+        current.git = GitConfig(enabled=True, remote_url="https://github.com/x/y.git")
+        current.api_key = "api-key-123"
+        return current
+
+    workspace = launcher.store.mutate(apply)
+    workspace.api_key = "api-key-123"
+    workspace.server = server_cfg()
+
+    marker = {
+        "sha": "abc123",
+        "status": "ok",
+        "at": 1700000000,
+        "error": "",
+    }
+    credentials = [{"name": "API", "type": "httpRequest", "data": {"url": "x"}}]
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch.object(WorkspaceManager, "_export_all_credentials", return_value=credentials),
+        patch("n8n_launcher.workspaces.manager.render_remote_compose", return_value="services: {}"),
+        patch("n8n_launcher.workspaces.manager.write_remote_file") as write,
+        patch("n8n_launcher.workspaces.manager.chmod_remote") as chmod,
+        patch("n8n_launcher.workspaces.manager.git_add") as add,
+        patch("n8n_launcher.workspaces.manager.git_commit", return_value=True) as commit,
+        patch("n8n_launcher.workspaces.manager.git_push_ref") as push_ref,
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_ssh_env",
+            return_value={"GIT_SSH_COMMAND": "ssh -i k"},
+        ),
+        patch.object(WorkspaceManager, "_poll_deploy", return_value=("ok", marker)),
+    ):
+        launcher.publish(workspace)
+
+    secrets_written = write.call_args_list[0]
+    assert secrets_written.args[1] == "n8n-launcher/demo/secrets.json"
+    payload = json.loads(secrets_written.args[2])
+    assert payload["owner_email"] == "owner@example.test"
+    assert payload["credentials"] == credentials
+    chmod.assert_any_call(workspace.server, "n8n-launcher/demo/secrets.json", mode="600")
+    add.assert_called_once_with(workspace.workflows_dir)
+    commit.assert_called_once()
+    push_ref.assert_called_once()
+    args, kwargs = push_ref.call_args
+    assert args[0] == workspace.workflows_dir
+    assert args[1] == "server"
+    assert args[2] == "dev"
+    assert args[3] == "main"
+    assert kwargs["env"] == {"GIT_SSH_COMMAND": "ssh -i k"}
+    stored = store.load().workspaces[0]
+    assert stored.server_last_error is None
+    assert stored.server_last_deploy is not None and stored.server_last_deploy != ""
+
+
+def test_publish_records_error_status_and_raises(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    def apply(config: AppConfig) -> Workspace:
+        current = next(w for w in config.workspaces if w.id == workspace.id)
+        current.server = server_cfg()
+        current.git = GitConfig(enabled=True, remote_url="https://github.com/x/y.git")
+        current.api_key = "api-key-123"
+        return current
+
+    workspace = launcher.store.mutate(apply)
+
+    marker = {"sha": "abc123", "status": "error", "at": 1700000000, "error": "migration 001: boom"}
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch.object(WorkspaceManager, "_export_all_credentials", return_value=[]),
+        patch("n8n_launcher.workspaces.manager.render_remote_compose", return_value="services: {}"),
+        patch(
+            "n8n_launcher.workspaces.manager.build_secrets_document",
+            return_value={"credentials": []},
+        ),
+        patch("n8n_launcher.workspaces.manager.write_remote_file"),
+        patch("n8n_launcher.workspaces.manager.chmod_remote"),
+        patch("n8n_launcher.workspaces.manager.git_add"),
+        patch("n8n_launcher.workspaces.manager.git_commit", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_push_ref"),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_ssh_env", return_value={}),
+        patch.object(WorkspaceManager, "_poll_deploy", return_value=("error", marker)),
+        pytest.raises(WorkspaceError, match="boom"),
+    ):
+        launcher.publish(workspace)
+
+    stored = store.load().workspaces[0]
+    assert stored.server_last_error == "migration 001: boom"
+
+
+def test_publish_timeout_raises(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    def apply(config: AppConfig) -> Workspace:
+        current = next(w for w in config.workspaces if w.id == workspace.id)
+        current.server = server_cfg()
+        current.git = GitConfig(enabled=True, remote_url="https://github.com/x/y.git")
+        current.api_key = "api-key-123"
+        return current
+
+    workspace = launcher.store.mutate(apply)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch.object(WorkspaceManager, "_export_all_credentials", return_value=[]),
+        patch("n8n_launcher.workspaces.manager.render_remote_compose", return_value="services: {}"),
+        patch(
+            "n8n_launcher.workspaces.manager.build_secrets_document",
+            return_value={"credentials": []},
+        ),
+        patch("n8n_launcher.workspaces.manager.write_remote_file"),
+        patch("n8n_launcher.workspaces.manager.chmod_remote"),
+        patch("n8n_launcher.workspaces.manager.git_add"),
+        patch("n8n_launcher.workspaces.manager.git_commit", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_push_ref"),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_ssh_env", return_value={}),
+        patch.object(WorkspaceManager, "_poll_deploy", return_value=("timeout", {})),
+        pytest.raises(WorkspaceError, match=r"limite de temps|timed out|expir"),
+    ):
+        launcher.publish(workspace)
+
+    assert store.load().workspaces[0].server_last_error is not None
+
+
+def test_disable_server_clears_enabled_and_remote(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    def apply(config: AppConfig) -> Workspace:
+        current = next(w for w in config.workspaces if w.id == workspace.id)
+        current.server = server_cfg()
+        current.git = GitConfig(enabled=True, remote_url="https://github.com/x/y.git")
+        return current
+
+    workspace = launcher.store.mutate(apply)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url", return_value="deploy@host:repo.git"
+        ),
+        patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove,
+    ):
+        launcher.disable_server(workspace)
+
+    so = store.load().workspaces[0]
+    assert so.server.enabled is False
+    remove.assert_called_once_with(workspace.workflows_dir, "server")
+
+
+def test_poll_deploy_returns_ok_marker(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    marker = {"sha": "abc", "status": "ok", "at": 1, "error": ""}
+    import json as _json
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ssh_run") as ssh,
+        patch("n8n_launcher.workspaces.manager.time.monotonic", side_effect=[0.0, 0.01]) as mono,
+    ):
+        result = ssh.return_value
+        result.stdout = _json.dumps(marker)
+        status, payload = launcher._poll_deploy(server_cfg(), "demo", timeout=1.0, interval=0.01)
+
+    assert status == "ok"
+    assert payload["status"] == "ok"
+    mono.assert_called()
+
+
+def test_poll_deploy_returns_error_marker(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    marker = {"sha": "abc", "status": "error", "at": 1, "error": "boom"}
+
+    with patch("n8n_launcher.workspaces.manager.ssh_run") as ssh:
+        ssh.return_value.stdout = json.dumps(marker)
+        status, payload = launcher._poll_deploy(server_cfg(), "demo", timeout=1.0, interval=0.01)
+
+    assert status == "error"
+    assert payload["error"] == "boom"
+
+
+def test_poll_deploy_times_out_when_marker_absent(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ssh_run") as ssh,
+        patch("n8n_launcher.workspaces.manager.time.monotonic", side_effect=[0.0, 99.0]) as mono,
+    ):
+        ssh.return_value.stdout = ""
+        status, payload = launcher._poll_deploy(server_cfg(), "demo", timeout=1.0, interval=0.01)
+
+    assert status == "timeout"
+    assert payload == {}
+
+
+def test_poll_deploy_intervals_back_off_geometrically(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    sleeps: list[float] = []
+    now = [0.0]
+
+    def _monotonic() -> float:
+        now[0] += 0.02
+        return now[0]
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ssh_run") as ssh,
+        patch("n8n_launcher.workspaces.manager.time.monotonic", side_effect=_monotonic),
+        patch("n8n_launcher.workspaces.manager.time.sleep", side_effect=sleeps.append),
+    ):
+        ssh.return_value.stdout = ""
+        status, _ = launcher._poll_deploy(server_cfg(), "demo", timeout=0.5, interval=0.3)
+
+    assert status == "timeout"
+    assert sleeps[0] == 0.3
+    assert sleeps[1] == 0.6
+    assert all(delay <= 1.2 for delay in sleeps)
+    assert sleeps[-1] == 1.2  # capped, never grows past max_interval
+
+
+def test_export_all_credentials_requires_api_key(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with pytest.raises(WorkspaceError, match="démarré une fois"):
+        launcher._export_all_credentials(workspace)
+
+
+def test_export_all_credentials_reads_values(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace.api_key = "k"
+
+    class FakeApi:
+        def list_credentials(self):
+            return [{"id": "c1", "name": "API", "type": "httpRequest"}]
+
+        def get_credential(self, credential_id):
+            return {"id": "c1", "data": {"url": "https://x"}}
+
+    launcher.api_factory = lambda ws, key: FakeApi()
+
+    payload = launcher._export_all_credentials(workspace)
+
+    assert payload == [{"name": "API", "type": "httpRequest", "data": {"url": "https://x"}}]

@@ -10,6 +10,7 @@ from datetime import datetime
 from tkinter import messagebox
 
 from .core.config import ConfigError, ConfigStore
+from .core.filelock import LockError, acquire_single_instance_lock
 from .docker.manager import DockerManager, resolve_docker_command
 from .gui.app import LauncherApp, window_size
 from .gui.first_launch import run_interactive_first_launch
@@ -72,8 +73,21 @@ def _signal_shutdown(store: ConfigStore, docker: DockerManager, *_args: object) 
 def main() -> None:
     """Application entry point: config, first-launch wizard, Tkinter GUI."""
     store = ConfigStore()
+    # Exactly one launcher process may hold the config + compose files at a
+    # time, so refuse to start a second instance instead of racing it.
+    try:
+        instance_lock = acquire_single_instance_lock(store.path.parent)
+    except LockError:
+        with contextlib.suppress(Exception):
+            messagebox.showwarning(
+                "n8n Launcher",
+                "Une autre instance de l'application est déjà en cours d'exécution.",
+            )
+        return
     docker = DockerManager(command=resolve_docker_command())
     atexit.register(stop_all, store, docker)
+    # LIFO: released after stop_all has finished its best-effort shutdown.
+    atexit.register(instance_lock.release)
     try:
         signal.signal(signal.SIGTERM, lambda *_args: _signal_shutdown(store, docker, *_args))
         signal.signal(signal.SIGINT, lambda *_args: _signal_shutdown(store, docker, *_args))
@@ -81,20 +95,24 @@ def main() -> None:
         pass
     root: tk.Tk | None = None
     try:
-        store.load()
-    except ConfigError:
-        # The wizard only represents a true first launch when no config file
-        # exists at all; an existing-but-unreadable file must be backed up
-        # instead of silently replaced with an empty workspace list.
-        root = tk.Tk()
-        _center(root)
-        if store.path.exists():
-            _backup_unreadable_config(store)
-        if run_interactive_first_launch(store, docker, root=root) is None:
-            root.destroy()
-            return
-    manager = WorkspaceManager(store, docker)
-    LauncherApp(store, manager, manager.docker, root=root).run()
+        try:
+            store.load()
+        except ConfigError:
+            # The wizard only represents a true first launch when no config file
+            # exists at all; an existing-but-unreadable file must be backed up
+            # instead of silently replaced with an empty workspace list.
+            root = tk.Tk()
+            _center(root)
+            if store.path.exists():
+                _backup_unreadable_config(store)
+            if run_interactive_first_launch(store, docker, root=root) is None:
+                root.destroy()
+                return
+        manager = WorkspaceManager(store, docker)
+        LauncherApp(store, manager, manager.docker, root=root).run()
+    finally:
+        with contextlib.suppress(Exception):
+            instance_lock.release()
 
 
 if __name__ == "__main__":

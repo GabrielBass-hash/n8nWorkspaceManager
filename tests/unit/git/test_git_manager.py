@@ -6,7 +6,9 @@ import pytest
 
 from n8n_launcher.git import (
     GitError,
+    GitProbeStatus,
     ensure_gitignore,
+    ensure_workspace_branch,
     git_add,
     git_add_remote,
     git_clone,
@@ -17,13 +19,17 @@ from n8n_launcher.git import (
     git_init,
     git_is_repo,
     git_list_remote_branches,
+    git_probe_status,
     git_pull,
     git_pull_new_repo,
     git_push,
+    git_push_ref,
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
     tokenize_remote_url,
+    workspace_branch,
+    workspace_git_lock,
 )
 from n8n_launcher.git.manager import git_current_branch
 
@@ -50,14 +56,82 @@ def test_git_is_repo_false_when_rev_parse_fails(tmp_path: Path) -> None:
         assert git_is_repo(tmp_path) is False
 
 
-def test_git_init_initializes_repo_with_main_branch(tmp_path: Path) -> None:
+def test_git_probe_status_flat_when_not_a_repo(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(128, "", "fatal: not a git repository"),
+    ):
+        assert git_probe_status(tmp_path) == GitProbeStatus()
+
+
+def test_git_probe_status_parses_porcelain_v2(tmp_path: Path) -> None:
+    raw = (
+        "# branch.oid 111111\n"
+        "# branch.head n8n/abc123\n"
+        "# branch.upstream origin/n8n/abc123\n"
+        "# branch.ab +2 -1\n"
+        "1 .M N... 100644 100644 100644 aaa bbb path.json\n"
+    )
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, raw),
+            completed(0, "https://example.test/repo.git\n"),
+        ],
+    ):
+        probe = git_probe_status(tmp_path)
+
+    assert probe.is_repo is True
+    assert probe.dirty is True
+    assert probe.upstream == "origin/n8n/abc123"
+    assert probe.ahead == 2
+    assert probe.remote_url == "https://example.test/repo.git"
+
+
+def test_git_probe_status_clean_repo_without_upstream(tmp_path: Path) -> None:
+    raw = "# branch.oid 111111\n# branch.head n8n/abc123\n"
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[completed(0, raw), completed(128, "", "no such remote")],
+    ):
+        probe = git_probe_status(tmp_path)
+
+    assert probe.is_repo is True
+    assert probe.dirty is False
+    assert probe.upstream is None
+    assert probe.ahead == 0
+    assert probe.remote_url is None
+    assert probe.has_remote is False
+
+
+def test_git_probe_status_flat_when_git_unavailable(tmp_path: Path) -> None:
+    with patch("n8n_launcher.git.manager.subprocess.run", side_effect=OSError("boom")):
+        probe = git_probe_status(tmp_path)
+
+    assert probe == GitProbeStatus()
+
+
+def test_git_probe_status_parses_initial_branch_header(tmp_path: Path) -> None:
+    raw = "# branch.oid (initial)\n# branch.head n8n/abc123\n"
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, raw),
+    ):
+        probe = git_probe_status(tmp_path)
+
+    assert probe.is_repo is True
+    assert probe.dirty is False
+    assert probe.ahead == 0
+
+
+def test_git_init_initializes_repo_with_dev_branch(tmp_path: Path) -> None:
     with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
         git_init(tmp_path)
 
     calls = [call.args[0] for call in run.call_args_list]
     assert calls == [
         ["git", "init"],
-        ["git", "branch", "-M", "main"],
+        ["git", "branch", "-M", "dev"],
         ["git", "config", "--get", "user.name"],
         ["git", "config", "--get", "user.email"],
         ["git", "config", "user.name", "n8n-launcher"],
@@ -86,7 +160,7 @@ def test_git_init_adds_remote_when_provided(tmp_path: Path) -> None:
     calls = [call.args[0] for call in run.call_args_list]
     assert calls == [
         ["git", "init"],
-        ["git", "branch", "-M", "main"],
+        ["git", "branch", "-M", "dev"],
         ["git", "config", "--get", "user.name"],
         ["git", "config", "--get", "user.email"],
         ["git", "config", "user.name", "n8n-launcher"],
@@ -586,3 +660,199 @@ def test_git_current_branch_empty_when_detached(tmp_path: Path) -> None:
         return_value=completed(1, "", "fatal: ref HEAD is not a symbolic ref"),
     ):
         assert git_current_branch(tmp_path) == ""
+
+
+def test_git_push_ref_pushes_src_to_dst(tmp_path: Path) -> None:
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_push_ref(tmp_path, "server", "HEAD", "main")
+
+    assert run.call_args.args[0] == ["git", "push", "server", "HEAD:main"]
+
+
+def test_git_push_ref_forwards_env(tmp_path: Path) -> None:
+    env = {"GIT_SSH_COMMAND": "ssh -i /tmp/key"}
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_push_ref(tmp_path, "server", "dev", "main", env=env)
+
+    assert run.call_args.args[0] == ["git", "push", "server", "dev:main"]
+    forwarded = run.call_args.kwargs["env"]
+    assert forwarded["GIT_SSH_COMMAND"] == "ssh -i /tmp/key"
+    assert "PATH" in forwarded
+
+
+def test_git_ssh_env_embeds_key_and_batch_mode(tmp_path: Path) -> None:
+    from n8n_launcher.git.manager import git_ssh_env
+
+    env = git_ssh_env("/home/me/.ssh/id_ed25519")
+    command = env["GIT_SSH_COMMAND"]
+    assert "/home/me/.ssh/id_ed25519" in command
+    assert "BatchMode=yes" in command
+    assert "StrictHostKeyChecking=accept-new" in command
+
+
+def test_ensure_workspace_branch_noop_when_already_active(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, "dev\n"),
+    ) as run:
+        assert ensure_workspace_branch(tmp_path, "dev") == "dev"
+    assert run.call_count == 1
+    assert run.call_args.args[0] == ["git", "symbolic-ref", "--short", "HEAD"]
+
+
+def test_ensure_workspace_branch_returns_none_when_not_a_repo(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(128, "", "fatal: not a git repository"),
+    ):
+        assert ensure_workspace_branch(tmp_path, "dev") is None
+
+
+def test_ensure_workspace_branch_switches_to_existing_local_branch(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(0, ""),  # HEAD exists
+            completed(0, "  dev\n"),  # local dev branch present
+            completed(),  # checkout dev
+        ],
+    ) as run:
+        assert ensure_workspace_branch(tmp_path, "dev") == "dev"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert calls[-1] == ["git", "checkout", "dev"]
+
+
+def test_ensure_workspace_branch_switches_to_remote_branch_without_push(
+    tmp_path: Path,
+) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(0, ""),  # HEAD exists
+            completed(0, ""),  # no local branch
+            completed(0, "refs/remotes/origin/n8n/abc123\n"),  # origin branch known
+            completed(),  # checkout -b n8n/abc123 origin/n8n/abc123
+        ],
+    ) as run:
+        assert ensure_workspace_branch(tmp_path, "n8n/abc123") == "n8n/abc123"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert calls[-1] == ["git", "checkout", "-b", "n8n/abc123", "origin/n8n/abc123"]
+
+
+def test_ensure_workspace_branch_creates_local_and_pushes_when_origin_lacks_it(
+    tmp_path: Path,
+) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),  # symbolic-ref
+            completed(0, ""),  # HEAD exists
+            completed(0, ""),  # no local branch
+            completed(0, ""),  # no origin tracking
+            completed(),  # fetch origin
+            completed(0, ""),  # still no origin branch
+            completed(),  # checkout -b n8n/abc123
+            completed(0, "origin\n"),  # ensure_workspace_branch git_has_remote
+            completed(0, "origin\n"),  # git_push git_has_remote
+            completed(0, "n8n/abc123\n"),  # git_push _current_branch
+            completed(),  # push -u origin n8n/abc123
+        ],
+    ) as run:
+        assert ensure_workspace_branch(tmp_path, "n8n/abc123") == "n8n/abc123"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["git", "checkout", "-b", "n8n/abc123"] in calls
+    assert ["git", "push", "-u", "origin", "n8n/abc123"] in calls
+
+
+def test_ensure_workspace_branch_fetches_then_uses_remote_branch(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(0, ""),  # HEAD exists
+            completed(0, ""),  # no local branch
+            completed(0, ""),  # no origin tracking yet
+            completed(),  # fetch origin
+            completed(0, "refs/remotes/origin/n8n/abc123\n"),  # now present
+            completed(),  # checkout -b n8n/abc123 origin/n8n/abc123
+        ],
+    ) as run:
+        assert ensure_workspace_branch(tmp_path, "n8n/abc123") == "n8n/abc123"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["git", "fetch", "origin"] in calls
+    assert calls[-1] == ["git", "checkout", "-b", "n8n/abc123", "origin/n8n/abc123"]
+
+
+def test_ensure_workspace_branch_renames_unborn_main(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(128, "", "fatal: bad revision HEAD"),  # unborn
+            completed(),  # symbolic-ref HEAD refs/heads/dev
+        ],
+    ) as run:
+        assert ensure_workspace_branch(tmp_path, "dev") == "dev"
+
+    assert run.call_args.args[0] == ["git", "symbolic-ref", "HEAD", "refs/heads/dev"]
+
+
+def test_workspace_branch_is_per_id(tmp_path: Path) -> None:
+    assert workspace_branch("ab12cd34") == "n8n/ab12cd34"
+    assert workspace_branch("xyz") == "n8n/xyz"
+
+
+def test_git_remote_url_named(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[completed(0, "deploy@host:repo.git\n"), completed(1, "")],
+    ) as run:
+        url = git_remote_url(tmp_path, "server")
+        missing = git_remote_url(tmp_path, "server")
+
+    assert url == "deploy@host:repo.git"
+    assert missing is None
+    assert [c.args[0] for c in run.call_args_list] == [
+        ["git", "remote", "get-url", "server"],
+        ["git", "remote", "get-url", "server"],
+    ]
+
+
+def test_workspace_git_lock_is_noop_outside_a_repo(tmp_path: Path) -> None:
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            return_value=completed(128, "", "fatal: not a git repository"),
+        ),
+        workspace_git_lock(tmp_path),
+    ):
+        pass
+    assert not (tmp_path / ".n8n-launcher.git.lock").exists()
+
+
+def test_workspace_git_lock_creates_and_releases_lock_file(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, "/tmp/.git\n"),
+    ):
+        with workspace_git_lock(tmp_path):
+            assert (tmp_path / ".n8n-launcher.git.lock").exists()
+            # Re-entrant across nested layers shares one OS lock.
+            with workspace_git_lock(tmp_path):
+                pass
+        # After the outermost layer, the OS lock is released and the file may
+        # be taken safely by a fresh process.
+        with workspace_git_lock(tmp_path):
+            pass
+
+
+def test_gitignore_locks_out_the_git_lock_file() -> None:
+    from n8n_launcher.git.manager import GITIGNORE_BODY
+
+    assert ".n8n-launcher.git.lock" in GITIGNORE_BODY

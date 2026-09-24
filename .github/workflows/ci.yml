@@ -120,7 +120,7 @@ jobs:
       - name: Download the three structural snapshots
         uses: actions/download-artifact@v4
         with:
-          name: structure-*
+          pattern: structure-*
           path: parity-snapshots
           merge-multiple: true
 

@@ -19,19 +19,27 @@ Each workspace is a user-defined n8n instance bound to a folder of workflow expo
 
 ### Git synchronization
 
-Git is optional per-workspace and configured at creation or later via the "Configurer Git…" context menu. When enabled with a remote:
+Git is optional per-workspace and configured at creation or later via the "Configurer Git…" context menu. Every launcher-created repo works on its own branch **`n8n/<id>`** (legacy `main`/`dev` branches are renamed on first start); git lifecycle calls are serialized per-workspace. When enabled with a remote:
 
 - **Auto-pull on start** — `git pull --rebase` brings remote JSON changes into the workspace folder before workflow import.
-- **Auto-push on close** — n8n workflows are exported to JSON, staged, committed with a timestamped message, and pushed. Push is skipped when there is nothing to commit *and* no unpushed commits.
+- **Auto-push on close** — n8n workflows are exported to JSON, staged, committed with a timestamped message, and pushed. Push is skipped when there is nothing to commit *and* no unpushed commits. Server-side push rejections are retried once.
 - **Push failures never block**: a `git_push_failed` flag is persisted and surfaced as a warning chip and dialog; failures are logged, never raised.
 
 ### GitHub repo creation
 
 When no remote is set, the "Créer sur GitHub…" flow creates the repository via the GitHub REST API, stores the clean `https://github.com/<owner>/<name>.git` URL, and seeds the remote with a one-shot tokenized URL (`https://<token>@github.com/...`) so the token never lands in `.git/config`. CI eligibility (`github_repo_path`) stays intact because the stored URL is unencoded.
 
+### Remote server deployment
+
+Deployment to a production server is optional per-workspace ("Configurer le serveur…", persisted as `ServerConfig`) and driven from the same git repo: publishing pushes the workspace branch **`n8n/<id>`** to the server's bare repo as its `main` (the production reference). "Publier sur le serveur…" waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
+
+- `install_server` creates the bare repo (`git init --bare`), ships a generated `post-receive` hook and `deploy.py` (marker-commented, template strings), all transferred atomically (`write_remote_file`: `cat > path.tmp && mv`).
+- The server Compose file adds a top-level `name: n8n-ws-<id>` so the project is stable regardless of the checkout directory; the hook runs `docker compose -p "$PROJECT" up -d` and every remote migration/import uses that pinned project.
+- `deploy.py` applies `db/migrations/*.sql` (per-file statement timeout), recreates credentials and imports the pipelines — deduplicating by basename so root mirror copies never upload a workflow twice. Secrets travel as a `secrets.json` scp'd at publish; nothing is committed to git.
+
 ### GitHub Actions CI
 
-Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests, configured entirely from the GUI:
+Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests, configured entirely from the GUI. Runs are triggered manually or by pushes on the per-workspace `n8n/**` branches:
 
 - **Enabling** (`Configurer les tests GitHub Actions…`) generates three files in the workspace repo — `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed selection `.n8n-tests/tests.json`. Every generated file carries the marker *« n8n-launcher : généré — ne pas modifier à la main »*. Changes are committed and pushed on enable.
 - **Pipeline eligibility**: a pipeline is testable iff it has a manual trigger, a schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every non-pinned node's credential types are covered by the recorded CI credentials. Ineligible pipelines are greyed out with a reason.

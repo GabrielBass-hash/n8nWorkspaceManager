@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from helpers import FakeRoot, FakeTk, FakeTtk, fake_runs_panel_bases, make_workspace
 
 from n8n_launcher.github.api import GitHubError
+from n8n_launcher.gui.app import CI_RUNS_TTL_SECONDS
 from n8n_launcher.gui.ci_edit import (
     RUNS_POLL_ACTIVE_MS,
     RUNS_POLL_IDLE_MS,
@@ -598,7 +600,7 @@ def test_build_ci_runs_snapshot_composes_payloads(app) -> None:
     with patch("n8n_launcher.gui.app.GitHubClient", return_value=client) as client_cls:
         snapshot = app.app._build_ci_runs_snapshot(workspace)
 
-    client_cls.assert_called_once_with("ghp_x")
+    client_cls.assert_called_once_with("ghp_x", session=app.app._github_session)
     assert snapshot.repo_path == "octo/repo"
     assert snapshot.runs[0].id == 11
     assert snapshot.jobs[11][0].name == "validate"
@@ -723,10 +725,10 @@ def test_ci_latest_branch_prefers_cached_run(app) -> None:
     assert app.app._ci_latest_branch(workspace) == "main"
 
 
-def test_ci_latest_branch_falls_back_to_main(app) -> None:
+def test_ci_latest_branch_falls_back_to_dev(app) -> None:
     workspace = app.manager.list.return_value[1]
 
-    assert app.app._ci_latest_branch(workspace) == "main"
+    assert app.app._ci_latest_branch(workspace) == "dev"
 
 
 def test_ci_runs_run_dispatches_chosen_ref_and_refreshes(app) -> None:
@@ -746,10 +748,10 @@ def test_ci_runs_run_dispatches_chosen_ref_and_refreshes(app) -> None:
         app.app._ci_runs_run(workspace, panel)
         app.app._drain_events()
 
-    prompt.assert_called_once_with(app.app.root, "wf.yml", "main")
+    prompt.assert_called_once_with(app.app.root, "wf.yml", "dev")
     client.dispatch_workflow.assert_called_once_with("octo/repo", "wf.yml", ref="release")
     status.assert_called_once_with("CI lancée sur « release ».")
-    refresh.assert_called_once_with(workspace, panel)
+    refresh.assert_called_once_with(workspace, panel, force=True)
 
 
 def test_ci_runs_run_cancelled_ref_is_noop(app) -> None:
@@ -899,11 +901,12 @@ def test_build_ci_runs_snapshot_details_only_the_active_run(app) -> None:
         snapshot = app.app._build_ci_runs_snapshot(workspace)
 
     # Jobs + logs fetched for the active run only; the finished runs stay rows.
+    # The log downloads run in parallel, so the recorded order is arbitrary.
     client.list_run_jobs.assert_called_once_with("octo/repo", 13)
-    assert client.fetch_job_logs.call_args_list == [
-        (("octo/repo", 21),),
-        (("octo/repo", 22),),
-    ]
+    assert {tuple(call.args) for call in client.fetch_job_logs.call_args_list} == {
+        ("octo/repo", 21),
+        ("octo/repo", 22),
+    }
     # Both the finished job and the in-flight job's logs are parsed.
     assert snapshot.pipelines[21][0].rel == "n8nPipelines/a.json"
     assert snapshot.pipelines[22][0].rel == "n8nPipelines/b.json"
@@ -924,3 +927,58 @@ def test_refresh_ci_runs_is_noop_while_a_fetch_is_in_flight(app) -> None:
     assert app.app._ci_runs_fetch_in_flight is True
     app.app._drain_events()
     panel.apply.assert_not_called()
+
+
+def test_refresh_ci_runs_serves_fresh_cache_without_network(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    panel = MagicMock()
+    snapshot = ci_runs.RunsSnapshot("octo/repo")
+    app.app._ci_runs_cache[workspace.id] = snapshot
+    app.app._ci_runs_fetched_at[workspace.id] = time.monotonic()
+
+    with patch("n8n_launcher.gui.app.GitHubClient") as client_cls:
+        app.app._refresh_ci_runs(workspace, panel)
+        # The cache hit is applied immediately, synchronously.
+        panel.apply.assert_called_once_with(snapshot)
+        app.app._ci_token_declined = True  # the UI prompt never fired
+
+    client_cls.assert_not_called()
+
+
+def test_refresh_ci_runs_refetches_when_cache_is_stale(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    app.app._ci_runs_cache[workspace.id] = ci_runs.RunsSnapshot("octo/repo")
+    app.app._ci_runs_fetched_at[workspace.id] = time.monotonic() - CI_RUNS_TTL_SECONDS - 1.0
+    client = MagicMock()
+    client.list_workflow_runs.return_value = []
+    panel = MagicMock()
+
+    with patch("n8n_launcher.gui.app.GitHubClient", return_value=client) as client_cls:
+        app.app._refresh_ci_runs(workspace, panel)
+
+    client_cls.assert_called_with("ghp_x", session=app.app._github_session)
+    app.app._drain_events()
+    panel.apply.assert_called_once()
+    # The freshness window starts over.
+    assert app.app._ci_runs_fetched_at[workspace.id] > time.monotonic() - 1.0
+
+
+def test_refresh_ci_runs_force_bypasses_freshness_window(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    app.app._ci_token = "ghp_x"
+    app.app._ci_runs_cache[workspace.id] = ci_runs.RunsSnapshot("octo/repo")
+    app.app._ci_runs_fetched_at[workspace.id] = time.monotonic()
+    client = MagicMock()
+    client.list_workflow_runs.return_value = []
+    panel = MagicMock()
+
+    with patch("n8n_launcher.gui.app.GitHubClient", return_value=client):
+        app.app._refresh_ci_runs(workspace, panel, force=True)
+
+    # A just-dispatched run must surface now, not after the TTL.
+    client.list_workflow_runs.assert_called_once_with("octo/repo")
+    app.app._drain_events()
+    panel.apply.assert_called_once()

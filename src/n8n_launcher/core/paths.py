@@ -15,8 +15,13 @@ def config_dir() -> Path:
 
 
 def config_file() -> Path:
-    """Return the full path of the JSON configuration file."""
+    """Return the path of the legacy JSON configuration file."""
     return config_dir() / "config.json"
+
+
+def launcher_db() -> Path:
+    """Return the full path of the SQLite configuration database."""
+    return config_dir() / "launcher.db"
 
 
 def logs_dir() -> Path:

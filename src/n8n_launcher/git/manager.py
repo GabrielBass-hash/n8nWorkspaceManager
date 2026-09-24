@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
+
+from ..core.filelock import FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +22,15 @@ logger = logging.getLogger(__name__)
 LAUNCHER_GIT_NAME = "n8n-launcher"
 LAUNCHER_GIT_EMAIL = "n8n-launcher@local"
 
+# Lock file whose exclusive hold serializes git operations on one workspace
+# (state-changing reads + commit + push must never interleave, whether from a
+# background thread or from a second launcher process racing the first).
+GIT_LOCK_FILENAME = ".n8n-launcher.git.lock"
+
 # Default ignore rules written into freshly initialized repos: keeps the
 # launcher's ``git add -A`` from sweeping volatile or environment files into
-# workflow history.
+# workflow history. The git lock file itself is ignored so a ``git add -A``
+# never stages a lock that exist only while the launcher runs.
 GITIGNORE_BODY = """# n8n-Launcher : fichiers locaux ou volatiles exclus du versionnement.
 .env
 .env.*
@@ -28,16 +41,77 @@ Thumbs.db
 .vscode/
 __pycache__/
 *.py[cod]
+.n8n-launcher.git.lock
 """
+
+
+def workspace_branch(workspace_id: str) -> str:
+    """Return the per-workspace git branch the launcher coordinates on.
+
+    Every workspace syncs on its own ``n8n/<id>`` branch, so two workspaces
+    pushing from different machines (or two instances of the same workspace)
+    never fight over ``dev``/``main``: each branch behaves like an append-only
+    per-workspace queue that a remote server can draft spontaneously.
+    """
+    return f"n8n/{workspace_id}"
+
+
+class _GitLockOwner:
+    """Per-workflow-dir holder combining a thread RLock and an OS file lock."""
+
+    def __init__(self, lock_file: FileLock) -> None:
+        self.lock_file = lock_file
+        self.rlock = threading.RLock()
+        self.depth = 0
+
+
+_lock_owners: dict[Path, _GitLockOwner] = {}
+_lock_owners_guard = threading.Lock()
+
+
+@contextmanager
+def workspace_git_lock(path: Path) -> Iterator[None]:
+    """Serialize every git operation on *path*'s working tree.
+
+    Re-entrant across the call stack of the current thread (nested layers such
+    as ``sync_git`` → ``_commit_and_push`` share one OS lock) but exclusive
+    between threads and between separate processes. The OS lock lives in a
+    dedicated ``.n8n-launcher.git.lock`` file inside the working tree, ignored
+    by ``git add -A`` (see :data:`GITIGNORE_BODY`).
+    """
+    if not git_is_repo(path):
+        yield
+        return
+    with _lock_owners_guard:
+        owner = _lock_owners.get(path)
+        if owner is None:
+            owner = _lock_owners[path] = _GitLockOwner(FileLock(path / GIT_LOCK_FILENAME))
+    with owner.rlock:
+        owner.depth += 1
+        if owner.depth == 1:
+            owner.lock_file.acquire()
+        try:
+            yield
+        finally:
+            owner.depth -= 1
+            if owner.depth == 0:
+                owner.lock_file.release()
 
 
 class GitError(RuntimeError):
     """Raised when a git operation fails."""
 
 
-def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    args: list[str],
+    cwd: Path,
+    *,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result."""
     cmd = ["git", *args]
+    full_env = {**os.environ, **(env or {})}
     try:
         result = subprocess.run(
             cmd,
@@ -45,6 +119,7 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.Co
             capture_output=True,
             text=True,
             timeout=30,
+            env=full_env,
         )
     except FileNotFoundError:
         raise GitError("git is not installed or not found in PATH") from None
@@ -71,11 +146,82 @@ def git_is_repo(path: Path) -> bool:
         return False
 
 
-def git_init(path: Path, *, remote_url: str | None = None) -> None:
-    """Initialize a new git repo at *path* and optionally add a remote."""
+@dataclass(frozen=True)
+class GitProbeStatus:
+    """Local-only git snapshot produced by :func:`git_probe_status`.
+
+    Everything here is derived from a single ``git status --porcelain=v2``
+    call plus a remote URL lookup — no network, no state change. It feeds the
+    GUI row refresh; state-changing commands (pull/push/commit) must keep
+    using the dedicated helpers under :func:`workspace_git_lock`.
+    """
+
+    is_repo: bool = False
+    dirty: bool = False
+    upstream: str | None = None
+    ahead: int = 0
+    remote_url: str | None = None
+
+    @property
+    def has_remote(self) -> bool:
+        return self.remote_url is not None
+
+
+def git_probe_status(path: Path) -> GitProbeStatus:
+    """Probe a repository's display-relevant state in two subprocess spawns.
+
+    One ``git status --porcelain=v2 --branch`` yields repo presence, the dirty
+    flag, the upstream branch and the ahead/behind counts; one
+    ``git remote get-url origin`` yields the origin URL for the GUI tooltip.
+    This is the cheap probe the GUI refreshes rows with — it never blocks on
+    networking and never mutates the repository. A repository that is missing
+    or whose git is unavailable degrades to a flat ``GitProbeStatus``.
+    """
+    try:
+        result = _run_git(["status", "--porcelain=v2", "--branch"], cwd=path, check=False)
+    except GitError:
+        return GitProbeStatus()
+    if result.returncode != 0:
+        return GitProbeStatus()
+    dirty = False
+    upstream: str | None = None
+    ahead = 0
+    for line in result.stdout.splitlines():
+        if line.startswith("# branch.upstream"):
+            upstream = line.split(" ", 2)[2].strip() or None
+        elif line.startswith("# branch.ab"):
+            parts = line.split()
+            if len(parts) >= 3:
+                ahead = _branch_ab_count(parts[2])
+        elif not line.startswith("# "):
+            # Any non-header line (worktree, index, untracked) means dirt.
+            dirty = True
+    return GitProbeStatus(
+        is_repo=True,
+        dirty=dirty,
+        upstream=upstream,
+        ahead=ahead,
+        remote_url=git_remote_url(path),
+    )
+
+
+def _branch_ab_count(token: str) -> int:
+    """Parse the ``+N`` token of ``# branch.ab +N -M`` into a positive count."""
+    try:
+        return int(token.lstrip("+-"))
+    except ValueError:
+        return 0
+
+
+def git_init(path: Path, *, remote_url: str | None = None, branch: str | None = None) -> None:
+    """Initialize a new git repo at *path* and optionally add a remote.
+
+    The primary branch is *branch* (the per-workspace ``n8n/<id>`` when called
+    by the manager), falling back to ``dev`` for backward compatibility.
+    """
     path.mkdir(parents=True, exist_ok=True)
     _run_git(["init"], cwd=path)
-    _run_git(["branch", "-M", "main"], cwd=path)
+    _run_git(["branch", "-M", branch or "dev"], cwd=path)
     _configure_repo_identity(path)
     ensure_gitignore(path)
     if remote_url:
@@ -177,6 +323,38 @@ def git_has_unpushed_commits(path: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def git_ssh_env(key_path: str) -> dict[str, str]:
+    """Return an env dict making git authenticate with *key_path* over SSH.
+
+    Used for the launcher's own ``server`` remote: git spawns system ``ssh``,
+    which needs the workspace's configured key (the machine's default identity
+    is usually a different, personal key). Commands run in batch mode so a
+    missing key or unknown host fails loudly instead of hanging on a prompt.
+    """
+    return {
+        "GIT_SSH_COMMAND": (
+            f"ssh -i {key_path} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        )
+    }
+
+
+def git_push_ref(
+    path: Path,
+    remote: str,
+    src: str,
+    dst: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Push *src* to *dst* on *remote* with an explicit refspec (no ``-u``).
+
+    Publishing uses ``HEAD:main`` so the production branch is the local current
+    state whatever the branch is called — no local ``main`` branch required.
+    """
+    _run_git(["push", remote, f"{src}:{dst}"], cwd=path, env=env)
+    logger.info("Pushed %s:%s to %s in %s", src, dst, remote, path)
+
+
 def git_seed_remote(
     path: Path, remote_url: str, token: str, *, message: str = "n8n-launcher: initial"
 ) -> None:
@@ -270,9 +448,74 @@ def git_has_remote(path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def git_remote_url(path: Path) -> str | None:
-    """Return the URL of the 'origin' remote, or None."""
-    result = _run_git(["remote", "get-url", "origin"], cwd=path, check=False)
+def ensure_workspace_branch(path: Path, branch: str) -> str | None:
+    """Make *branch* the active branch, creating it when needed.
+
+    Idempotent and best-effort:
+    - already on *branch* → nothing;
+    - an existing local *branch* is checked out as-is;
+    - a *branch* known on ``origin`` (tracking ref, or discovered by fetching)
+      is checked out from it;
+    - otherwise *branch* is created from the current HEAD and pushed to
+      ``origin``. A repository whose historical ``main``/``dev`` content must
+      keep working therefore inherits it into the new branch automatically.
+
+    Returns the active branch name, or ``None`` when *path* is not a repository.
+    Never raises: git failures at any step degrade to a warning and a return.
+    """
+    try:
+        current = _current_branch(path)
+    except GitError:
+        return None
+    if not current:
+        # Detached HEAD or not a repository at all: nothing to ensure.
+        return None
+    if current == branch:
+        return branch
+    has_head = _run_git(["rev-parse", "--verify", "HEAD"], cwd=path, check=False)
+    if has_head.returncode != 0:
+        # Unborn HEAD (no commits yet): point the active branch ref at *branch*.
+        try:
+            _run_git(["symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=path)
+        except GitError as exc:
+            logger.warning("Could not rename the unborn branch to %s: %s", branch, exc)
+            return current
+        logger.info("Renamed the unborn branch to %s in %s", branch, path)
+        return branch
+    local = _run_git(["branch", "--list", branch], cwd=path)
+    if local.stdout.strip():
+        _run_git(["checkout", branch], cwd=path)
+        return branch
+    remote = _run_git(
+        ["for-each-ref", "--format=%(refname)", f"refs/remotes/origin/{branch}"],
+        cwd=path,
+        check=False,
+    )
+    if not remote.stdout.strip():
+        try:
+            _run_git(["fetch", "origin"], cwd=path)
+        except GitError as exc:
+            logger.warning("Could not fetch origin for %s: %s", path, exc)
+        remote = _run_git(
+            ["for-each-ref", "--format=%(refname)", f"refs/remotes/origin/{branch}"],
+            cwd=path,
+            check=False,
+        )
+    if remote.stdout.strip():
+        _run_git(["checkout", "-b", branch, f"origin/{branch}"], cwd=path)
+        return branch
+    _run_git(["checkout", "-b", branch], cwd=path)
+    try:
+        if git_has_remote(path):
+            git_push(path)
+    except GitError as exc:
+        logger.warning("Could not push the fresh %s branch for %s: %s", branch, path, exc)
+    return branch
+
+
+def git_remote_url(path: Path, name: str = "origin") -> str | None:
+    """Return the URL of the named remote (default ``origin``), or None."""
+    result = _run_git(["remote", "get-url", name], cwd=path, check=False)
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None

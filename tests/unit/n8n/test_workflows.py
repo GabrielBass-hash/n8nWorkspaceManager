@@ -70,3 +70,48 @@ def test_sync_runner_import_skips_unknown_and_non_workflow_files(tmp_path: Path)
     assert report.pushed == 0
     assert report.skipped == 2
     api.create_workflow.assert_not_called()
+
+
+def test_sync_runner_export_refreshes_pipelines_and_root_mirror(tmp_path: Path) -> None:
+    pipelines = tmp_path / "n8nPipelines"
+    root = tmp_path
+    api = MagicMock()
+    api.list_workflows.return_value = [
+        {"id": "1", "name": "Meteo"},
+        {"id": "2", "name": "Nightly"},
+    ]
+    api.get_workflow.side_effect = [
+        {"id": "1", "name": "Meteo", "nodes": []},
+        {"id": "2", "name": "Nightly", "nodes": []},
+    ]
+    # Pre-existing launcher-named stale export and an unrelated root file.
+    (root / "Meteo-1.json").write_text("stale", encoding="utf-8")
+    (root / "Gone-9.json").write_text("orphan", encoding="utf-8")
+    (root / "package.json").write_text('{"name": "app"}', encoding="utf-8")
+    runner = SyncRunner(api, pipelines)
+
+    report = runner.export_all(mirror=root)
+
+    assert report.pulled == 2
+    assert (pipelines / "Meteo-1.json").exists()
+    assert (pipelines / "Nightly-2.json").exists()
+    for path in (root / "Meteo-1.json", root / "Nightly-2.json"):
+        assert path.read_text(encoding="utf-8").startswith('{\n  "id"')
+    # Launcher-owned orphan cleaned, user file untouched.
+    assert not (root / "Gone-9.json").exists()
+    assert (root / "package.json").exists()
+
+
+def test_sync_runner_export_without_mirror_leaves_root_untouched(tmp_path: Path) -> None:
+    pipelines = tmp_path / "n8nPipelines"
+    root = tmp_path
+    (root / "outsider-42.json").write_text("user owned", encoding="utf-8")
+    api = MagicMock()
+    api.list_workflows.return_value = [{"id": "1", "name": "Meteo"}]
+    api.get_workflow.return_value = {"id": "1", "name": "Meteo", "nodes": []}
+    runner = SyncRunner(api, pipelines)
+
+    runner.export_all()
+
+    assert (pipelines / "Meteo-1.json").exists()
+    assert (root / "outsider-42.json").read_text(encoding="utf-8") == "user owned"
