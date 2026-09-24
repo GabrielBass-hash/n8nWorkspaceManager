@@ -7,6 +7,7 @@ from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 from n8n_launcher.docker.manager import (
     DockerManager,
     parse_compose_status,
+    parse_container_states,
     resolve_docker_command,
 )
 
@@ -107,3 +108,66 @@ def test_parse_compose_status_ignores_garbage_lines() -> None:
 
 def test_parse_compose_status_empty_when_no_rows() -> None:
     assert parse_compose_status("") == {}
+
+
+def test_parse_container_states_groups_by_compose_project() -> None:
+    raw = (
+        '{"Id":"a","State":"running","Labels":{"com.docker.compose.project":"n8n-ws-1",'
+        '"com.docker.compose.service":"n8n"}}\n'
+        '{"Id":"b","State":"exited","Labels":{"com.docker.compose.project":"n8n-ws-2",'
+        '"com.docker.compose.service":"n8n"}}\n'
+        '{"Id":"c","State":"running","Labels":{"com.docker.compose.project":"n8n-ws-2",'
+        '"com.docker.compose.service":"postgres"}}\n'
+    )
+    assert parse_container_states(raw) == {
+        "n8n-ws-1": {"n8n": "running"},
+        "n8n-ws-2": {"n8n": "exited", "postgres": "running"},
+    }
+
+
+def test_parse_container_states_accepts_string_labels() -> None:
+    raw = (
+        '{"Id":"a","State":"paused","Labels":"{\\"com.docker.compose.project\\":\\"n8n-ws-1\\",'
+        '\\"com.docker.compose.service\\":\\"n8n\\"}"}\n'
+    )
+    assert parse_container_states(raw) == {"n8n-ws-1": {"n8n": "paused"}}
+
+
+def test_parse_container_states_ignores_non_compose_containers() -> None:
+    raw = (
+        '{"Id":"a","State":"running","Labels":{"com.docker.compose.project":"n8n-ws-1",'
+        '"com.docker.compose.service":"n8n"}}\n'
+        '{"Id":"b","State":"running","Labels":{"org.label-schema.name":"influxdb"}}\n'
+        "not-json\n"
+    )
+    assert parse_container_states(raw) == {"n8n-ws-1": {"n8n": "running"}}
+
+
+def test_parse_container_states_empty_when_no_rows() -> None:
+    assert parse_container_states("") == {}
+
+
+def test_list_project_states_runs_one_docker_ps_batch(tmp_path: Path) -> None:
+    manager = DockerManager()
+    raw = (
+        '{"Id":"a","State":"running","Labels":{"com.docker.compose.project":"n8n-ws-abc123",'
+        '"com.docker.compose.service":"n8n"}}\n'
+    )
+
+    with patch("n8n_launcher.docker.manager.subprocess.run", return_value=completed(stdout=raw)):
+        states = manager.list_project_states()
+
+    assert states == {"n8n-ws-abc123": {"n8n": "running"}}
+
+
+def test_list_project_states_raises_when_daemon_fails(tmp_path: Path) -> None:
+    manager = DockerManager()
+
+    with (
+        patch(
+            "n8n_launcher.docker.manager.subprocess.run",
+            return_value=completed(1, stderr="cannot connect"),
+        ),
+        pytest.raises(Exception, match="cannot connect"),
+    ):
+        manager.list_project_states()

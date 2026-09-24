@@ -105,6 +105,13 @@ def test_render_hook_contains_marker_and_filters_main() -> None:
     assert "last-deploy.json" in hook
 
 
+def test_render_hook_serializes_deploys_with_flock() -> None:
+    hook = deploy.render_hook(CFG, "abc123")
+
+    assert "flock -x 9" in hook
+    assert '9>>"$BASE/.deploy.lock"' in hook
+
+
 def test_render_hook_pins_the_compose_project() -> None:
     hook = deploy.render_hook(CFG, "abc123")
 

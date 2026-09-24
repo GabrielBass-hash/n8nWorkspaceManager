@@ -6,6 +6,7 @@ The public surface is re-exported here so consumers can import from
 
 from .manager import (
     GitError,
+    GitProbeStatus,
     ensure_gitignore,
     ensure_workspace_branch,
     git_add,
@@ -19,6 +20,7 @@ from .manager import (
     git_init,
     git_is_repo,
     git_list_remote_branches,
+    git_probe_status,
     git_pull,
     git_pull_new_repo,
     git_push,
@@ -35,6 +37,7 @@ from .manager import (
 
 __all__ = [
     "GitError",
+    "GitProbeStatus",
     "ensure_gitignore",
     "ensure_workspace_branch",
     "git_add",
@@ -48,6 +51,7 @@ __all__ = [
     "git_init",
     "git_is_repo",
     "git_list_remote_branches",
+    "git_probe_status",
     "git_pull",
     "git_pull_new_repo",
     "git_push",

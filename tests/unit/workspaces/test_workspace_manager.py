@@ -240,16 +240,14 @@ def test_reconcile_all_persists_live_states(tmp_path: Path) -> None:
     workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
-    docker.status.return_value = ComposeStatus(
-        raw_output='{"Service":"postgres","State":"running"}\n{"Service":"n8n","State":"running"}\n',
-        returncode=0,
-    )
+    docker.list_project_states.return_value = {f"n8n-ws-{workspace.id}": {"n8n": "running"}}
 
     with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
         changed = launcher.reconcile_all()
 
     assert changed == 1
     assert store.load().workspaces[0].state is WorkspaceState.RUNNING
+    docker.list_project_states.assert_called_once_with()
 
 
 def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
@@ -257,7 +255,7 @@ def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
     workspace = create_none(launcher, tmp_path)
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n", encoding="utf-8")
-    docker.status.return_value = ComposeStatus(raw_output="", returncode=0)
+    docker.list_project_states.return_value = {}
 
     with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
         changed = launcher.reconcile_all()
@@ -1792,7 +1790,30 @@ def test_poll_deploy_times_out_when_marker_absent(tmp_path: Path) -> None:
 
     assert status == "timeout"
     assert payload == {}
-    mono.assert_called()
+
+
+def test_poll_deploy_intervals_back_off_geometrically(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    sleeps: list[float] = []
+    now = [0.0]
+
+    def _monotonic() -> float:
+        now[0] += 0.02
+        return now[0]
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ssh_run") as ssh,
+        patch("n8n_launcher.workspaces.manager.time.monotonic", side_effect=_monotonic),
+        patch("n8n_launcher.workspaces.manager.time.sleep", side_effect=sleeps.append),
+    ):
+        ssh.return_value.stdout = ""
+        status, _ = launcher._poll_deploy(server_cfg(), "demo", timeout=0.5, interval=0.3)
+
+    assert status == "timeout"
+    assert sleeps[0] == 0.3
+    assert sleeps[1] == 0.6
+    assert all(delay <= 1.2 for delay in sleeps)
+    assert sleeps[-1] == 1.2  # capped, never grows past max_interval
 
 
 def test_export_all_credentials_requires_api_key(tmp_path: Path) -> None:

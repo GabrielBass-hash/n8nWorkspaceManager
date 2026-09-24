@@ -79,6 +79,40 @@ def parse_compose_status(raw: str) -> dict[str, str]:
     return services
 
 
+def parse_container_states(raw: str) -> dict[str, dict[str, str]]:
+    """Map every Compose project to its container states from ``docker ps``.
+
+    One JSON object per container line, attributed to its Compose project and
+    service through the ``com.docker.compose.project`` /
+    ``com.docker.compose.service`` labels. Containers that are not part of a
+    Compose project are ignored, as are malformed rows.
+    """
+    projects: dict[str, dict[str, str]] = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        labels = row.get("Labels") or {}
+        if isinstance(labels, str):
+            # ``json`` template output can stringify the label map; recover it.
+            try:
+                labels = json.loads(labels)
+            except ValueError:
+                continue
+        if not isinstance(labels, dict):
+            continue
+        project = labels.get("com.docker.compose.project")
+        service = labels.get("com.docker.compose.service")
+        state = row.get("State")
+        if project and service and isinstance(state, str):
+            projects.setdefault(str(project), {})[str(service)] = state
+    return projects
+
+
 class DockerManager:
     """Thin subprocess wrapper around ``docker compose`` lifecycle commands."""
 
@@ -126,6 +160,21 @@ class DockerManager:
         """Return raw ``docker compose ps --format json`` output and exit code."""
         result = self._compose(workspace, compose_file, "ps", "--format", "json", check=False)
         return ComposeStatus(result.stdout, result.returncode)
+
+    def list_project_states(self) -> dict[str, dict[str, str]]:
+        """Return every Compose project's container states from one call.
+
+        A single ``docker ps -a --format json`` yields the state of every
+        container the launcher manages, so the GUI can reconcile N workspaces
+        in one process spawn instead of N ``compose ps`` calls. A non-zero
+        exit is raised as :class:`DockerError`: a partial view would leave
+        workspaces stuck on a stale state.
+        """
+        result = self._run([self.command, "ps", "-a", "--format", "json"], check=False)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise DockerError(f"Docker command failed ({result.returncode}): {detail}")
+        return parse_container_states(result.stdout)
 
     def logs(self, workspace: Workspace, compose_file: Path, service: str | None = None) -> str:
         """Return container logs for one service (or the whole project)."""

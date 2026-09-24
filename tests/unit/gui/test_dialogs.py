@@ -1084,7 +1084,7 @@ def test_clone_with_repo_picker_clones_and_persists(app, tmp_path) -> None:
     ):
         app.app.prompt_create_workflow()
 
-    client_cls.assert_called_once_with("ghp_tok")
+    client_cls.assert_called_once_with("ghp_tok", session=app.app._github_session)
     app.manager.clone_from_git.assert_called_once_with(
         "https://github.com/octo/flows.git", dest, branch="develop", token="ghp_tok"
     )
@@ -1099,7 +1099,7 @@ def test_clone_cancels_at_picker(app) -> None:
     ):
         app.app.prompt_create_workflow()
 
-    client_cls.assert_called_once_with("ghp_tok")
+    client_cls.assert_called_once_with("ghp_tok", session=app.app._github_session)
     app.manager.clone_from_git.assert_not_called()
 
 
