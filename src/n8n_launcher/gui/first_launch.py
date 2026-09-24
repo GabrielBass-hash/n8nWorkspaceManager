@@ -12,7 +12,7 @@ from tkinter import messagebox, simpledialog
 
 from ..core.config import ConfigStore
 from ..core.models import AppConfig
-from ..docker.manager import DockerManager
+from ..docker.manager import DockerError, DockerManager
 from ..platform.shortcuts import install_desktop_shortcut
 from .theme import configure_fonts
 
@@ -89,7 +89,10 @@ def run_interactive_first_launch(
                 work_dir=Path.home(),
                 executable=Path(sys.argv[0]).resolve(),
             )
-        except SetupWizardError as exc:
+        except (SetupWizardError, DockerError) as exc:
+            # DockerError is a belt-and-braces guard: check_available never
+            # raises, but a future docker call in this wizard must degrade to
+            # a dialog too, never an uncaught startup traceback.
             messagebox.showerror("n8n Launcher setup", str(exc), parent=root)
             return None
     finally:
