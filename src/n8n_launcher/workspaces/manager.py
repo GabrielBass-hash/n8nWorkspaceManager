@@ -645,9 +645,12 @@ class WorkspaceManager:
         """Generate the CI harness in the workspace repository and enable CI.
 
         Requires a real git repository with a GitHub remote: without one there
-        is nowhere for a GitHub Actions workflow to run. The persisted
-        selection (``tests.json``) is preserved across disable/re-enable
-        cycles instead of being reset.
+        is nowhere for a GitHub Actions workflow to run. The workspace is
+        brought onto its canonical ``dev`` branch first (legacy ``n8n/*`` /
+        ``main`` checkouts are renamed) so the opening commit and every push
+        target the branch the workflow listens on. The persisted selection
+        (``tests.json``) is preserved across disable/re-enable cycles instead
+        of being reset.
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             raise WorkspaceError(
@@ -658,6 +661,7 @@ class WorkspaceManager:
                 "Les tests GitHub Actions nécessitent un dépôt distant GitHub "
                 "(ex. https://github.com/utilisateur/repo.git)."
             )
+        self._ensure_workspace_branch(workspace)
         files = ci.render_harness(workspace.n8n_version)
         selection = ci.selection_path(workspace.workflows_dir)
         for rel, content in files.items():
@@ -682,6 +686,7 @@ class WorkspaceManager:
 
     def disable_ci(self, workspace: Workspace) -> Workspace:
         """Remove the generated CI harness while keeping the pipeline selection."""
+        self._ensure_workspace_branch(workspace)
         for rel in ci.DISABLE_FILES:
             target = workspace.workflows_dir / rel
             try:
@@ -726,6 +731,7 @@ class WorkspaceManager:
         """Persist the pipeline selection and optionally commit/push it."""
         ci.write_selection(workspace.workflows_dir, set(selected))
         if push:
+            self._ensure_workspace_branch(workspace)
             self._commit_and_push(workspace, "n8n-launcher: mettre à jour les tests GitHub Actions")
         return workspace
 

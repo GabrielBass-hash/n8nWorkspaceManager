@@ -361,7 +361,7 @@ name: n8n-launcher CI
 
 on:
   push:
-    branches: ["n8n/**"]
+    branches: ["dev"]
   pull_request:
   workflow_dispatch:
 

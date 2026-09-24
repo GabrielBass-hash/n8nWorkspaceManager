@@ -1111,10 +1111,12 @@ def test_enable_ci_writes_harness_and_commits(tmp_path: Path) -> None:
             "n8n_launcher.workspaces.manager.git_remote_url",
             return_value="https://github.com/owner/repo.git",
         ),
+        patch.object(launcher, "_ensure_workspace_branch") as ensured,
         patch.object(launcher, "_commit_and_push") as commit,
     ):
         enabled = launcher.enable_ci(workspace)
 
+    ensured.assert_called_once_with(workspace)
     assert enabled.git.ci_enabled is True
     assert (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").is_file()
     assert (workspace.workflows_dir / ".n8n-tests" / "runner.py").is_file()
@@ -1177,6 +1179,7 @@ def test_enable_ci_preserves_existing_selection(tmp_path: Path) -> None:
             "n8n_launcher.workspaces.manager.git_remote_url",
             return_value="https://github.com/owner/repo.git",
         ),
+        patch.object(launcher, "_ensure_workspace_branch"),
         patch.object(launcher, "_commit_and_push"),
     ):
         launcher.enable_ci(workspace)
@@ -1193,15 +1196,21 @@ def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
             "n8n_launcher.workspaces.manager.git_remote_url",
             return_value="https://github.com/owner/repo.git",
         ),
+        patch.object(launcher, "_ensure_workspace_branch"),
         patch.object(launcher, "_commit_and_push"),
     ):
         launcher.enable_ci(workspace)
     selection = workspace.workflows_dir / ".n8n-tests" / "tests.json"
     selection.write_text('{"selected": ["n8nPipelines/keep.json"]}', encoding="utf-8")
 
-    with patch.object(launcher, "_commit_and_push") as commit:
-        disabled = launcher.disable_ci(launcher.list()[0])
+    current = launcher.list()[0]
+    with (
+        patch.object(launcher, "_ensure_workspace_branch") as ensured,
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
+        disabled = launcher.disable_ci(current)
 
+    ensured.assert_called_once_with(current)
     assert disabled.git.ci_enabled is False
     assert not (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").exists()
     assert not (workspace.workflows_dir / ".n8n-tests" / "runner.py").exists()
@@ -1227,9 +1236,13 @@ def test_save_ci_selection_pushes_when_requested(tmp_path: Path) -> None:
     launcher, _store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with patch.object(launcher, "_commit_and_push") as commit:
+    with (
+        patch.object(launcher, "_ensure_workspace_branch") as ensured,
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
         launcher.save_ci_selection(workspace, {"n8nPipelines/a.json"}, push=True)
 
+    ensured.assert_called_once_with(workspace)
     commit.assert_called_once_with(
         workspace, "n8n-launcher: mettre à jour les tests GitHub Actions"
     )
