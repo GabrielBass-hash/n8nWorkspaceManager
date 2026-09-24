@@ -317,6 +317,14 @@ def test_rendered_workflow_wires_secret_and_var() -> None:
     assert "python .n8n-tests/runner.py" in workflow
 
 
+def test_rendered_workflow_runs_on_dev_branch_only() -> None:
+    workflow = ci.render_harness("2.35.0")[ci.WORKFLOW_FILE]
+
+    assert 'branches: ["dev"]' in workflow
+    assert '"main"' not in workflow
+    assert "master" not in workflow
+
+
 def test_rendered_workflow_skips_test_job_when_empty_selection() -> None:
     workflow = ci.render_harness("2.35.0")[ci.WORKFLOW_FILE]
 

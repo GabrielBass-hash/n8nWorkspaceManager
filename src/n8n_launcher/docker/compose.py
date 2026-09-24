@@ -14,24 +14,44 @@ def compose_project_name(workspace: Workspace) -> str:
 
 def render_compose(workspace: Workspace) -> str:
     """Return the complete Docker Compose YAML for the given workspace."""
-    workflows_dir = _compose_path(workspace.workflows_dir)
+    return _render(workspace, _compose_path(workspace.workflows_dir), workspace.port)
+
+
+def render_remote_compose(workspace: Workspace) -> str:
+    """Return the Docker Compose YAML deployed to a remote production server.
+
+    The workflow checkout lives next to the Compose file on the server, so the
+    volume path is relative (``./:/workflows``) and the n8n port binds loopback
+    only: the launcher reaches the instance through SSH, never over the LAN.
+    """
+    return _render(workspace, "./", workspace.server.n8n_port, loopback=True)
+
+
+def _render(
+    workspace: Workspace,
+    workflows_mount: str,
+    n8n_port: int,
+    *,
+    loopback: bool = False,
+) -> str:
     n8n_image = f"n8nio/n8n:{workspace.n8n_version}"
     db_environment, db_service, db_dependency = _database_parts(workspace)
     data_volumes = f"  n8ndata-{workspace.id}:\n"
     if workspace.db.mode is DbMode.MANAGED:
         data_volumes += f"  pgdata-{workspace.id}:\n"
+    bind_host = "127.0.0.1:" if loopback else ""
     service_block = f"""  n8n:
     image: {n8n_image}
     restart: unless-stopped
     ports:
-      - \"{workspace.port}:5678\"
+      - \"{bind_host}{n8n_port}:5678\"
     environment:
 {db_environment}      N8N_PORT: \"5678\"
       N8N_PROTOCOL: http
       N8N_SECURE_COOKIE: \"false\"
     volumes:
       - n8ndata-{workspace.id}:/home/node/.n8n
-      - \"{workflows_dir}:/workflows\"
+      - \"{workflows_mount}:/workflows\"
 {db_dependency}    healthcheck:
       test: [\"CMD-SHELL\", \"wget --spider -q http://127.0.0.1:5678/healthz || exit 1\"]
       interval: 5s

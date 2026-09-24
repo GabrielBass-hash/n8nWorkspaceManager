@@ -6,6 +6,7 @@ import pytest
 
 from n8n_launcher.git import (
     GitError,
+    ensure_dev_branch,
     ensure_gitignore,
     git_add,
     git_add_remote,
@@ -20,6 +21,7 @@ from n8n_launcher.git import (
     git_pull,
     git_pull_new_repo,
     git_push,
+    git_push_ref,
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
@@ -50,14 +52,14 @@ def test_git_is_repo_false_when_rev_parse_fails(tmp_path: Path) -> None:
         assert git_is_repo(tmp_path) is False
 
 
-def test_git_init_initializes_repo_with_main_branch(tmp_path: Path) -> None:
+def test_git_init_initializes_repo_with_dev_branch(tmp_path: Path) -> None:
     with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
         git_init(tmp_path)
 
     calls = [call.args[0] for call in run.call_args_list]
     assert calls == [
         ["git", "init"],
-        ["git", "branch", "-M", "main"],
+        ["git", "branch", "-M", "dev"],
         ["git", "config", "--get", "user.name"],
         ["git", "config", "--get", "user.email"],
         ["git", "config", "user.name", "n8n-launcher"],
@@ -86,7 +88,7 @@ def test_git_init_adds_remote_when_provided(tmp_path: Path) -> None:
     calls = [call.args[0] for call in run.call_args_list]
     assert calls == [
         ["git", "init"],
-        ["git", "branch", "-M", "main"],
+        ["git", "branch", "-M", "dev"],
         ["git", "config", "--get", "user.name"],
         ["git", "config", "--get", "user.email"],
         ["git", "config", "user.name", "n8n-launcher"],
@@ -586,3 +588,158 @@ def test_git_current_branch_empty_when_detached(tmp_path: Path) -> None:
         return_value=completed(1, "", "fatal: ref HEAD is not a symbolic ref"),
     ):
         assert git_current_branch(tmp_path) == ""
+
+
+def test_git_push_ref_pushes_src_to_dst(tmp_path: Path) -> None:
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_push_ref(tmp_path, "server", "HEAD", "main")
+
+    assert run.call_args.args[0] == ["git", "push", "server", "HEAD:main"]
+
+
+def test_git_push_ref_forwards_env(tmp_path: Path) -> None:
+    env = {"GIT_SSH_COMMAND": "ssh -i /tmp/key"}
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_push_ref(tmp_path, "server", "dev", "main", env=env)
+
+    assert run.call_args.args[0] == ["git", "push", "server", "dev:main"]
+    forwarded = run.call_args.kwargs["env"]
+    assert forwarded["GIT_SSH_COMMAND"] == "ssh -i /tmp/key"
+    assert "PATH" in forwarded
+
+
+def test_git_ssh_env_embeds_key_and_batch_mode(tmp_path: Path) -> None:
+    from n8n_launcher.git.manager import git_ssh_env
+
+    env = git_ssh_env("/home/me/.ssh/id_ed25519")
+    command = env["GIT_SSH_COMMAND"]
+    assert "/home/me/.ssh/id_ed25519" in command
+    assert "BatchMode=yes" in command
+    assert "StrictHostKeyChecking=accept-new" in command
+
+
+def test_ensure_dev_branch_noop_when_already_dev(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, "dev\n"),
+    ) as run:
+        assert ensure_dev_branch(tmp_path) == "dev"
+    assert run.call_count == 1
+    assert run.call_args.args[0] == ["git", "symbolic-ref", "--short", "HEAD"]
+
+
+def test_ensure_dev_branch_returns_none_when_not_a_repo(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(128, "", "fatal: not a git repository"),
+    ):
+        assert ensure_dev_branch(tmp_path) is None
+
+
+def test_ensure_dev_branch_switches_to_existing_local_dev(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(0, ""),  # HEAD exists
+            completed(0, "  dev\n"),  # local dev branch present
+            completed(),  # checkout dev
+        ],
+    ) as run:
+        assert ensure_dev_branch(tmp_path) == "dev"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert calls[-1] == ["git", "checkout", "dev"]
+
+
+def test_ensure_dev_branch_switches_to_remote_dev_without_push(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(0, ""),  # HEAD exists
+            completed(0, ""),  # no local dev
+            completed(0, "refs/remotes/origin/dev\n"),  # origin/dev known
+            completed(),  # checkout -b dev origin/dev
+        ],
+    ) as run:
+        assert ensure_dev_branch(tmp_path) == "dev"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert calls[-1] == ["git", "checkout", "-b", "dev", "origin/dev"]
+
+
+def test_ensure_dev_branch_creates_local_dev_and_pushes_when_origin_lacks_dev(
+    tmp_path: Path,
+) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),  # symbolic-ref
+            completed(0, ""),  # HEAD exists
+            completed(0, ""),  # no local dev
+            completed(0, ""),  # no origin/dev tracking
+            completed(),  # fetch origin
+            completed(0, ""),  # still no origin/dev
+            completed(),  # checkout -b dev
+            completed(0, "origin\n"),  # ensure_dev_branch git_has_remote
+            completed(0, "origin\n"),  # git_push git_has_remote
+            completed(0, "dev\n"),  # git_push _current_branch
+            completed(),  # push -u origin dev
+        ],
+    ) as run:
+        assert ensure_dev_branch(tmp_path) == "dev"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["git", "checkout", "-b", "dev"] in calls
+    assert ["git", "push", "-u", "origin", "dev"] in calls
+
+
+def test_ensure_dev_branch_fetches_then_uses_remote_dev(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(0, ""),  # HEAD exists
+            completed(0, ""),  # no local dev
+            completed(0, ""),  # no origin/dev tracking yet
+            completed(),  # fetch origin
+            completed(0, "refs/remotes/origin/dev\n"),  # now present
+            completed(),  # checkout -b dev origin/dev
+        ],
+    ) as run:
+        assert ensure_dev_branch(tmp_path) == "dev"
+
+    calls = [call.args[0] for call in run.call_args_list]
+    assert ["git", "fetch", "origin"] in calls
+    assert calls[-1] == ["git", "checkout", "-b", "dev", "origin/dev"]
+
+
+def test_ensure_dev_branch_renames_unborn_main_to_dev(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "main\n"),
+            completed(128, "", "fatal: bad revision HEAD"),  # unborn
+            completed(),  # symbolic-ref HEAD refs/heads/dev
+        ],
+    ) as run:
+        assert ensure_dev_branch(tmp_path) == "dev"
+
+    assert run.call_args.args[0] == ["git", "symbolic-ref", "HEAD", "refs/heads/dev"]
+
+
+def test_git_remote_url_named(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[completed(0, "deploy@host:repo.git\n"), completed(1, "")],
+    ) as run:
+        url = git_remote_url(tmp_path, "server")
+        missing = git_remote_url(tmp_path, "server")
+
+    assert url == "deploy@host:repo.git"
+    assert missing is None
+    assert [c.args[0] for c in run.call_args_list] == [
+        ["git", "remote", "get-url", "server"],
+        ["git", "remote", "get-url", "server"],
+    ]

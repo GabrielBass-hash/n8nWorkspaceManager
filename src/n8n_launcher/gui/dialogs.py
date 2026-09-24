@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from .. import git
-from ..core.models import DbConfig, DbMode
+from ..core.models import DbConfig, DbMode, ServerConfig
 from ..database import has_db_layout
 from ..github import auth
 from .theme import (
@@ -336,6 +336,157 @@ def prompt_ask_string(
     _finish_dialog_setup(dialog, root, focus=entry)
     dialog.wait_window()
     return result
+
+
+def prompt_server_config(
+    root: tk.Tk,
+    workspace_name: str,
+    current: ServerConfig,
+    default_base: str,
+) -> ServerConfig | None:
+    """Ask for the SSH/server deployment settings for a workspace.
+
+    Returns an enabled :class:`ServerConfig` when saved, ``None`` when
+    cancelled. Only the key *path* is captured — never key material — and the
+    base directory defaults to ``n8n-launcher/<workspace id>``.
+    """
+    dialog = tk.Toplevel(root)
+    dialog.title("Serveur de production")
+    dialog.configure(bg=APP_BACKGROUND)
+    dialog.resizable(False, False)
+
+    result: ServerConfig | None = None
+
+    tk.Label(
+        dialog,
+        text=f"Déploiement serveur pour « {workspace_name} »\n"
+        "Le serveur reçoit vos pipelines via Git (branche « main ») — "
+        "une clé SSH est requise :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_PRIMARY,
+        font=FONT_META,
+        anchor="w",
+        justify="left",
+        wraplength=420,
+    ).pack(fill="x", padx=18, pady=(16, 8))
+
+    def field(label: str, value: str) -> tuple[tk.StringVar, tk.Entry]:
+        tk.Label(
+            dialog,
+            text=label,
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_SUBTITLE,
+            anchor="w",
+        ).pack(fill="x", padx=18)
+        var = tk.StringVar(value=value)
+        entry = tk.Entry(
+            dialog,
+            textvariable=var,
+            bg=SURFACE,
+            fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            relief="flat",
+            font=FONT_META,
+        )
+        entry.pack(fill="x", padx=18, pady=(0, 6))
+        return var, entry
+
+    host_var, _ = field("Hôte :", current.host)
+    ssh_var, _ = field("Port SSH :", str(current.ssh_port))
+    user_var, _ = field("Utilisateur :", current.user)
+    base_var, _ = field("Dossier de base (distant) :", current.base_dir or default_base)
+    port_var, _ = field("Port n8n (sur le serveur) :", str(current.n8n_port))
+
+    key_var = tk.StringVar(value=current.key_path or "")
+    key_label = tk.Label(
+        dialog,
+        text="Clé SSH (chemin) :",
+        bg=APP_BACKGROUND,
+        fg=TEXT_MUTED,
+        font=FONT_SUBTITLE,
+        anchor="w",
+    )
+    key_label.pack(fill="x", padx=18)
+    key_row = tk.Frame(dialog, bg=APP_BACKGROUND)
+    key_row.pack(fill="x", padx=18, pady=(0, 6))
+    key_entry = tk.Entry(
+        key_row,
+        textvariable=key_var,
+        bg=SURFACE,
+        fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat",
+        font=FONT_META,
+    )
+    key_entry.pack(side="left", fill="x", expand=True)
+
+    def browse_key() -> None:
+        chosen = filedialog.askopenfilename(parent=dialog, title="Choisir la clé privée SSH")
+        if chosen:
+            key_var.set(chosen)
+
+    ttk.Button(
+        key_row,
+        text="Parcourir…",
+        style="Secondary.TButton",
+        command=browse_key,
+    ).pack(side="right", padx=(8, 0))
+
+    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
+    buttons.pack(fill="x", padx=18, pady=(0, 16))
+
+    def submit(_event: tk.Event | None = None) -> None:
+        nonlocal result
+        host = host_var.get().strip()
+        user = user_var.get().strip()
+        if not host or not user:
+            messagebox.showwarning(
+                "n8n Launcher",
+                "L'hôte et l'utilisateur sont obligatoires.",
+                parent=dialog,
+            )
+            return
+        result = ServerConfig(
+            enabled=True,
+            host=host,
+            ssh_port=_int_or(ssh_var.get(), 22),
+            user=user,
+            key_path=key_var.get().strip() or None,
+            base_dir=base_var.get().strip(),
+            n8n_port=_int_or(port_var.get(), 5678),
+        )
+        dialog.destroy()
+
+    def cancel(_event: tk.Event | None = None) -> None:
+        dialog.destroy()
+
+    ttk.Button(
+        buttons,
+        text="Annuler",
+        style="Secondary.TButton",
+        command=cancel,
+    ).pack(side="right")
+    ttk.Button(
+        buttons,
+        text="Enregistrer",
+        style="Accent.TButton",
+        command=submit,
+    ).pack(side="right", padx=(8, 0))
+
+    key_entry.bind("<Return>", submit)
+    dialog.bind("<Escape>", cancel)
+    _finish_dialog_setup(dialog, root, focus=key_entry)
+    dialog.wait_window()
+    return result
+
+
+def _int_or(value: str, fallback: int) -> int:
+    """Parse a config port from a dialog field, falling back for junk input."""
+    try:
+        return int(value.strip())
+    except ValueError:
+        return fallback
 
 
 def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:

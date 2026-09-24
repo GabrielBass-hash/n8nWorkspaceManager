@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from urllib.parse import quote
@@ -35,9 +36,16 @@ class GitError(RuntimeError):
     """Raised when a git operation fails."""
 
 
-def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    args: list[str],
+    cwd: Path,
+    *,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result."""
     cmd = ["git", *args]
+    full_env = {**os.environ, **(env or {})}
     try:
         result = subprocess.run(
             cmd,
@@ -45,6 +53,7 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True) -> subprocess.Co
             capture_output=True,
             text=True,
             timeout=30,
+            env=full_env,
         )
     except FileNotFoundError:
         raise GitError("git is not installed or not found in PATH") from None
@@ -75,7 +84,7 @@ def git_init(path: Path, *, remote_url: str | None = None) -> None:
     """Initialize a new git repo at *path* and optionally add a remote."""
     path.mkdir(parents=True, exist_ok=True)
     _run_git(["init"], cwd=path)
-    _run_git(["branch", "-M", "main"], cwd=path)
+    _run_git(["branch", "-M", "dev"], cwd=path)
     _configure_repo_identity(path)
     ensure_gitignore(path)
     if remote_url:
@@ -177,6 +186,38 @@ def git_has_unpushed_commits(path: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def git_ssh_env(key_path: str) -> dict[str, str]:
+    """Return an env dict making git authenticate with *key_path* over SSH.
+
+    Used for the launcher's own ``server`` remote: git spawns system ``ssh``,
+    which needs the workspace's configured key (the machine's default identity
+    is usually a different, personal key). Commands run in batch mode so a
+    missing key or unknown host fails loudly instead of hanging on a prompt.
+    """
+    return {
+        "GIT_SSH_COMMAND": (
+            f"ssh -i {key_path} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        )
+    }
+
+
+def git_push_ref(
+    path: Path,
+    remote: str,
+    src: str,
+    dst: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Push *src* to *dst* on *remote* with an explicit refspec (no ``-u``).
+
+    Publishing uses ``HEAD:main`` so the production branch is the local current
+    state whatever the branch is called — no local ``main`` branch required.
+    """
+    _run_git(["push", remote, f"{src}:{dst}"], cwd=path, env=env)
+    logger.info("Pushed %s:%s to %s in %s", src, dst, remote, path)
+
+
 def git_seed_remote(
     path: Path, remote_url: str, token: str, *, message: str = "n8n-launcher: initial"
 ) -> None:
@@ -270,9 +311,74 @@ def git_has_remote(path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def git_remote_url(path: Path) -> str | None:
-    """Return the URL of the 'origin' remote, or None."""
-    result = _run_git(["remote", "get-url", "origin"], cwd=path, check=False)
+def ensure_dev_branch(path: Path) -> str | None:
+    """Make ``dev`` the active branch, creating it when needed.
+
+    Idempotent and best-effort:
+    - already on ``dev`` → nothing;
+    - an existing local ``dev`` is checked out as-is;
+    - a ``dev`` known on ``origin`` (tracking ref, or discovered by fetching)
+      is checked out from it;
+    - otherwise ``dev`` is created from the current HEAD and pushed to
+      ``origin``. A repository whose modern ``main`` history must keep working
+      therefore inherits ``main``'s content into ``dev`` automatically.
+
+    Returns the active branch name, or ``None`` when *path* is not a repository.
+    Never raises: git failures at any step degrade to a warning and a return.
+    """
+    try:
+        branch = _current_branch(path)
+    except GitError:
+        return None
+    if not branch:
+        # Detached HEAD or not a repository at all: nothing to ensure.
+        return None
+    if branch == "dev":
+        return branch
+    has_head = _run_git(["rev-parse", "--verify", "HEAD"], cwd=path, check=False)
+    if has_head.returncode != 0:
+        # Unborn HEAD (no commits yet): point the active branch ref at ``dev``.
+        try:
+            _run_git(["symbolic-ref", "HEAD", "refs/heads/dev"], cwd=path)
+        except GitError as exc:
+            logger.warning("Could not rename the unborn branch to dev: %s", exc)
+            return branch
+        logger.info("Renamed the unborn branch to dev in %s", path)
+        return "dev"
+    local_dev = _run_git(["branch", "--list", "dev"], cwd=path)
+    if local_dev.stdout.strip():
+        _run_git(["checkout", "dev"], cwd=path)
+        return "dev"
+    remote_dev = _run_git(
+        ["for-each-ref", "--format=%(refname)", "refs/remotes/origin/dev"],
+        cwd=path,
+        check=False,
+    )
+    if not remote_dev.stdout.strip():
+        try:
+            _run_git(["fetch", "origin"], cwd=path)
+        except GitError as exc:
+            logger.warning("Could not fetch origin for %s: %s", path, exc)
+        remote_dev = _run_git(
+            ["for-each-ref", "--format=%(refname)", "refs/remotes/origin/dev"],
+            cwd=path,
+            check=False,
+        )
+    if remote_dev.stdout.strip():
+        _run_git(["checkout", "-b", "dev", "origin/dev"], cwd=path)
+        return "dev"
+    _run_git(["checkout", "-b", "dev"], cwd=path)
+    try:
+        if git_has_remote(path):
+            git_push(path)
+    except GitError as exc:
+        logger.warning("Could not push the fresh dev branch for %s: %s", path, exc)
+    return "dev"
+
+
+def git_remote_url(path: Path, name: str = "origin") -> str | None:
+    """Return the URL of the named remote (default ``origin``), or None."""
+    result = _run_git(["remote", "get-url", name], cwd=path, check=False)
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None

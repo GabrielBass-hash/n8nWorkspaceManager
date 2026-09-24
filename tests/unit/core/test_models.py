@@ -5,6 +5,7 @@ from n8n_launcher.core.models import (
     DbConfig,
     DbMode,
     GitConfig,
+    ServerConfig,
     Workspace,
     WorkspaceState,
 )
@@ -285,3 +286,103 @@ def test_workspace_from_dict_backcompat_without_git() -> None:
     restored = Workspace.from_dict(data)
 
     assert restored.git == GitConfig()
+
+
+def test_server_config_round_trip() -> None:
+    config = ServerConfig(
+        enabled=True,
+        host="prod.example.test",
+        ssh_port=2222,
+        user="deploy",
+        key_path="/home/me/.ssh/id_ed25519",
+        base_dir="n8n-launcher/abc123",
+        n8n_port=5689,
+    )
+
+    assert ServerConfig.from_dict(config.to_dict()) == config
+
+
+def test_server_config_defaults_from_empty_dict() -> None:
+    assert ServerConfig.from_dict({}) == ServerConfig()
+
+
+def test_server_config_defaults_from_none() -> None:
+    assert ServerConfig.from_dict(None) == ServerConfig()
+
+
+def test_server_config_tolerates_partial_dict() -> None:
+    restored = ServerConfig.from_dict({"host": "prod.example.test", "user": "deploy"})
+
+    assert restored.host == "prod.example.test"
+    assert restored.user == "deploy"
+    assert restored.enabled is False
+    assert restored.ssh_port == 22
+    assert restored.key_path is None
+    assert restored.n8n_port == 5678
+
+
+def test_workspace_round_trip_includes_server_config() -> None:
+    workspace = Workspace(
+        id="abc",
+        name="My workspace",
+        workflows_dir=Path("/tmp/workflows"),
+        port=5680,
+        db=DbConfig(mode=DbMode.NONE),
+        server=ServerConfig(
+            enabled=True,
+            host="prod.example.test",
+            user="deploy",
+            key_path="/home/me/.ssh/id_ed25519",
+        ),
+    )
+
+    assert Workspace.from_dict(workspace.to_dict()).server == workspace.server
+    assert Workspace.from_dict(workspace.to_dict()) == workspace
+
+
+def test_workspace_from_dict_missing_server_defaults_disabled() -> None:
+    data = {
+        "id": "abc",
+        "name": "My workspace",
+        "workflows_dir": "/tmp/workflows",
+        "port": 5680,
+        "db": {"mode": "none"},
+    }
+
+    restored = Workspace.from_dict(data)
+
+    assert restored.server == ServerConfig()
+    assert restored.server.enabled is False
+
+
+def test_workspace_round_trip_keeps_server_status() -> None:
+    workspace = Workspace(
+        id="abc",
+        name="My workspace",
+        workflows_dir=Path("/tmp/workflows"),
+        port=5680,
+        db=DbConfig(mode=DbMode.NONE),
+        server_last_deploy="2026-09-23T12:00:00",
+        server_last_error="docker compose up failed",
+    )
+
+    restored = Workspace.from_dict(workspace.to_dict())
+
+    assert restored.server_last_deploy == "2026-09-23T12:00:00"
+    assert restored.server_last_error == "docker compose up failed"
+    assert restored == workspace
+
+
+def test_workspace_from_dict_server_status_defaults_to_none() -> None:
+    data = {
+        "id": "abc",
+        "name": "My workspace",
+        "workflows_dir": "/tmp/workflows",
+        "port": 5680,
+        "db": {"mode": "none"},
+    }
+
+    restored = Workspace.from_dict(data)
+
+    assert restored.server_last_deploy is None
+    assert restored.server_last_error is None

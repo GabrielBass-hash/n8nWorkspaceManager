@@ -1,5 +1,5 @@
-from n8n_launcher.core.models import DbConfig, DbMode, Workspace
-from n8n_launcher.docker.compose import render_compose
+from n8n_launcher.core.models import DbConfig, DbMode, ServerConfig, Workspace
+from n8n_launcher.docker.compose import render_compose, render_remote_compose
 
 
 def test_managed_compose_is_isolated(managed_workspace) -> None:
@@ -96,3 +96,70 @@ def test_none_database_omits_postgres_and_db_environment(tmp_path) -> None:
     volumes = rendered.split("volumes:", 1)[1]
     assert "pgdata-none1:" not in volumes
     assert "n8ndata-none1:" in volumes
+
+
+def test_render_remote_compose_binds_loopback_remote_port(tmp_path) -> None:
+    workspace = Workspace(
+        id="abc",
+        name="Remote",
+        workflows_dir=tmp_path,
+        port=5680,
+        db=DbConfig(mode=DbMode.NONE),
+        server=ServerConfig(enabled=True, n8n_port=5689),
+    )
+
+    rendered = render_remote_compose(workspace)
+
+    assert '"127.0.0.1:5689:5678"' in rendered
+    # The remote image/name/volume isolation is identical to the local render.
+    assert "image: n8nio/n8n:2.40.0" in rendered
+    assert "n8ndata-abc:/home/node/.n8n" in rendered
+
+
+def test_render_remote_compose_defaults_loopback_port(tmp_path) -> None:
+    workspace = Workspace(
+        id="abc",
+        name="Remote",
+        workflows_dir=tmp_path,
+        port=5680,
+        db=DbConfig(mode=DbMode.NONE),
+    )
+
+    rendered = render_remote_compose(workspace)
+
+    assert '"127.0.0.1:5678:5678"' in rendered
+
+
+def test_render_remote_compose_uses_relative_workflows_mount(tmp_path) -> None:
+    workspace = Workspace(
+        id="abc",
+        name="Remote",
+        workflows_dir=tmp_path,
+        port=5680,
+        db=DbConfig(mode=DbMode.NONE),
+        server=ServerConfig(enabled=True),
+    )
+
+    rendered = render_remote_compose(workspace)
+
+    # The checkout root on the server is mapped as-is (no absolute local path).
+    assert '"./:/workflows"' in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_render_remote_compose_keeps_managed_database(tmp_path) -> None:
+    workspace = Workspace(
+        id="abc",
+        name="Remote",
+        workflows_dir=tmp_path,
+        port=5680,
+        db=DbConfig(mode=DbMode.MANAGED),
+        server=ServerConfig(enabled=True, n8n_port=5689),
+    )
+
+    rendered = render_remote_compose(workspace)
+
+    assert "image: postgres:16" in rendered
+    assert "pgdata-abc:/var/lib/postgresql/data" in rendered
+    assert "condition: service_healthy" in rendered
+    assert '"127.0.0.1:5689:5678"' in rendered

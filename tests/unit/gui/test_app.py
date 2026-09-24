@@ -25,7 +25,7 @@ from helpers import (
 )
 
 from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, GitConfig, WorkspaceState
+from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
 from n8n_launcher.gui.app import window_size
@@ -380,6 +380,8 @@ def test_empty_state_releases_canvas_height_when_rows_appear(app) -> None:
 
 
 def test_context_menu_has_launch_folder_and_delete(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app._show_context_menu(SimpleNamespace(x_root=0, y_root=0))
     labels = [label for label, _ in app.app._menu._items if label]
     assert labels == [
         "Ouvrir n8n",
@@ -390,8 +392,80 @@ def test_context_menu_has_launch_folder_and_delete(app) -> None:
         "Ouvrir les Actions GitHub…",
         "Désactiver les tests CI",
         "Configurer le token GitHub…",
+        "Configurer le serveur…",
         "Supprimer",
     ]
+
+
+def test_context_menu_hides_server_actions_when_disabled(app) -> None:
+    app.app._select_row("ws-stopped")
+    app.app._show_context_menu(SimpleNamespace(x_root=0, y_root=0))
+    labels = [label for label, _ in app.app._menu._items if label]
+    assert "Publier sur le serveur…" not in labels
+    assert "Désactiver le serveur" not in labels
+
+
+def test_context_menu_shows_server_actions_when_enabled(app) -> None:
+    stopped = next(w for w in app.manager.list() if w.id == "ws-stopped")
+    stopped.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.app._select_row("ws-stopped")
+    app.app._show_context_menu(SimpleNamespace(x_root=0, y_root=0))
+    labels = [label for label, _ in app.app._menu._items if label]
+    assert labels.index("Publier sur le serveur…") < labels.index("Désactiver le serveur")
+    assert labels.index("Désactiver le serveur") < labels.index("Configurer Git…")
+
+
+def test_publish_selected_deploys_when_server_enabled(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.app._select_row("ws-running")
+    app.app.publish_selected()
+    app.app._drain_events()
+    app.manager.publish.assert_called_once_with(running)
+
+
+def test_publish_selected_skipped_when_server_disabled(app) -> None:
+    app.app._select_row("ws-running")
+    app.app.publish_selected()
+    app.manager.publish.assert_not_called()
+
+
+def test_disable_server_selected_confirms_and_disables(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    running.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    app.mocks.messagebox._yesno = True
+    app.app._select_row("ws-running")
+    app.app.disable_server_selected()
+    app.app._drain_events()
+    app.manager.disable_server.assert_called_once_with(running)
+
+
+def test_disable_server_selected_informs_when_not_configured(app) -> None:
+    app.app._select_row("ws-running")
+    app.app.disable_server_selected()
+    assert app.mocks.messagebox.infos
+
+
+def test_configure_server_selected_saves_and_installs(app) -> None:
+    running = next(w for w in app.manager.list() if w.id == "ws-running")
+    config = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    with patch("n8n_launcher.gui.app.prompt_server_config", return_value=config):
+        app.app._select_row("ws-running")
+        app.app.configure_server_selected()
+    app.app._drain_events()
+
+    app.manager.install_server.assert_called_once_with(running, config)
+    app.manager.update.assert_called_once_with("ws-running", server=config)
+
+
+def test_configure_server_selected_cancel_does_nothing(app) -> None:
+    with patch("n8n_launcher.gui.app.prompt_server_config", return_value=None):
+        app.app._select_row("ws-running")
+        app.app.configure_server_selected()
+    app.app._drain_events()
+
+    app.manager.install_server.assert_not_called()
+    app.manager.update.assert_not_called()
 
 
 def test_delete_per_row_confirms_then_removes_workspace(app) -> None:
