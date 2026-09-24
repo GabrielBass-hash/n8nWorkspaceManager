@@ -116,16 +116,33 @@ def parse_container_states(raw: str) -> dict[str, dict[str, str]]:
 class DockerManager:
     """Thin subprocess wrapper around ``docker compose`` lifecycle commands."""
 
-    def __init__(self, command: str = "docker", timeout: float = 180.0) -> None:
+    def __init__(
+        self,
+        command: str = "docker",
+        timeout: float = 180.0,
+        check_timeout: float = 10.0,
+    ) -> None:
         self.command = command
         self.timeout = timeout
+        # The availability probe gets its own, friendlier deadline: ``docker
+        # info`` can take several seconds just to answer while Docker Desktop
+        # is still starting (especially on Windows), so 5 s was too tight.
+        self.check_timeout = check_timeout
 
     def check_available(self) -> DockerStatus:
-        """Probe ``docker info`` and report daemon availability."""
+        """Probe ``docker info`` and report daemon availability.
+
+        Never raises: a missing CLI, a hung daemon and a non-zero exit all
+        map to ``available=False`` so first-launch turns them into a friendly
+        message instead of a traceback.
+        """
         try:
-            result = self._run([self.command, "info"], timeout=5.0, check=False)
-        except OSError as exc:
-            return DockerStatus(False, f"Docker is not installed or is not executable: {exc}")
+            result = self._run([self.command, "info"], timeout=self.check_timeout, check=False)
+        except DockerError as exc:
+            # ``_run`` already folds both OSError (CLI missing) and
+            # TimeoutExpired (daemon not answering) into a single DockerError;
+            # keep the probe contract and report availability, not a crash.
+            return DockerStatus(False, f"Docker daemon is not accessible: {exc}")
         if result.returncode != 0:
             message = result.stderr.strip() or "Docker daemon is not accessible"
             return DockerStatus(False, message)

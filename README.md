@@ -34,7 +34,7 @@ When no remote is set, the "Créer sur GitHub…" flow creates the repository vi
 Deployment to a production server is optional per-workspace ("Configurer le serveur…", persisted as `ServerConfig`) and driven from the same git repo: publishing pushes the workspace branch **`n8n/<id>`** to the server's bare repo as its `main` (the production reference). "Publier sur le serveur…" waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
 
 - `install_server` creates the bare repo (`git init --bare`), ships a generated `post-receive` hook and `deploy.py` (marker-commented, template strings), all transferred atomically (`write_remote_file`: `cat > path.tmp && mv`).
-- The server Compose file adds a top-level `name: n8n-ws-<id>` so the project is stable regardless of the checkout directory; the hook runs `docker compose -p "$PROJECT" up -d` and every remote migration/import uses that pinned project.
+- The server Compose file adds a top-level `name: n8n-ws-<id>` so the project is stable regardless of the checkout directory; the hook runs `docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d` and every remote migration/import uses that pinned project.
 - `deploy.py` applies `db/migrations/*.sql` (per-file statement timeout), recreates credentials and imports the pipelines — deduplicating by basename so root mirror copies never upload a workflow twice. Secrets travel as a `secrets.json` scp'd at publish; nothing is committed to git.
 
 ### GitHub Actions CI

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from n8n_launcher.core.config import ConfigError, ConfigStore
+from n8n_launcher.core.config import ConfigError, ConfigStore, ensure_directories
 from n8n_launcher.core.models import (
     AppConfig,
     DbConfig,
@@ -66,6 +66,42 @@ def test_config_store_writes_and_reads_atomically(tmp_path: Path) -> None:
     assert store.load() == config
     if os.name != "nt":
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions differ on Windows")
+def test_config_store_restricts_wal_and_shm_sidecars(tmp_path: Path) -> None:
+    """The WAL/SHM sidecars must be as private as the database itself.
+
+    They hold the same pages (owner password, GitHub token) and are created
+    by SQLite with the default umask, so a leak here would defeat the 0o600
+    on the main file.
+    """
+    path = tmp_path / "launcher.db"
+    store = ConfigStore(path)
+    store.save(_sample_config(tmp_path / "work"))
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    for sidecar in (Path(f"{path}-wal"), Path(f"{path}-shm")):
+        assert sidecar.exists(), sidecar
+        assert sidecar.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions differ on Windows")
+def test_ensure_directories_restricts_an_existing_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config directory must be 0o700 even when it already exists."""
+    target = tmp_path / "n8n-launcher"
+    target.mkdir()
+    target.chmod(0o755)
+    monkeypatch.setattr(
+        "n8n_launcher.core.paths.user_config_dir", lambda name, *a, **k: str(target)
+    )
+
+    ensure_directories()
+
+    assert target.is_dir()
+    assert target.stat().st_mode & 0o777 == 0o700
 
 
 def test_config_store_persists_across_reopen(tmp_path: Path) -> None:

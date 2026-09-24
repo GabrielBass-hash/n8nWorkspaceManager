@@ -688,6 +688,7 @@ def test_git_ssh_env_embeds_key_and_batch_mode(tmp_path: Path) -> None:
     assert "/home/me/.ssh/id_ed25519" in command
     assert "BatchMode=yes" in command
     assert "StrictHostKeyChecking=accept-new" in command
+    assert "IdentitiesOnly=yes" in command
 
 
 def test_ensure_workspace_branch_noop_when_already_active(tmp_path: Path) -> None:

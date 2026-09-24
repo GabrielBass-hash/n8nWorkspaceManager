@@ -333,7 +333,8 @@ def git_ssh_env(key_path: str) -> dict[str, str]:
     """
     return {
         "GIT_SSH_COMMAND": (
-            f"ssh -i {key_path} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+            "ssh -o IdentitiesOnly=yes"
+            f" -i {key_path} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
         )
     }
 
