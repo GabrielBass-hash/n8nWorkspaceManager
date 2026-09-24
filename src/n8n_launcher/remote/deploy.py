@@ -104,26 +104,36 @@ os.replace(path + ".tmp", path)
 PY
 }
 
-while read -r old new ref; do
-    # Only main is deployed; n8n/ branches go to GitHub/Actions instead.
-    [ "$ref" = "refs/heads/main" ] || continue
-    # A deleted main produces an all-zeros sha — nothing to deploy.
-    [ "$new" != "0000000000000000000000000000000000000000" ] || continue
+# Serialize the whole listener under an exclusive flock on .deploy.lock:
+# two pushes arriving together (or a push colliding with the tail of a
+# previous deploy) must not race on the Compose project or the migration
+# SQL. The lock is *blocking* — the later deploy waits its turn instead of
+# failing the push, and its marker is only ever written once the earlier
+# one has finished.
+(
+    flock -x 9
 
-    mkdir -p "$WORKFLOW"
-    if ! git --git-dir="$BARE" archive "$new" | tar -x -C "$WORKFLOW"; then
-        marker "$new" "error" "git archive a échoué"
-        exit 0
-    fi
-    if ! docker compose -p "$PROJECT" up -d >> "$LOG" 2>&1; then
-        marker "$new" "error" "docker compose up -d a échoué"
-        exit 0
-    fi
-    DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" DEPLOY_PROJECT="$PROJECT" \
-        DEPLOY_N8N_PORT=__N8N_PORT__ \
-        python3 "$BASE/deploy.py" "$new" >> "$LOG" 2>&1
-done
-exit 0
+    while read -r old new ref; do
+        # Only main is deployed; n8n/ branches go to GitHub/Actions instead.
+        [ "$ref" = "refs/heads/main" ] || continue
+        # A deleted main produces an all-zeros sha — nothing to deploy.
+        [ "$new" != "0000000000000000000000000000000000000000" ] || continue
+
+        mkdir -p "$WORKFLOW"
+        if ! git --git-dir="$BARE" archive "$new" | tar -x -C "$WORKFLOW"; then
+            marker "$new" "error" "git archive a échoué"
+            exit 0
+        fi
+        if ! docker compose -p "$PROJECT" up -d >> "$LOG" 2>&1; then
+            marker "$new" "error" "docker compose up -d a échoué"
+            exit 0
+        fi
+        DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" DEPLOY_PROJECT="$PROJECT" \
+            DEPLOY_N8N_PORT=__N8N_PORT__ \
+            python3 "$BASE/deploy.py" "$new" >> "$LOG" 2>&1
+    done
+    exit 0
+) 9>>"$BASE/.deploy.lock"
 """
 
 

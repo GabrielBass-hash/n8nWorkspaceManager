@@ -19,6 +19,7 @@ from helpers import (
     FakeTk,
     FakeTtk,
     SyncThread,
+    SyncThreadPoolExecutor,
     _safe_git_row_status,
     make_workspace,
 )
@@ -47,6 +48,10 @@ def gui_mocks():
         patch("n8n_launcher.gui.app.time.sleep"),
         patch("n8n_launcher.gui.close.N8nApiClient"),
         patch("n8n_launcher.gui.close.SyncRunner"),
+        patch(
+            "n8n_launcher.gui.app.ThreadPoolExecutor",
+            SyncThreadPoolExecutor,
+        ),
         patch("n8n_launcher.gui.display.git_row_status", side_effect=_safe_git_row_status),
     ):
         yield mocks

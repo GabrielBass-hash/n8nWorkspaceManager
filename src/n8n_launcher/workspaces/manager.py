@@ -33,7 +33,7 @@ from ..database import (
     detect_migrations,
     has_db_layout,
 )
-from ..docker.compose import render_remote_compose, write_compose
+from ..docker.compose import compose_project_name, render_remote_compose, write_compose
 from ..docker.manager import DockerManager, parse_compose_status
 from ..git import (
     GitError,
@@ -89,6 +89,16 @@ def _is_push_rejection(exc: GitError) -> bool:
         marker in detail
         for marker in ("non-fast-forward", "[rejected]", "fetch first", "stale info")
     )
+
+
+def _project_live_state(projects: dict[str, dict[str, str]], project: str) -> WorkspaceState:
+    """Map one Compose project's service states to a launcher state."""
+    n8n_state = (projects.get(project) or {}).get("n8n")
+    if n8n_state == "running":
+        return WorkspaceState.RUNNING
+    if n8n_state in {"created", "restarting", "starting", "paused"}:
+        return WorkspaceState.STARTING
+    return WorkspaceState.STOPPED
 
 
 class WorkspaceError(RuntimeError):
@@ -149,19 +159,28 @@ class WorkspaceManager:
     def reconcile_all(self) -> int:
         """Sync persisted states with Docker reality and save the changes.
 
-        Returns the number of workspaces whose state changed. Live states are
-        probed *before* taking the config lock (``docker status`` can take
-        seconds), then the changes are applied through one locked
-        ``store.mutate`` so a concurrent edit is never overwritten by a stale
-        full-save.
+        Returns the number of workspaces whose state changed. All live states
+        are probed in **one** ``docker ps`` batch (``list_project_states``)
+        *before* taking the config lock — a single spawn instead of one
+        ``compose ps`` per workspace — then the changes are applied through one
+        locked ``store.mutate`` so a concurrent edit is never overwritten by a
+        stale full-save.
         """
+        try:
+            projects = self.docker.list_project_states()
+        except Exception:
+            return 0
         try:
             config = self.store.load()
         except Exception:
             return 0
         updates: dict[str, WorkspaceState] = {}
         for workspace in config.workspaces:
-            live = self.live_state(workspace)
+            # Workspaces whose Compose file is gone (e.g. a partial folder
+            # deletion) keep their stored state and are never force-stopped.
+            if not compose_file(workspace.id).exists():
+                continue
+            live = _project_live_state(projects, compose_project_name(workspace))
             if live is not workspace.state:
                 updates[workspace.id] = live
         if not updates:
@@ -942,7 +961,9 @@ class WorkspaceManager:
         workspace_id: str,
         *,
         timeout: float = 180.0,
-        interval: float = 2.0,
+        interval: float = 0.3,
+        backoff_factor: float = 2.0,
+        max_interval: float = 1.2,
     ) -> tuple[str, dict[str, Any]]:
         """Wait for the server's ``last-deploy.json`` to reach a final state.
 
@@ -950,9 +971,16 @@ class WorkspaceManager:
         is written by the hook (compose failures) or ``deploy.py`` (n8n/code
         failures); an absent or unparsable marker means the deployment is still
         in flight.
+
+        The poll cadence backs off geometrically: waits start at ``interval``
+        and double up to ``max_interval`` (0.3s → 0.6s → 1.2s → 1.2s…). Early
+        polls are the likely winners — the hook usually flips the marker in a
+        second or two — so they stay cheap, while a hung server no longer
+        hammers ssh at full speed for the whole timeout.
         """
         remote_marker = marker_path(cfg, workspace_id)
         deadline = time.monotonic() + timeout
+        delay = interval
         while time.monotonic() < deadline:
             result = ssh_run(cfg, f"cat {shlex.quote(remote_marker)}", check=False)
             try:
@@ -963,7 +991,8 @@ class WorkspaceManager:
                 return "ok", marker
             if marker.get("status") == "error":
                 return "error", marker
-            time.sleep(interval)
+            time.sleep(delay)
+            delay = min(delay * backoff_factor, max_interval)
         return "timeout", {}
 
     def _record_server_status(

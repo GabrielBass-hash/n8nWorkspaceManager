@@ -2,7 +2,7 @@
 
 ## What this is
 
-Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu**) for managing isolated Docker-based n8n workspaces. Single package `n8n_launcher` under `src/`, split into subpackages by concern: `core/` (config, models, paths), `database/`, `docker/`, `git/`, `n8n/` (API, owner bootstrap, workflow sync), `platform/` (updater, browser, ports, shortcuts), `gui/` (app, dialogs, close/update flows, display), `workspaces/` (manager). Each file is one concern.
+Cross-platform Tkinter desktop app (Python 3.12+; **Windows, macOS, Linux/Ubuntu**) for managing isolated Docker-based n8n workspaces. Single package `n8n_launcher` under `src/`, split into subpackages by concern: `core/` (config, models, paths, throttle), `database/`, `docker/`, `git/`, `n8n/` (API, owner bootstrap, workflow sync), `platform/` (updater, browser, ports, shortcuts), `gui/` (app, dialogs, close/update flows, display), `workspaces/` (manager). Each file is one concern.
 
 Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via `dmgbuild` with app icon + full `Info.plist`), one-file `.exe` (Windows), and a one-file executable on Linux (a `.AppImage` is built out-of-band via `scripts/build_appimage.sh`). CI builds the three release artifacts in the `build` jobs; the AppImage is not part of CI.
 
@@ -72,6 +72,7 @@ The `addopts` in `pyproject.toml` is `"-m 'not integration'"`, so plain `pytest`
 | `core/config.py` | JSON config store. `load()` reads under a **shared** cross-process lock; `mutate(fn)` serializes a whole read-modify-write cycle under an exclusive lock (temp file → rename + `0o600` perms on non-Windows). |
 | `core/filelock.py` | Cross-platform `FileLock` (fcntl/shared on POSIX, `msvcrt.locking` on Windows), `acquire_single_instance_lock()`, and the reentrant per-workspace `workspace_git_lock` (`.n8n-launcher.git.lock`, gitignored) used around git lifecycle calls and publish. |
 | `core/paths.py` | Uses `platformdirs` for cross-platform config/log/runtime directories under `n8n-launcher`. Also exports `compose_file(workspace_id)`. |
+| `core/throttle.py` | Per-process concurrency limiter: `Throttle(limit).run(fn)` (blocking) / `try_run(fn)` (best-effort) bound the number of simultaneously-running background actions at scale (~100 workspaces). Used by the GUI to cap docker/git/ssh subprocess concurrency (`_MAX_BACKGROUND_ACTIONS = 8`). |
 | `n8n/owner.py` | n8n owner bootstrap via internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`). |
 | `n8n/api.py` | Small HTTP client for the n8n **public** API (workflows, credentials). Used by owner bootstrap and workflow sync. |
 | `github/api.py` | GitHub REST client: `github_owner()`, `create_repo()`, `list_workflow_runs()`, `list_run_jobs()`, `fetch_job_logs()`, `dispatch_workflow()`; typed `GitHubError` with `status_code`. Repo paths keep a **literal** slash (`repos/owner/repo/...`) — `repo_url_path()` only encodes the two segments; URL-encoding the slash makes every Actions endpoint 404. |

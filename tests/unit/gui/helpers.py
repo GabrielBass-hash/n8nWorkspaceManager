@@ -1,5 +1,6 @@
 """Shared fakes and helpers for the GUI unit tests."""
 
+from concurrent.futures import Future
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import ClassVar
@@ -65,6 +66,10 @@ class FakeTk:
         def pack(self, *_args, **_kwargs) -> None:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
+            self.packed = True
+
+        def pack_forget(self) -> None:
+            self.packed = False
 
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
@@ -531,6 +536,37 @@ class HoldingThread:
 
     def start(self) -> None:
         self.started = True
+
+
+class SyncThreadPoolExecutor:
+    """Inline stand-in for ``ThreadPoolExecutor`` (callables run in submit order).
+
+    The suite patches ``threading.Thread`` with :class:`SyncThread`, so a real
+    executor would run its worker loop *inline* on the calling thread and
+    block forever on ``work_queue.get()``. This fake executes submitted
+    callables eagerly and hands back completed futures, which is enough for
+    ``as_completed`` semantics and keeps log-fetch order deterministic.
+    """
+
+    def __init__(self, max_workers: int = 1, **_kwargs):
+        self.max_workers = max_workers
+
+    def __enter__(self) -> "SyncThreadPoolExecutor":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def submit(self, fn, /, *args, **kwargs):
+        future: Future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        pass
 
 
 class FakeMessagebox:

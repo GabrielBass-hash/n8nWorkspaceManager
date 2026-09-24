@@ -8,6 +8,7 @@ import subprocess
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -143,6 +144,73 @@ def git_is_repo(path: Path) -> bool:
         return result.returncode == 0
     except GitError:
         return False
+
+
+@dataclass(frozen=True)
+class GitProbeStatus:
+    """Local-only git snapshot produced by :func:`git_probe_status`.
+
+    Everything here is derived from a single ``git status --porcelain=v2``
+    call plus a remote URL lookup — no network, no state change. It feeds the
+    GUI row refresh; state-changing commands (pull/push/commit) must keep
+    using the dedicated helpers under :func:`workspace_git_lock`.
+    """
+
+    is_repo: bool = False
+    dirty: bool = False
+    upstream: str | None = None
+    ahead: int = 0
+    remote_url: str | None = None
+
+    @property
+    def has_remote(self) -> bool:
+        return self.remote_url is not None
+
+
+def git_probe_status(path: Path) -> GitProbeStatus:
+    """Probe a repository's display-relevant state in two subprocess spawns.
+
+    One ``git status --porcelain=v2 --branch`` yields repo presence, the dirty
+    flag, the upstream branch and the ahead/behind counts; one
+    ``git remote get-url origin`` yields the origin URL for the GUI tooltip.
+    This is the cheap probe the GUI refreshes rows with — it never blocks on
+    networking and never mutates the repository. A repository that is missing
+    or whose git is unavailable degrades to a flat ``GitProbeStatus``.
+    """
+    try:
+        result = _run_git(["status", "--porcelain=v2", "--branch"], cwd=path, check=False)
+    except GitError:
+        return GitProbeStatus()
+    if result.returncode != 0:
+        return GitProbeStatus()
+    dirty = False
+    upstream: str | None = None
+    ahead = 0
+    for line in result.stdout.splitlines():
+        if line.startswith("# branch.upstream"):
+            upstream = line.split(" ", 2)[2].strip() or None
+        elif line.startswith("# branch.ab"):
+            parts = line.split()
+            if len(parts) >= 3:
+                ahead = _branch_ab_count(parts[2])
+        elif not line.startswith("# "):
+            # Any non-header line (worktree, index, untracked) means dirt.
+            dirty = True
+    return GitProbeStatus(
+        is_repo=True,
+        dirty=dirty,
+        upstream=upstream,
+        ahead=ahead,
+        remote_url=git_remote_url(path),
+    )
+
+
+def _branch_ab_count(token: str) -> int:
+    """Parse the ``+N`` token of ``# branch.ab +N -M`` into a positive count."""
+    try:
+        return int(token.lstrip("+-"))
+    except ValueError:
+        return 0
 
 
 def git_init(path: Path, *, remote_url: str | None = None, branch: str | None = None) -> None:

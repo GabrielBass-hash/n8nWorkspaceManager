@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -22,6 +23,7 @@ import requests
 from ..core.config import ConfigStore
 from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
+from ..core.throttle import Throttle
 from ..docker.manager import DockerManager
 from ..git.manager import git_seed_remote
 from ..github import auth
@@ -99,6 +101,29 @@ WINDOW_HEIGHT_FRACTION = 0.72
 DEFAULT_WINDOW_WIDTH = 980
 DEFAULT_WINDOW_HEIGHT = 600
 
+# Concurrent workspace starts are bounded by a semaphore: allowing eight
+# "Démarrer" clicks to spawn eight ``docker compose up`` at once would thresh
+# on image pulls and saturate the daemon. Three in flight is a reasonable
+# ceiling for a desktop box.
+_MAX_CONCURRENT_STARTS = 3
+
+# Ceiling on simultaneously-running background actions (every ``_run_async``
+# worker). Threads are created per action, but the docker/git/ssh subprocess
+# work behind them is the scarce resource: at ~100 workspaces the pool must
+# not pile hundreds of ``docker compose`` invocations onto one daemon.
+_MAX_BACKGROUND_ACTIONS = 8
+
+# Freshness window for a cached CI runs snapshot: the "Déroulement" tab
+# auto-polls every few seconds while a run is in flight, and each poll would
+# re-list runs (plus re-download the focus run's logs). A snapshot younger
+# than this is served straight from the cache.
+CI_RUNS_TTL_SECONDS = 30.0
+
+# Worker threads used to download the focus run's job logs in parallel; the
+# GitHub jobs API is fast but log bodies are large, so four downloads in
+# flight keep the dialog from stalling on a single slow body.
+_CI_LOG_WORKERS = 4
+
 
 def window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
     """Pick the main-window geometry as a clamped fraction of the screen."""
@@ -146,6 +171,7 @@ class RowFrame(Protocol):
     db_chip: tk.Label
     git_chip: tk.Label
     ci_chip: tk.Label
+    server_chip: tk.Label
     port_chip: tk.Label
     pipelines_chip: tk.Label
     action_button: ttk.Button
@@ -189,7 +215,14 @@ class LauncherApp:
         self._rows: dict[str, tuple[RowFrame, tk.Label]] = {}
         self._row_order: list[str] = []
         self._selected_id: str | None = None
-        self._launching: str | None = None
+        self._launching: set[str] = set()
+        self._start_slots = threading.BoundedSemaphore(_MAX_CONCURRENT_STARTS)
+        # Shared budget for background workers (see _MAX_BACKGROUND_ACTIONS).
+        self._background_throttle = Throttle(_MAX_BACKGROUND_ACTIONS)
+        # True while a publish is in flight: a second "Publier sur le serveur…"
+        # (double-click or re-entry from the context menu) must not overlap the
+        # running deployment's git push or marker polling.
+        self._deploying = False
         self._status_label: tk.Label | None = None
         self._subtitle: tk.Label | None = None
         self._menu: tk.Menu | None = None
@@ -205,6 +238,13 @@ class LauncherApp:
         # never stack overlapping fetch workers when a poll takes longer than
         # the cadence (5s while a run is in flight).
         self._ci_runs_fetch_in_flight = False
+        # One keep-alive session for every GitHub call (run lists, jobs, logs):
+        # a fresh ``requests.Session`` per request would pay a TCP+TLS
+        # handshake each time. The runs TTL lets the auto-polling panel serve
+        # a snapshot younger than ``_CI_RUNS_TTL_SECONDS`` from the cache
+        # instead of spending the API budget on every 5s tick.
+        self._github_session = requests.Session()
+        self._ci_runs_fetched_at: dict[str, float] = {}
         self._apply_theme()
         self._configure_root()
         self._build_ui()
@@ -635,7 +675,7 @@ class LauncherApp:
 
         name_label.pack(side="left", fill="x", expand=True)
 
-        if workspace.id == self._launching:
+        if workspace.id in self._launching:
             action_text = "Démarrage…"
             action_command = None
             action_state = "disabled"
@@ -653,7 +693,7 @@ class LauncherApp:
             text=action_text,
             style="Accent.TButton"
             if workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR)
-            and workspace.id != self._launching
+            and workspace.id not in self._launching
             else "Secondary.TButton",
             cursor="arrow" if action_state == "disabled" else "hand2",
             state=action_state,
@@ -844,7 +884,7 @@ class LauncherApp:
 
     def toggle_from_row(self, workspace_id: str) -> None:
         """Start (and open) or stop the workspace bound to a row button."""
-        if self._closing or self._launching:
+        if self._closing:
             return
         workspace = next(
             (item for item in self.workspace_manager.list() if item.id == workspace_id),
@@ -886,18 +926,45 @@ class LauncherApp:
                     parent=self.root,
                 )
             self.set_status(f"« {workspace.name} » arrêté.")
+            display.invalidate_git_status(current if current is not None else workspace)
             self.refresh()
 
         self._run_async(action, on_success=on_stopped)
 
+    def _refresh_after_git_change(self, workspace: Workspace, status: str) -> None:
+        """Drop the cached git probe for a workspace, repaint, and set a status.
+
+        Called on the main thread once a background git operation (configure,
+        push, CI toggle…) has completed so the next render re-probes instead of
+        reusing the stale 3-second cache entry.
+        """
+        display.invalidate_git_status(workspace)
+        self.refresh()
+        self.set_status(status)
+
     def refresh(self) -> None:
         if self._closed:
+            return
+        workspaces = self.workspace_manager.list()
+        if [workspace.id for workspace in workspaces] == self._row_order:
+            # Same rows in the same order: refresh the widgets in place
+            # instead of destroying and rebuilding every frame (and re-probing
+            # git) on each poll tick.
+            for workspace in workspaces:
+                try:
+                    self._update_row(workspace)
+                except Exception:
+                    logger.exception(
+                        "Skipping unrefreshable workspace %s (%s)", workspace.id, workspace.name
+                    )
+            self._toggle_empty_state()
+            self._update_subtitle(len(workspaces))
+            self._update_scrollregion()
             return
         for frame, _label in self._rows.values():
             frame.destroy()
         self._rows = {}
         self._row_order = []
-        workspaces = self.workspace_manager.list()
         for workspace in workspaces:
             try:
                 row = self._build_row(workspace)
@@ -914,13 +981,92 @@ class LauncherApp:
             self._selected_id = None
         self._apply_selection_styles()
         self._toggle_empty_state()
-        if self._subtitle is not None:
-            count = len(workspaces)
-            if count == 0:
-                self._subtitle.config(text="Aucun workflow — cliquez pour en créer un")
-            else:
-                self._subtitle.config(text=f"{count} workflow{'s' if count != 1 else ''}")
+        self._update_subtitle(len(workspaces))
         self._update_scrollregion()
+
+    def _update_subtitle(self, count: int) -> None:
+        """Refresh the header counter with the current workspace count."""
+        if self._subtitle is None:
+            return
+        if count == 0:
+            self._subtitle.config(text="Aucun workflow — cliquez pour en créer un")
+        else:
+            self._subtitle.config(text=f"{count} workflow{'s' if count != 1 else ''}")
+
+    def _update_row(self, workspace: Workspace) -> None:
+        """Refresh an existing row's widgets in place.
+
+        Recomputes the same texts, palettes, tooltips and action button state
+        ``_build_row`` would, without recreating the frame. Tooltip bindings
+        are re-attached (``bind`` without ``add`` replaces the previous
+        handler), so hovering always shows current data.
+        """
+        row = self._rows[workspace.id][0]
+        row.name_label.config(text=workspace.name)
+        git_status = display.git_row_status(workspace)
+
+        row.dirty_dot.config(text="•" if git_status.dirty else "")
+        if git_status.dirty:
+            row.dirty_dot.config(bg=CHIP_WARN[0], fg=CHIP_WARN[1])
+            row.dirty_dot.pack(side="left", padx=(8, 0))
+        else:
+            row.dirty_dot.config(bg=SURFACE, fg=SURFACE)
+            row.dirty_dot.pack_forget()
+
+        if workspace.id in self._launching:
+            action_text, accent, action_state, action_command = (
+                "Démarrage…",
+                False,
+                "disabled",
+                None,
+            )
+        elif workspace.state in (WorkspaceState.STOPPED, WorkspaceState.ERROR):
+            action_text, accent, action_state = "Démarrer", True, "normal"
+            action_command = self._make_toggle_action(workspace.id)
+        else:
+            action_text, accent, action_state = "Arrêter", False, "normal"
+            action_command = self._make_toggle_action(workspace.id)
+        row.action_button.configure(
+            text=action_text,
+            style="Accent.TButton" if accent else "Secondary.TButton",
+            state=action_state,
+            command=action_command,  # type: ignore[arg-type]
+            cursor="arrow" if action_state == "disabled" else "hand2",
+        )
+
+        row.port_chip.config(text=f":{workspace.port}")
+        row.pipelines_chip.config(text=str(display.pipelines_count(workspace.workflows_dir)))
+
+        db_connected_now = display.db_connected(workspace)
+        row.db_chip.config(
+            text=display.db_label(workspace),
+            bg=CHIP_ACTIVE[0] if db_connected_now else CHIP_INACTIVE[0],
+            fg=CHIP_ACTIVE[1] if db_connected_now else CHIP_INACTIVE[1],
+        )
+        self._attach_tooltip(
+            row.db_chip,
+            "Base PostgreSQL locale gérée" if db_connected_now else "Aucune base de données",
+        )
+
+        git_palette = self._git_chip_palette(git_status)
+        row.git_chip.config(
+            text=display.git_row_label(git_status),
+            bg=git_palette[0],
+            fg=git_palette[1],
+        )
+        self._attach_tooltip(row.git_chip, git_status.tooltip)
+
+        ci_palette = self._ci_chip_palette(workspace)
+        row.ci_chip.config(text="CI", bg=ci_palette[0], fg=ci_palette[1])
+        self._attach_tooltip(row.ci_chip, display.ci_tooltip(workspace))
+
+        server_palette = self._server_chip_palette(workspace)
+        row.server_chip.config(
+            text=display.server_label(workspace),
+            bg=server_palette[0],
+            fg=server_palette[1],
+        )
+        self._attach_tooltip(row.server_chip, display.server_tooltip(workspace))
 
     def _set_row_background(self, workspace_id: str, *, hover: bool = False) -> None:
         frame = self._rows.get(workspace_id, (None, None))[0]
@@ -1001,7 +1147,9 @@ class LauncherApp:
         self.set_status(f"{workspace.name} · :{workspace.port} · {state_label(workspace.state)}")
 
     def _handle_double(self, workspace_id: str) -> None:
-        if self._launching:
+        # A double-click fires twice; the second event must not restart a
+        # workspace whose launch is already in flight.
+        if workspace_id in self._launching:
             return
         self._select_row(workspace_id)
         self.launch_selected()
@@ -1061,7 +1209,7 @@ class LauncherApp:
         repos: list[dict[str, Any]] = []
         gh_client: GitHubClient | None = None
         if token:
-            gh_client = GitHubClient(token)
+            gh_client = GitHubClient(token, session=self._github_session)
             try:
                 repos = gh_client.list_user_repos()
             except GitHubError as exc:
@@ -1160,7 +1308,9 @@ class LauncherApp:
 
         self._run_async(
             action,
-            on_success=lambda: self.set_status(f"Git configuré pour « {workspace.name} »."),
+            on_success=lambda: self._refresh_after_git_change(
+                workspace, f"Git configuré pour « {workspace.name} »."
+            ),
         )
 
     def _prompt_github_and_configure(self, workspace: Workspace) -> None:
@@ -1174,8 +1324,8 @@ class LauncherApp:
 
         self._run_async(
             action,
-            on_success=lambda: self.set_status(
-                f"Dépôt GitHub configuré pour « {workspace.name} »."
+            on_success=lambda: self._refresh_after_git_change(
+                workspace, f"Dépôt GitHub configuré pour « {workspace.name} »."
             ),
         )
 
@@ -1186,7 +1336,7 @@ class LauncherApp:
         the GitHub API call and one seed push; this flow never writes it to the
         config. Returns the created remote URL.
         """
-        client = GitHubClient(plan.token)
+        client = GitHubClient(plan.token, session=self._github_session)
         remote_url = client.create_repo(
             plan.name.strip(),
             private=plan.private,
@@ -1243,14 +1393,28 @@ class LauncherApp:
 
     def publish_selected(self) -> None:
         """Deploy the current exports to the configured server."""
-        if self._closing:
+        if self._closing or self._deploying:
             return
         workspace = self._selected_or_warn()
         if workspace is None or not workspace.server.enabled:
             return
+
+        def on_success() -> None:
+            self._deploying = False
+            self._refresh_after_git_change(
+                workspace, f"Pipelines publiées pour « {workspace.name} »."
+            )
+
+        def on_error() -> None:
+            self._deploying = False
+            self.refresh()
+
+        self._deploying = True
+        self.set_status(f"Publication de « {workspace.name} »…")
         self._run_async(
             lambda: self.workspace_manager.publish(workspace),
-            on_success=lambda: self.set_status(f"Pipelines publiées pour « {workspace.name} »."),
+            on_success=on_success,
+            on_error=on_error,
         )
 
     def disable_server_selected(self) -> None:
@@ -1311,6 +1475,7 @@ class LauncherApp:
             self.workspace_manager.enable_ci(workspace)
 
         def on_success() -> None:
+            display.invalidate_git_status(workspace)
             self.refresh()
             current = self._reload_workspace(workspace.id)
             if current is not None:
@@ -1346,8 +1511,8 @@ class LauncherApp:
         selected, push = result
         self._run_async(
             lambda: self.workspace_manager.save_ci_selection(workspace, selected, push=push),
-            on_success=lambda: self.set_status(
-                f"Sélection des tests CI enregistrée pour « {workspace.name} »."
+            on_success=lambda: self._refresh_after_git_change(
+                workspace, f"Sélection des tests CI enregistrée pour « {workspace.name} »."
             ),
         )
 
@@ -1423,7 +1588,9 @@ class LauncherApp:
 
         def worker() -> None:
             try:
-                GitHubClient(token).dispatch_workflow(repo_path, ci.WORKFLOW_FILE, ref=ref)
+                GitHubClient(token, session=self._github_session).dispatch_workflow(
+                    repo_path, ci.WORKFLOW_FILE, ref=ref
+                )
             except GitHubError as exc:
                 # Bind the message before scheduling: the ``except`` variable is
                 # cleared once the block exits, before the queue is drained.
@@ -1435,7 +1602,9 @@ class LauncherApp:
                 self.events.put((notify_error, None))
                 return
             self.events.put((lambda: self.set_status(f"CI lancée sur « {ref} »."), None))
-            self.events.put((lambda: self._refresh_ci_runs(workspace, panel), None))
+            # Force a real re-fetch: a just-dispatched run must show up now,
+            # not whenever the 30-second freshness window expires.
+            self.events.put((lambda: self._refresh_ci_runs(workspace, panel, force=True), None))
 
         threading.Thread(target=worker, name="n8n-launcher-ci-dispatch", daemon=True).start()
 
@@ -1474,7 +1643,9 @@ class LauncherApp:
             self.workspace_manager.set_github_token(plan.token)
         return plan.token
 
-    def _refresh_ci_runs(self, workspace: Workspace, panel: RunsPanel) -> None:
+    def _refresh_ci_runs(
+        self, workspace: Workspace, panel: RunsPanel, *, force: bool = False
+    ) -> None:
         """Fetch GitHub runs off-thread, then apply the snapshot on the main thread.
 
         The token is resolved automatically and cached in memory; it is only
@@ -1484,7 +1655,23 @@ class LauncherApp:
         drain runs ``panel.apply`` on the main thread. A fetch already in
         progress makes this a no-op — the auto-poll must never stack
         overlapping workers (the panel is refreshed again on the next tick).
+
+        Reads within ``CI_RUNS_TTL_SECONDS`` of the last fetch are served from
+        the cache on the main thread: the panel auto-polls every few seconds
+        while a run is in flight, and re-listing runs (plus the focus run's
+        job logs) on every tick would burn the GitHub API budget for a display
+        that barely changed. ``force=True`` bypasses the freshness window
+        (used right after a manual dispatch so the new run shows up at once).
         """
+        cached = self._ci_runs_cache.get(workspace.id)
+        last_fetched = self._ci_runs_fetched_at.get(workspace.id, 0.0)
+        if (
+            not force
+            and cached is not None
+            and time.monotonic() - last_fetched < CI_RUNS_TTL_SECONDS
+        ):
+            self._apply_ci_runs_snapshot(workspace.id, panel, cached)
+            return
         if self._ci_runs_fetch_in_flight:
             return
         token = self._ci_token_for_ui()
@@ -1528,6 +1715,7 @@ class LauncherApp:
         dialog.
         """
         self._ci_runs_cache[workspace_id] = snapshot
+        self._ci_runs_fetched_at[workspace_id] = time.monotonic()
         try:
             if not panel.winfo_exists():
                 return
@@ -1549,6 +1737,7 @@ class LauncherApp:
         if plan.remember:
             self.workspace_manager.set_github_token(plan.token)
         self._ci_runs_cache.clear()
+        self._ci_runs_fetched_at.clear()
         self.set_status("Token GitHub mis à jour.")
 
     def _build_ci_runs_snapshot(self, workspace: Workspace) -> ci_runs.RunsSnapshot:
@@ -1575,7 +1764,7 @@ class LauncherApp:
             return ci_runs.compose_snapshot(
                 repo_path=repo_path, runs=[], error="Token GitHub manquant."
             )
-        client = GitHubClient(token)
+        client = GitHubClient(token, session=self._github_session)
         try:
             runs = client.list_workflow_runs(repo_path)
         except GitHubError as exc:
@@ -1600,20 +1789,28 @@ class LauncherApp:
                 except GitHubError:
                     jobs = []
                 raw_jobs[run_id] = jobs
-                for job in jobs:
-                    job_id = int(job.get("id") or 0)
-                    if not job_id:
-                        continue
-                    # Logs are fetched for every job of the focus run: the
-                    # finished ones (final summary) and the in-flight one (live
-                    # ``[runner]`` progress lines), so the panel can detail it.
-                    try:
-                        log_text = client.fetch_job_logs(repo_path, job_id)
-                    except GitHubError:
-                        continue
-                    parsed = ci_runs.parse_pipeline_lines(log_text)
-                    if parsed:
-                        pipelines[job_id] = parsed
+                job_ids = [int(job.get("id") or 0) for job in jobs]
+                job_ids = [job_id for job_id in job_ids if job_id]
+                # Logs are fetched for every job of the focus run: the
+                # finished ones (final summary) and the in-flight one (live
+                # ``[runner]`` progress lines), so the panel can detail it.
+                # Bodies are large, so the downloads run in parallel; the
+                # harness is torn down with ``wait=True`` so no late future
+                # writes into ``pipelines`` after this method returns.
+                with ThreadPoolExecutor(max_workers=_CI_LOG_WORKERS) as pool:
+                    futures = {
+                        pool.submit(client.fetch_job_logs, repo_path, job_id): job_id
+                        for job_id in job_ids
+                    }
+                    for future in as_completed(futures):
+                        job_id = futures[future]
+                        try:
+                            log_text = future.result()
+                        except GitHubError:
+                            continue
+                        parsed = ci_runs.parse_pipeline_lines(log_text)
+                        if parsed:
+                            pipelines[job_id] = parsed
         return ci_runs.compose_snapshot(
             repo_path=repo_path,
             runs=runs,
@@ -1674,8 +1871,8 @@ class LauncherApp:
             return
         self._run_async(
             lambda: self.workspace_manager.disable_ci(workspace),
-            on_success=lambda: self.set_status(
-                f"Tests GitHub Actions désactivés pour « {workspace.name} »."
+            on_success=lambda: self._refresh_after_git_change(
+                workspace, f"Tests GitHub Actions désactivés pour « {workspace.name} »."
             ),
         )
 
@@ -1714,7 +1911,9 @@ class LauncherApp:
         )
 
     def launch_selected(self) -> None:
-        if self._closing or self._launching:
+        # Multiple workspaces may start at once (bounded by ``_start_slots``);
+        # only the app closing blocks a launch.
+        if self._closing:
             return
         workspace = self._selected_or_warn()
         if workspace is None:
@@ -1722,23 +1921,31 @@ class LauncherApp:
         self._launch_workspace(workspace)
 
     def _launch_workspace(self, workspace: Workspace) -> None:
-        if self._launching == workspace.id:
+        if workspace.id in self._launching:
             return
-        self._launching = workspace.id
+        self._launching.add(workspace.id)
         url = f"http://127.0.0.1:{workspace.port}"
         self.set_status(f"Lancement de « {workspace.name} » — attente que n8n réponde…")
         self.refresh()
 
         def action() -> None:
-            self._ensure_running(workspace)
+            # Bound the number of simultaneous boots: the slot is held for the
+            # whole ``up`` + health check and freed even on failure.
+            self._start_slots.acquire()
+            try:
+                self._ensure_running(workspace)
+            finally:
+                self._start_slots.release()
 
         def on_success() -> None:
-            self._launching = None
+            self._launching.discard(workspace.id)
+            display.invalidate_git_status(workspace)
             self.refresh()
             self.browser_opener(url, browser_app_dir(workspace.id))
 
         def on_error() -> None:
-            self._launching = None
+            self._launching.discard(workspace.id)
+            self.refresh()
 
         self._run_async(action, on_success=on_success, on_error=on_error)
 
@@ -1893,7 +2100,9 @@ class LauncherApp:
     ) -> None:
         def worker() -> None:
             try:
-                action()
+                # Serialize the heavy subprocess work (docker compose, git,
+                # ssh, GitHub) behind the shared budget set at startup.
+                self._background_throttle.run(action)
             except Exception as exc:
                 self.events.put((on_error or self.refresh, exc))
             else:

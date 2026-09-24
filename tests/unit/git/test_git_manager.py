@@ -6,6 +6,7 @@ import pytest
 
 from n8n_launcher.git import (
     GitError,
+    GitProbeStatus,
     ensure_gitignore,
     ensure_workspace_branch,
     git_add,
@@ -18,6 +19,7 @@ from n8n_launcher.git import (
     git_init,
     git_is_repo,
     git_list_remote_branches,
+    git_probe_status,
     git_pull,
     git_pull_new_repo,
     git_push,
@@ -52,6 +54,74 @@ def test_git_is_repo_false_when_rev_parse_fails(tmp_path: Path) -> None:
         return_value=completed(128, "", "fatal: not a git repository"),
     ):
         assert git_is_repo(tmp_path) is False
+
+
+def test_git_probe_status_flat_when_not_a_repo(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(128, "", "fatal: not a git repository"),
+    ):
+        assert git_probe_status(tmp_path) == GitProbeStatus()
+
+
+def test_git_probe_status_parses_porcelain_v2(tmp_path: Path) -> None:
+    raw = (
+        "# branch.oid 111111\n"
+        "# branch.head n8n/abc123\n"
+        "# branch.upstream origin/n8n/abc123\n"
+        "# branch.ab +2 -1\n"
+        "1 .M N... 100644 100644 100644 aaa bbb path.json\n"
+    )
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, raw),
+            completed(0, "https://example.test/repo.git\n"),
+        ],
+    ):
+        probe = git_probe_status(tmp_path)
+
+    assert probe.is_repo is True
+    assert probe.dirty is True
+    assert probe.upstream == "origin/n8n/abc123"
+    assert probe.ahead == 2
+    assert probe.remote_url == "https://example.test/repo.git"
+
+
+def test_git_probe_status_clean_repo_without_upstream(tmp_path: Path) -> None:
+    raw = "# branch.oid 111111\n# branch.head n8n/abc123\n"
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[completed(0, raw), completed(128, "", "no such remote")],
+    ):
+        probe = git_probe_status(tmp_path)
+
+    assert probe.is_repo is True
+    assert probe.dirty is False
+    assert probe.upstream is None
+    assert probe.ahead == 0
+    assert probe.remote_url is None
+    assert probe.has_remote is False
+
+
+def test_git_probe_status_flat_when_git_unavailable(tmp_path: Path) -> None:
+    with patch("n8n_launcher.git.manager.subprocess.run", side_effect=OSError("boom")):
+        probe = git_probe_status(tmp_path)
+
+    assert probe == GitProbeStatus()
+
+
+def test_git_probe_status_parses_initial_branch_header(tmp_path: Path) -> None:
+    raw = "# branch.oid (initial)\n# branch.head n8n/abc123\n"
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, raw),
+    ):
+        probe = git_probe_status(tmp_path)
+
+    assert probe.is_repo is True
+    assert probe.dirty is False
+    assert probe.ahead == 0
 
 
 def test_git_init_initializes_repo_with_dev_branch(tmp_path: Path) -> None:
