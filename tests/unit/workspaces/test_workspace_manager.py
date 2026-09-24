@@ -16,6 +16,7 @@ from n8n_launcher.core.models import (
 )
 from n8n_launcher.docker.manager import ComposeStatus, DockerError
 from n8n_launcher.git import GitError, workspace_branch
+from n8n_launcher.github.api import GitHubError
 from n8n_launcher.n8n.api import N8nApiError
 from n8n_launcher.n8n.owner import OwnerSetupError
 from n8n_launcher.remote.ssh import SshError
@@ -1113,6 +1114,7 @@ def test_enable_ci_writes_harness_and_commits(tmp_path: Path) -> None:
         ),
         patch.object(launcher, "_ensure_workspace_branch") as ensured,
         patch.object(launcher, "_commit_and_push") as commit,
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
     ):
         enabled = launcher.enable_ci(workspace)
 
@@ -1181,10 +1183,68 @@ def test_enable_ci_preserves_existing_selection(tmp_path: Path) -> None:
         ),
         patch.object(launcher, "_ensure_workspace_branch"),
         patch.object(launcher, "_commit_and_push"),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
     ):
         launcher.enable_ci(workspace)
 
     assert '"n8nPipelines/keep.json"' in selection.read_text(encoding="utf-8")
+
+
+def test_ensure_ci_default_branch_patches_repo_when_token_available(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    client = MagicMock()
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value="ghp_x"),
+        patch("n8n_launcher.workspaces.manager.GitHubClient", return_value=client),
+    ):
+        launcher._ensure_ci_default_branch(workspace)
+
+    client.set_default_branch.assert_called_once_with("owner/repo", "dev")
+
+
+def test_ensure_ci_default_branch_skipped_without_token(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.workspaces.manager.GitHubClient") as client,
+    ):
+        launcher._ensure_ci_default_branch(workspace)
+
+    client.assert_not_called()
+
+
+def test_ensure_ci_default_branch_logs_api_failure(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    client = MagicMock()
+    client.set_default_branch.side_effect = GitHubError("forbidden", status_code=403)
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value="ghp_x"),
+        patch("n8n_launcher.workspaces.manager.GitHubClient", return_value=client),
+    ):
+        launcher._ensure_ci_default_branch(workspace)
+
+    client.set_default_branch.assert_called_once_with("owner/repo", "dev")
 
 
 def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
@@ -1198,6 +1258,7 @@ def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
         ),
         patch.object(launcher, "_ensure_workspace_branch"),
         patch.object(launcher, "_commit_and_push"),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
     ):
         launcher.enable_ci(workspace)
     selection = workspace.workflows_dir / ".n8n-tests" / "tests.json"

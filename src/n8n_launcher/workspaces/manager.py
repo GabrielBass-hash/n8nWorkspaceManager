@@ -35,6 +35,8 @@ from ..database import (
 )
 from ..docker.compose import compose_project_name, render_remote_compose, write_compose
 from ..docker.manager import DockerManager, parse_compose_status
+from ..github import auth
+from ..github.api import GitHubClient, GitHubError
 from ..git import (
     GitError,
     ensure_gitignore,
@@ -681,8 +683,42 @@ class WorkspaceManager:
 
         workspace = self.store.mutate(apply)
         self._commit_and_push(workspace, "n8n-launcher: activer les tests GitHub Actions")
+        self._ensure_ci_default_branch(workspace)
         logger.info("Enabled CI for %s", workspace.name)
         return workspace
+
+    def _ensure_ci_default_branch(self, workspace: Workspace) -> None:
+        """Point the GitHub repository's default branch at the workspace's ``dev``.
+
+        ``workflow_dispatch`` only resolves a workflow file that lives on the
+        repository's default branch: a dev-only push into a repo whose default
+        is still ``main`` would make the manual run 404. The token is resolved
+        silently (persisted override → ``gh`` CLI → OS git credential) and any
+        failure is logged, never raised — CI enable must not depend on this
+        convenience step. When no token is available the user is expected to
+        change the default branch by hand (documented in the README).
+        """
+        repo_path = ci.github_repo_path(self.git_remote_url(workspace))
+        token = auth.resolve_github_token(self.github_token())
+        if not repo_path or not token:
+            logger.info(
+                "Skipping GitHub default-branch update for %s (missing %s)",
+                workspace.name,
+                "remote" if not repo_path else "token",
+            )
+            return
+        branch = workspace_branch(workspace.id)
+        try:
+            GitHubClient(token).set_default_branch(repo_path, branch)
+        except GitHubError as exc:
+            logger.warning(
+                "Could not set the default branch of GitHub repo %s to %s: %s",
+                repo_path,
+                branch,
+                exc,
+            )
+            return
+        logger.info("Set GitHub default branch to %s for %s", branch, workspace.name)
 
     def disable_ci(self, workspace: Workspace) -> Workspace:
         """Remove the generated CI harness while keeping the pipeline selection."""

@@ -25,7 +25,7 @@ from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
 from ..core.throttle import Throttle
 from ..docker.manager import DockerManager
-from ..git.manager import git_seed_remote
+from ..git.manager import git_seed_remote, workspace_branch
 from ..github import auth
 from ..github.api import GitHubClient, GitHubError
 from ..platform.browser import open_app, open_url
@@ -1543,11 +1543,11 @@ class LauncherApp:
         return lambda panel: self._ci_runs_run(workspace, panel)
 
     def _ci_latest_branch(self, workspace: Workspace) -> str:
-        """Branch of the most recent cached run, else ``dev`` as a fallback."""
+        """Branch of the most recent cached run, else the workspace's ``dev``."""
         snapshot = self._ci_runs_cache.get(workspace.id)
         if snapshot and snapshot.runs and snapshot.runs[0].branch:
             return snapshot.runs[0].branch
-        return "dev"
+        return workspace_branch(workspace.id)
 
     def _ci_runs_run(self, workspace: Workspace, panel: RunsPanel) -> None:
         """Trigger the CI workflow on a chosen ref, then refresh the panel.
