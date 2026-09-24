@@ -120,6 +120,32 @@ def ci_enabled(workspace: Workspace) -> bool:
     return workspace.git.ci_enabled
 
 
+def server_enabled(workspace: Workspace) -> bool:
+    """Return True when the workspace deploys to a production server."""
+    return workspace.server.enabled
+
+
+def server_label(workspace: Workspace) -> str:
+    """Return the chip label for the server deployment state."""
+    if not workspace.server.enabled:
+        return "serv"
+    if workspace.server_last_error:
+        return "serv KO"  # ASCII: ✗ (U+2717) is absent from Linux UI fonts
+    return "serv"
+
+
+def server_tooltip(workspace: Workspace) -> str:
+    """Return the server chip tooltip with the last deploy outcome."""
+    if not workspace.server.enabled:
+        return "Déploiement serveur désactivé (cliquez pour configurer)"
+    lines = [f"Serveur de production : {workspace.server.user}@{workspace.server.host}"]
+    if workspace.server_last_error:
+        lines.append(f"Dernier déploiement en échec : {workspace.server_last_error}")
+    else:
+        lines.append("Dernier déploiement réussi")
+    return "\n".join(lines)
+
+
 def ci_tooltip(workspace: Workspace) -> str:
     """Return the CI chip tooltip with live selection counters."""
     if not workspace.git.ci_enabled:

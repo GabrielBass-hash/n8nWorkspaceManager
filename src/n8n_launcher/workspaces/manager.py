@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import shlex
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -13,7 +15,15 @@ from typing import Any
 from uuid import uuid4
 
 from ..core.config import ConfigStore
-from ..core.models import AppConfig, DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
+from ..core.models import (
+    AppConfig,
+    DbConfig,
+    DbMode,
+    GitConfig,
+    ServerConfig,
+    Workspace,
+    WorkspaceState,
+)
 from ..core.paths import compose_file
 from ..database import (
     DATA_DATABASE,
@@ -23,11 +33,12 @@ from ..database import (
     detect_migrations,
     has_db_layout,
 )
-from ..docker.compose import write_compose
+from ..docker.compose import render_remote_compose, write_compose
 from ..docker.manager import DockerManager, parse_compose_status
 from ..git import (
     GitError,
     ensure_gitignore,
+    ensure_workspace_branch,
     git_add,
     git_add_remote,
     git_commit,
@@ -39,18 +50,45 @@ from ..git import (
     git_pull,
     git_pull_new_repo,
     git_push,
+    git_push_ref,
     git_remote_url,
     git_remove_remote,
     git_set_remote_url,
+    git_ssh_env,
     tokenize_remote_url,
+    workspace_branch,
+    workspace_git_lock,
 )
 from ..n8n.api import N8nApiClient, N8nApiError
 from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
+from ..remote import (
+    bare_dir,
+    build_secrets_document,
+    chmod_remote,
+    marker_path,
+    mkdir_remote,
+    render_deploy_script,
+    render_hook,
+    resolve_base,
+    server_remote_url,
+    test_connection,
+    write_remote_file,
+)
+from ..remote.ssh import ssh_run
 from . import ci
 
 logger = logging.getLogger(__name__)
+
+
+def _is_push_rejection(exc: GitError) -> bool:
+    """Return True when *exc* looks like a remote rejecting a non-fast-forward."""
+    detail = str(exc).lower()
+    return any(
+        marker in detail
+        for marker in ("non-fast-forward", "[rejected]", "fetch first", "stale info")
+    )
 
 
 class WorkspaceError(RuntimeError):
@@ -158,8 +196,16 @@ class WorkspaceManager:
         migrations = detect_migrations(workflows_dir)
         if db is None:
             db = self._managed_db_config() if migrations else DbConfig(DbMode.NONE)
-        if db.mode is DbMode.MANAGED and not db.password:
-            db = self._managed_db_config()
+        if db.mode is DbMode.MANAGED:
+            # Preserve any explicitly provided DB fields, filling only the
+            # missing ones with the launcher defaults (name/user constants and
+            # a freshly generated password).
+            db = DbConfig(
+                mode=DbMode.MANAGED,
+                database_name=db.database_name or DATA_DATABASE,
+                username=db.username or DATA_USER,
+                password=db.password or secrets.token_hex(16),
+            )
         selected_port = port or suggest_port(reserved=reserved)
         if selected_port in reserved:
             raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
@@ -228,8 +274,15 @@ class WorkspaceManager:
             db = (
                 self._managed_db_config() if has_db_layout(workflows_dir) else DbConfig(DbMode.NONE)
             )
-        if db.mode is DbMode.MANAGED and not db.password:
-            db = self._managed_db_config()
+        if db.mode is DbMode.MANAGED:
+            # Same preservation rule as :meth:`create`: keep provided DB
+            # fields, defaulting only the missing ones.
+            db = DbConfig(
+                mode=DbMode.MANAGED,
+                database_name=db.database_name or DATA_DATABASE,
+                username=db.username or DATA_USER,
+                password=db.password or secrets.token_hex(16),
+            )
         self._scaffold(workflows_dir, db)
 
         reserved = {workspace.port for workspace in self.store.load().workspaces}
@@ -237,16 +290,17 @@ class WorkspaceManager:
         if selected_port in reserved:
             raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
 
-        # ``git clone`` may have picked a default branch other than "main": read
-        # it back so the recorded GitConfig matches reality.
-        effective_branch = git_current_branch(workflows_dir) or branch or "main"
+        # ``git clone`` checks out the remote's default branch; the launcher
+        # then works on its own ``n8n/<id>`` branch (switched right after the
+        # workspace is registered), so the recorded GitConfig stays truthful.
+        workspace_id = uuid4().hex[:8]
         workspace = Workspace(
-            id=uuid4().hex[:8],
+            id=workspace_id,
             name=(name or workflows_dir.name).strip(),
             workflows_dir=workflows_dir,
             port=selected_port,
             db=db,
-            git=GitConfig(enabled=True, remote_url=url, branch=effective_branch),
+            git=GitConfig(enabled=True, remote_url=url, branch=workspace_branch(workspace_id)),
             n8n_version=n8n_version,
         )
 
@@ -258,14 +312,26 @@ class WorkspaceManager:
             config.workspaces.append(workspace)
             return workspace
 
-        return self.store.mutate(append)
+        result = self.store.mutate(append)
+        self._ensure_workspace_branch(result)
+        return result
 
     def update(self, workspace_id: str, **changes: object) -> Workspace:
         """Update the allowed workspace fields and flag a restart when needed."""
-        allowed = {"name", "workflows_dir", "port", "db", "git", "n8n_version"}
+        allowed = {"name", "workflows_dir", "port", "db", "git", "n8n_version", "server"}
         unknown = set(changes) - allowed
         if unknown:
             raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
+
+        if "server" in changes:
+            server = changes["server"]
+            if not isinstance(server, ServerConfig):
+                raise WorkspaceError("server must be a ServerConfig")
+            config = self.store.load()
+            if conflict := self._server_port_conflict(config, workspace_id, server):
+                raise WorkspaceError(
+                    f"« {conflict} » utilise déjà le port {server.n8n_port} sur {server.host}."
+                )
 
         def apply(config: AppConfig) -> Workspace:
             current = self._find(config, workspace_id)
@@ -327,10 +393,12 @@ class WorkspaceManager:
         """Import n8n workflow exports from the workspace folder into n8n."""
         pipelines_dir = workspace.workflows_dir / "n8nPipelines"
         if workspace.git.enabled and git_is_repo(workspace.workflows_dir):
-            try:
-                git_pull(workspace.workflows_dir)
-            except GitError as exc:
-                logger.warning("git pull failed for %s: %s", workspace.name, exc)
+            with workspace_git_lock(workspace.workflows_dir):
+                self._ensure_workspace_branch(workspace)
+                try:
+                    git_pull(workspace.workflows_dir)
+                except GitError as exc:
+                    logger.warning("git pull failed for %s: %s", workspace.name, exc)
         if not pipelines_dir.is_dir():
             return
         # Import files stored at the folder root as well, so a folder that
@@ -354,34 +422,57 @@ class WorkspaceManager:
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             return
-        message = f"n8n-launcher: sync workflows [{datetime.now().isoformat(timespec='seconds')}]"
-        self._commit_and_push(workspace, message, push=push)
+        with workspace_git_lock(workspace.workflows_dir):
+            self._ensure_workspace_branch(workspace)
+            message = (
+                f"n8n-launcher: sync workflows [{datetime.now().isoformat(timespec='seconds')}]"
+            )
+            self._commit_and_push(workspace, message, push=push)
 
     def _commit_and_push(self, workspace: Workspace, message: str, *, push: bool = True) -> bool:
         """Stage everything, commit with *message*, and push when requested.
 
-        Mirrors ``sync_git``'s semantics: git failures never raise — they
-        degrade to the ``git_push_failed`` flag that the UI chip surfaces.
-        Returns True when a commit was actually created.
+        The whole cycle runs under the workspace git lock, so a background
+        pull (startup) and a push (close) can never interleave. A push rejected
+        by a concurrent writer is retried once after a ``pull --rebase`` — the
+        natural reaction a single-user desktop app should have to a remote that
+        moved on — before degrading to the ``git_push_failed`` flag the UI
+        chip surfaces. Mirrors ``sync_git``'s semantics: git failures never
+        raise. Returns True when a commit was actually created.
         """
         committed = False
-        try:
-            git_add(workspace.workflows_dir)
-            committed = git_commit(workspace.workflows_dir, message)
-        except GitError as exc:
-            logger.warning("git stage/commit failed for %s: %s", workspace.name, exc)
-            self._set_git_push_failed(workspace, True)
-            return committed
-        if committed:
-            logger.info("Committed for %s: %s", workspace.name, message)
-        if push and (committed or git_has_unpushed_commits(workspace.workflows_dir)):
+        with workspace_git_lock(workspace.workflows_dir):
             try:
-                git_push(workspace.workflows_dir)
+                git_add(workspace.workflows_dir)
+                committed = git_commit(workspace.workflows_dir, message)
             except GitError as exc:
-                logger.warning("git push failed for %s: %s", workspace.name, exc)
+                logger.warning("git stage/commit failed for %s: %s", workspace.name, exc)
                 self._set_git_push_failed(workspace, True)
                 return committed
-            self._set_git_push_failed(workspace, False)
+            if committed:
+                logger.info("Committed for %s: %s", workspace.name, message)
+            if push and (committed or git_has_unpushed_commits(workspace.workflows_dir)):
+                try:
+                    git_push(workspace.workflows_dir)
+                except GitError as exc:
+                    self._set_git_push_failed(workspace, True)
+                    if not _is_push_rejection(exc):
+                        logger.warning("git push failed for %s: %s", workspace.name, exc)
+                        return committed
+                    try:
+                        logger.info(
+                            "Push rejected for %s; pulling --rebase and retrying once",
+                            workspace.name,
+                        )
+                        git_pull(workspace.workflows_dir)
+                        git_push(workspace.workflows_dir)
+                    except GitError as retry_exc:
+                        logger.warning(
+                            "git push still failed for %s: %s", workspace.name, retry_exc
+                        )
+                        return committed
+                    logger.info("Retried push succeeded for %s", workspace.name)
+                self._set_git_push_failed(workspace, False)
         return committed
 
     def _set_git_push_failed(self, workspace: Workspace, failed: bool) -> None:
@@ -397,7 +488,7 @@ class WorkspaceManager:
     def git_init_workspace(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Initialize a git repository in the workspace folder."""
         if not git_is_repo(workspace.workflows_dir):
-            git_init(workspace.workflows_dir)
+            git_init(workspace.workflows_dir, branch=workspace_branch(workspace.id))
         ensure_gitignore(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
@@ -414,7 +505,12 @@ class WorkspaceManager:
             # Keep the existing CI metadata: reconfiguring the remote must not
             # silently turn the GitHub Actions workflow "off" in the app while
             # the tracked workflow file keeps running on every push.
-            current.git = replace(current.git, enabled=True, remote_url=remote_url)
+            current.git = replace(
+                current.git,
+                enabled=True,
+                remote_url=remote_url,
+                branch=workspace_branch(current.id),
+            )
             current.git_push_failed = False
 
         self.store.mutate(apply)
@@ -504,7 +600,12 @@ class WorkspaceManager:
             # Keep CI metadata (enabled state + credential names) intact:
             # toggling the remote must not desync the tracked GitHub Actions
             # workflow from what the app believes is configured.
-            current.git = replace(current.git, enabled=True, remote_url=remote_url)
+            current.git = replace(
+                current.git,
+                enabled=True,
+                remote_url=remote_url,
+                branch=workspace_branch(current.id),
+            )
             current.git_push_failed = False
 
         self.store.mutate(apply)
@@ -636,6 +737,252 @@ class WorkspaceManager:
             payload.append({"name": name, "type": ctype, "data": detail.get("data") or {}})
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
+    def _ensure_workspace_branch(self, workspace: Workspace) -> None:
+        """Make sure the workspace's own ``n8n/<id>`` branch is active when git is configured.
+
+        Each workspace syncs on its own per-id branch, so a legacy checkout
+        (``dev``/``main`` from before the branch policy) is switched to
+        ``n8n/<id>`` on the fly, and the recorded :class:`GitConfig` branch is
+        kept in sync. Failures are logged and never block startup.
+        """
+        if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
+            return
+        branch = workspace_branch(workspace.id)
+        try:
+            active = ensure_workspace_branch(workspace.workflows_dir, branch)
+        except GitError as exc:
+            logger.warning("ensure_workspace_branch failed for %s: %s", workspace.name, exc)
+            return
+        if active and active != workspace.git.branch:
+            workspace.git = replace(workspace.git, branch=branch)
+
+            def apply(config: AppConfig) -> None:
+                current = self._find(config, workspace.id)
+                current.git = replace(current.git, branch=branch)
+
+            self.store.mutate(apply)
+
+    def install_server(
+        self, workspace: Workspace, server: ServerConfig, *, test: bool = True
+    ) -> None:
+        """Install the deployment listener on the server and wire the git remote.
+
+        The bare repository (``git init --bare``, idempotent), its
+        ``post-receive`` hook and the self-contained ``deploy.py`` are generated
+        and streamed over SSH (no server-side package). The local repository
+        gets a ``server`` remote pointing at the bare repo, so a later
+        :meth:`publish` can push ``n8n/<id>:main``. Nothing is persisted here —
+        the dialog saves the :class:`ServerConfig` itself.
+        """
+        if conflict := self._server_port_conflict(self.store.load(), workspace.id, server):
+            raise WorkspaceError(
+                f"« {conflict} » utilise déjà le port {server.n8n_port} sur {server.host}."
+            )
+        if test:
+            test_connection(server)
+        base = resolve_base(server, workspace.id)
+        # The post-receive hook lives in ``<base>.git/hooks``; create the bare
+        # repository first so that path exists. ``--bare`` init is idempotent.
+        ssh_run(server, f"git init --bare {shlex.quote(bare_dir(server, workspace.id))}")
+        mkdir_remote(server, base)
+        write_remote_file(
+            server, f"{base}.git/hooks/post-receive", render_hook(server, workspace.id)
+        )
+        chmod_remote(server, f"{base}.git/hooks/post-receive")
+        write_remote_file(server, f"{base}/deploy.py", render_deploy_script())
+        chmod_remote(server, f"{base}/deploy.py")
+        # Re-add the remote only when missing so a re-run is idempotent
+        # (``git remote add`` would fail on an existing ``server`` remote).
+        if (
+            workspace.git.enabled
+            and git_is_repo(workspace.workflows_dir)
+            and git_remote_url(workspace.workflows_dir, "server") is None
+        ):
+            git_add_remote(
+                workspace.workflows_dir, "server", server_remote_url(server, workspace.id)
+            )
+        logger.info("Installed server listener for %s on %s", workspace.name, server.host)
+
+    def disable_server(self, workspace: Workspace) -> Workspace:
+        """Turn the server deployment off without touching the server.
+
+        The remote ``server`` is removed locally so nothing is pushed anymore;
+        the server-side repository, hook and data are left intact (idempotent).
+        """
+        if (
+            workspace.git.enabled
+            and git_is_repo(workspace.workflows_dir)
+            and git_remote_url(workspace.workflows_dir, "server") is not None
+        ):
+            git_remove_remote(workspace.workflows_dir, "server")
+
+        def apply(config: AppConfig) -> Workspace:
+            current = self._find(config, workspace.id)
+            current.server = replace(current.server, enabled=False)
+            return current
+
+        workspace = self.store.mutate(apply)
+        logger.info("Disabled server deployment for %s", workspace.name)
+        return workspace
+
+    def publish(self, workspace: Workspace) -> None:
+        """Export the local state, push it to the server as ``main`` and track the result.
+
+        Deploys the *current* state of the local n8n instance: workflows are
+        exported, the remote Compose definition is committed, the credentials
+        secrets are re-uploaded (they never travel through the repository) and
+        the workspace branch is pushed to the ``server`` remote as ``main``
+        (``n8n/<id>:main``). The push fails fast on a non-fast-forward server
+        branch so production main is never rewritten.
+        """
+        server = workspace.server
+        if not server or not server.enabled:
+            raise WorkspaceError(
+                "Aucun serveur configuré pour ce workspace : configurez-le avant de publier."
+            )
+        if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
+            raise WorkspaceError("La publication nécessite un dépôt Git configuré.")
+        if not workspace.api_key:
+            raise WorkspaceError(
+                "Le workspace doit avoir été démarré une fois pour exporter ses credentials."
+            )
+
+        if workspace.state is WorkspaceState.RUNNING and workspace.api_key:
+            try:
+                pipelines_dir = workspace.workflows_dir / "n8nPipelines"
+                SyncRunner(
+                    self.api_factory(workspace, workspace.api_key), pipelines_dir
+                ).export_all(mirror=workspace.workflows_dir)
+            except Exception as exc:
+                logger.warning("Export before publish failed for %s: %s", workspace.name, exc)
+
+        # The repository hosts the *remote* Compose definition (relative mount,
+        # loopback port); the local config_dir file is only for ``docker up``.
+        (workspace.workflows_dir / "compose.yml").write_text(
+            render_remote_compose(workspace), encoding="utf-8"
+        )
+
+        credentials = self._export_all_credentials(workspace)
+        config = self.store.load()
+        document = build_secrets_document(config.owner_email, config.owner_password, credentials)
+        write_remote_file(
+            server,
+            marker_path(server, workspace.id).rsplit("/", 1)[0] + "/secrets.json",
+            json.dumps(document, indent=2, ensure_ascii=False),
+        )
+        chmod_remote(server, self._secrets_remote_path(workspace), mode="600")
+
+        with workspace_git_lock(workspace.workflows_dir):
+            self._ensure_workspace_branch(workspace)
+            self._commit_and_push(workspace, "n8n-launcher: publication")
+            branch = git_current_branch(workspace.workflows_dir) or workspace_branch(workspace.id)
+            try:
+                git_push_ref(
+                    workspace.workflows_dir,
+                    "server",
+                    branch,
+                    "main",
+                    env=git_ssh_env(server.key_path) if server.key_path else None,
+                )
+            except GitError as exc:
+                detail = str(exc)
+                if _is_push_rejection(exc):
+                    message = (
+                        "Le serveur refuse le push (branche main distante modifiée). "
+                        "Passez en force uniquement après vérification : la branche main "
+                        "du serveur est la référence de production."
+                    )
+                else:
+                    message = f"Le push vers le serveur a échoué : {detail}"
+                self._record_server_status(workspace, "error", {"error": message})
+                raise WorkspaceError(message) from exc
+
+        status, marker = self._poll_deploy(server, workspace.id)
+        self._record_server_status(workspace, status, marker)
+        if status == "error":
+            raise WorkspaceError(marker.get("error") or "Le déploiement a échoué sur le serveur.")
+        if status == "timeout":
+            raise WorkspaceError(
+                "Le serveur n'a pas confirmé le déploiement avant la limite de temps "
+                "(vérifiez le log serveur)."
+            )
+        logger.info("Published %s (%s) to %s", workspace.name, branch, server.host)
+
+    def _secrets_remote_path(self, workspace: Workspace) -> str:
+        """Remote path of the workspace's secrets document."""
+        base = resolve_base(workspace.server, workspace.id)
+        return f"{base}/secrets.json"
+
+    def _export_all_credentials(self, workspace: Workspace) -> list[dict[str, Any]]:
+        """Export every credential's ``{name, type, data}`` from the local n8n.
+
+        Required for a publish: the generated ``deploy.py`` recreates remote
+        credentials first and rewrites the workflow node references. The values
+        are read live — never persisted in the launcher — and travel only to
+        ``secrets.json`` on the server.
+        """
+        if not workspace.api_key:
+            raise WorkspaceError(
+                "Le workspace doit avoir été démarré une fois pour exporter ses credentials."
+            )
+        api = self.api_factory(workspace, workspace.api_key)
+        payload: list[dict[str, Any]] = []
+        for item in api.list_credentials():
+            name = item.get("name")
+            ctype = item.get("type")
+            if not isinstance(name, str) or not isinstance(ctype, str):
+                continue
+            detail = api.get_credential(str(item["id"]))
+            payload.append({"name": name, "type": ctype, "data": detail.get("data") or {}})
+        return payload
+
+    def _poll_deploy(
+        self,
+        cfg: ServerConfig,
+        workspace_id: str,
+        *,
+        timeout: float = 180.0,
+        interval: float = 2.0,
+    ) -> tuple[str, dict[str, Any]]:
+        """Wait for the server's ``last-deploy.json`` to reach a final state.
+
+        Returns ``("ok" | "error", marker)`` or ``("timeout", {})``. The marker
+        is written by the hook (compose failures) or ``deploy.py`` (n8n/code
+        failures); an absent or unparsable marker means the deployment is still
+        in flight.
+        """
+        remote_marker = marker_path(cfg, workspace_id)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = ssh_run(cfg, f"cat {shlex.quote(remote_marker)}", check=False)
+            try:
+                marker = json.loads(result.stdout) if result.stdout else {}
+            except ValueError:
+                marker = {}
+            if marker.get("status") == "ok":
+                return "ok", marker
+            if marker.get("status") == "error":
+                return "error", marker
+            time.sleep(interval)
+        return "timeout", {}
+
+    def _record_server_status(
+        self, workspace: Workspace, status: str, marker: dict[str, Any]
+    ) -> None:
+        """Persist the deploy outcome on the workspace (``server_last_*``)."""
+
+        def apply(config: AppConfig) -> None:
+            current = self._find(config, workspace.id)
+            current.server_last_deploy = json.dumps(marker, ensure_ascii=False) if marker else None
+            if status == "ok":
+                current.server_last_error = None
+            elif status == "error":
+                current.server_last_error = marker.get("error") or "Échec du déploiement."
+            else:
+                current.server_last_error = "Le serveur n'a pas confirmé le déploiement."
+
+        self.store.mutate(apply)
+
     def start(self, workspace_id: str) -> Workspace:
         """Write Compose, bring the stack up, and apply managed migrations."""
         if self._workspace_db_mode(workspace_id) is DbMode.MANAGED:
@@ -695,7 +1042,7 @@ class WorkspaceManager:
                 pipelines_dir = workspace.workflows_dir / "n8nPipelines"
                 SyncRunner(
                     self.api_factory(workspace, workspace.api_key), pipelines_dir
-                ).export_all()
+                ).export_all(mirror=workspace.workflows_dir)
             except Exception as exc:
                 logger.warning("Export before stop failed for %s: %s", workspace.name, exc)
             self.sync_git(workspace, push=True)
@@ -705,11 +1052,24 @@ class WorkspaceManager:
         """Stop a workspace, skipping ``docker down`` when already stopped."""
         config = self.store.load()
         workspace = self._find(config, workspace_id)
+        if workspace.state is WorkspaceState.STOPPED:
+            return workspace
+        # Surface a transient "stopping" state before the Docker teardown, so
+        # the UI reflects that the workspace is not usable while ``docker down``
+        # runs (the same heavier teardown as a close/stop lifecycle).
+        if workspace.state is WorkspaceState.RUNNING:
+
+            def mark_stopping(config: AppConfig) -> Workspace:
+                current = self._find(config, workspace_id)
+                current.state = WorkspaceState.STOPPING
+                return current
+
+            self.store.mutate(mark_stopping)
         compose = compose_file(workspace.id)
         # Skip `docker down` when already stopped: makes the call idempotent so
         # the atexit stop_all() pass after a GUI close does not tear containers
         # down a second time.
-        if compose.exists() and workspace.state is not WorkspaceState.STOPPED:
+        if compose.exists():
             self.docker.down(workspace, compose, remove_orphans=True)
 
         def mark_stopped(config: AppConfig) -> Workspace:
@@ -796,3 +1156,19 @@ class WorkspaceManager:
             if workspace.id == workspace_id:
                 return workspace
         raise WorkspaceError(f"Unknown workspace: {workspace_id}")
+
+    @staticmethod
+    def _server_port_conflict(
+        config: AppConfig, workspace_id: str, server: ServerConfig
+    ) -> str | None:
+        """Return the *name* of another workspace bound to the same host:port."""
+        if not server.enabled:
+            return None
+        for other in config.workspaces:
+            if (
+                other.id != workspace_id
+                and other.server.enabled
+                and (other.server.host, other.server.n8n_port) == (server.host, server.n8n_port)
+            ):
+                return other.name
+        return None

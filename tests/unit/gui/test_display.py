@@ -3,7 +3,14 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from n8n_launcher.core.models import DbConfig, DbMode, GitConfig, Workspace, WorkspaceState
+from n8n_launcher.core.models import (
+    DbConfig,
+    DbMode,
+    GitConfig,
+    ServerConfig,
+    Workspace,
+    WorkspaceState,
+)
 from n8n_launcher.gui.display import (
     GitRowStatus,
     ci_enabled,
@@ -14,6 +21,8 @@ from n8n_launcher.gui.display import (
     git_row_label,
     git_row_status,
     pipelines_count,
+    server_label,
+    server_tooltip,
 )
 
 
@@ -127,6 +136,30 @@ def test_pipelines_count_counts_json_files(tmp_path) -> None:
     assert pipelines_count(tmp_path) == 0
     add_pipelines(tmp_path)
     assert pipelines_count(tmp_path) == 1
+
+
+def test_server_label_off_when_disabled(tmp_path) -> None:
+    workspace = make_workspace(tmp_path)
+    assert server_label(workspace) == "serv"
+    assert "désactivé" in server_tooltip(workspace)
+
+
+def test_server_label_ok_when_deployed(tmp_path) -> None:
+    workspace = make_workspace(tmp_path)
+    workspace.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    assert server_label(workspace) == "serv"
+    tooltip = server_tooltip(workspace)
+    assert "prod.example.test" in tooltip
+    assert "réussi" in tooltip
+
+
+def test_server_label_ko_on_last_error(tmp_path) -> None:
+    workspace = make_workspace(tmp_path)
+    workspace.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    workspace.server_last_error = "migration 001: boom"
+    assert server_label(workspace) == "serv KO"
+    tooltip = server_tooltip(workspace)
+    assert "migration 001: boom" in tooltip
 
 
 def test_git_row_status_flat_when_not_a_repo(tmp_path) -> None:

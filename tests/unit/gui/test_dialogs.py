@@ -12,7 +12,8 @@ from helpers import (
 )
 
 from n8n_launcher.core.config import ConfigStore
-from n8n_launcher.core.models import AppConfig, DbConfig, DbMode
+from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, ServerConfig
+from n8n_launcher.git import workspace_branch
 from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui import CreatePlan, LauncherApp
 from n8n_launcher.gui.dialogs import (
@@ -22,6 +23,7 @@ from n8n_launcher.gui.dialogs import (
     GitHubRepoPick,
     GitHubTokenPlan,
     _finish_dialog_setup,
+    _int_or,
     _repo_name_from,
     default_creation_db,
     prompt_ask_string,
@@ -32,6 +34,7 @@ from n8n_launcher.gui.dialogs import (
     prompt_github_create,
     prompt_github_repo_picker,
     prompt_github_token,
+    prompt_server_config,
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
 
@@ -432,6 +435,130 @@ def test_prompt_db_config_escape_returns_none(gui_mocks) -> None:
         toplevel.cancel_on_wait = saved
 
     assert result is None
+
+
+# --- Server deployment dialog ------------------------------------------------
+
+
+def _dialog_entries(dialog) -> list:
+    """Collect every Entry widget (including ones nested in sub-frames)."""
+    entries: list = []
+
+    def walk(widget) -> None:
+        for child in getattr(widget, "children", []):
+            entries.append(child)
+            walk(child)
+
+    walk(dialog)
+    return entries
+
+
+def test_prompt_server_config_saves_entered_fields(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [
+            child for child in _dialog_entries(dialog) if isinstance(child, gui_mocks.tk.Entry)
+        ]
+        assert len(entries) == 6  # hôte, port ssh, user, base, port n8n, clé
+        entries[0]._options["textvariable"].set("prod.example.test")
+        entries[1]._options["textvariable"].set("2222")
+        entries[2]._options["textvariable"].set("deploy")
+        entries[3]._options["textvariable"].set("n8n-launcher/w1")
+        entries[4]._options["textvariable"].set("5678")
+        entries[5]._options["textvariable"].set("/home/deploy/.ssh/id_ed25519")
+        entries[5]._bindings["<Return>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_server_config(FakeRoot(), "Demo", ServerConfig(), "n8n-launcher/w1")
+
+    assert result == ServerConfig(
+        enabled=True,
+        host="prod.example.test",
+        ssh_port=2222,
+        user="deploy",
+        key_path="/home/deploy/.ssh/id_ed25519",
+        base_dir="n8n-launcher/w1",
+        n8n_port=5678,
+    )
+
+
+def test_prompt_server_config_prefills_current_settings(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [
+            child for child in _dialog_entries(dialog) if isinstance(child, gui_mocks.tk.Entry)
+        ]
+        assert entries[0]._options["textvariable"].get() == "prod.example.test"
+        assert entries[1]._options["textvariable"].get() == "22"
+        assert entries[5]._options["textvariable"].get() == "/home/deploy/.ssh/id_ed25519"
+        entries[5]._bindings["<Return>"](None)
+
+    current = ServerConfig(
+        enabled=True,
+        host="prod.example.test",
+        user="deploy",
+        key_path="/home/deploy/.ssh/id_ed25519",
+    )
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_server_config(FakeRoot(), "Demo", current, "n8n-launcher/w1")
+
+    assert result is not None
+    assert result.ssh_port == 22
+    assert result.n8n_port == 5678
+    assert result.base_dir == "n8n-launcher/w1"
+
+
+def test_prompt_server_config_requires_host_and_user(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+
+    def drive(dialog) -> None:
+        entries = [
+            child for child in _dialog_entries(dialog) if isinstance(child, gui_mocks.tk.Entry)
+        ]
+        entries[5]._bindings["<Return>"](None)
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch("n8n_launcher.gui.dialogs.messagebox", gui_mocks.messagebox),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_server_config(FakeRoot(), "Demo", ServerConfig(), "base")
+
+    assert result is None
+    assert gui_mocks.messagebox.warnings
+
+
+def test_prompt_server_config_escape_returns_none(gui_mocks) -> None:
+    toplevel = gui_mocks.tk.Toplevel
+    saved = toplevel.cancel_on_wait
+    toplevel.cancel_on_wait = True
+    try:
+        with (
+            patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+            patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        ):
+            result = prompt_server_config(FakeRoot(), "Demo", ServerConfig(), "base")
+    finally:
+        toplevel.cancel_on_wait = saved
+
+    assert result is None
+
+
+def test_int_or_parses_with_fallback() -> None:
+    assert _int_or("2222", 22) == 2222
+    assert _int_or("junk", 22) == 22
+    assert _int_or(" 5678 ", 22) == 5678
 
 
 # --- GitHub repo creation helpers -------------------------------------------
@@ -1059,7 +1186,6 @@ def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None
         patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=dest),
         patch("n8n_launcher.workspaces.manager.git_pull_new_repo"),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url"),
-        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="develop"),
         patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5680),
         patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
     ):
@@ -1069,5 +1195,5 @@ def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None
     workspace = store.load().workspaces[0]
     assert workspace.name == "flows"
     assert workspace.git.remote_url == "https://github.com/octo/flows.git"
-    assert workspace.git.branch == "develop"
+    assert workspace.git.branch == workspace_branch(workspace.id)
     assert "ghp_secret" not in str(workspace.to_dict())

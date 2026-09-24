@@ -723,10 +723,10 @@ def test_ci_latest_branch_prefers_cached_run(app) -> None:
     assert app.app._ci_latest_branch(workspace) == "main"
 
 
-def test_ci_latest_branch_falls_back_to_main(app) -> None:
+def test_ci_latest_branch_falls_back_to_dev(app) -> None:
     workspace = app.manager.list.return_value[1]
 
-    assert app.app._ci_latest_branch(workspace) == "main"
+    assert app.app._ci_latest_branch(workspace) == "dev"
 
 
 def test_ci_runs_run_dispatches_chosen_ref_and_refreshes(app) -> None:
@@ -746,7 +746,7 @@ def test_ci_runs_run_dispatches_chosen_ref_and_refreshes(app) -> None:
         app.app._ci_runs_run(workspace, panel)
         app.app._drain_events()
 
-    prompt.assert_called_once_with(app.app.root, "wf.yml", "main")
+    prompt.assert_called_once_with(app.app.root, "wf.yml", "dev")
     client.dispatch_workflow.assert_called_once_with("octo/repo", "wf.yml", ref="release")
     status.assert_called_once_with("CI lancée sur « release ».")
     refresh.assert_called_once_with(workspace, panel)

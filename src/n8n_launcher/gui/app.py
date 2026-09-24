@@ -50,6 +50,7 @@ from .dialogs import (
     prompt_github_create,
     prompt_github_repo_picker,
     prompt_github_token,
+    prompt_server_config,
 )
 from .theme import (
     ACCENT,
@@ -428,33 +429,44 @@ class LauncherApp:
         self._create_affordance = self._build_create_affordance()
         self._toggle_empty_state()
 
-        self._menu = tk.Menu(self.root, tearoff=0)
-        self._menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
-        self._menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
-        self._menu.add_separator()
-        self._menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
-        self._menu.add_command(
+    def _build_context_menu(self, workspace: Workspace) -> None:
+        """Rebuild the row context menu, gating the server actions to deployment."""
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
+        menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
+        if workspace.server.enabled:
+            menu.add_separator()
+            menu.add_command(label="Publier sur le serveur…", command=self.publish_selected)
+            menu.add_command(label="Désactiver le serveur", command=self.disable_server_selected)
+        menu.add_separator()
+        menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
+        menu.add_command(
             label="Configurer les tests GitHub Actions…",
             command=self.configure_ci_selected,
         )
-        self._menu.add_command(
+        menu.add_command(
             label="Gérer les credentials CI…",
             command=self.configure_ci_credentials_selected,
         )
-        self._menu.add_command(
+        menu.add_command(
             label="Ouvrir les Actions GitHub…",
             command=self.open_ci_actions,
         )
-        self._menu.add_command(
+        menu.add_command(
             label="Désactiver les tests CI",
             command=self.disable_ci_selected,
         )
-        self._menu.add_command(
+        menu.add_command(
             label="Configurer le token GitHub…",
             command=self.configure_github_token,
         )
-        self._menu.add_separator()
-        self._menu.add_command(label="Supprimer", command=self._delete_selected)
+        menu.add_command(
+            label="Configurer le serveur…",
+            command=self.configure_server_selected,
+        )
+        menu.add_separator()
+        menu.add_command(label="Supprimer", command=self._delete_selected)
+        self._menu = menu
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         """Scroll the list on Windows/macOS wheel deltas."""
@@ -680,6 +692,18 @@ class LauncherApp:
         ci_chip.bind("<Button-1>", lambda _event, wid=workspace.id: self._on_ci_chip_click(wid))
         self._attach_tooltip(ci_chip, display.ci_tooltip(workspace))
 
+        server_chip = self._chip(
+            row,
+            text=display.server_label(workspace),
+            palette=self._server_chip_palette(workspace),
+        )
+        server_chip.pack(side="right", padx=(6, 0))
+        server_chip.configure(cursor="hand2")
+        server_chip.bind(
+            "<Button-1>", lambda _event, wid=workspace.id: self._on_server_chip_click(wid)
+        )
+        self._attach_tooltip(server_chip, display.server_tooltip(workspace))
+
         pipelines = display.pipelines_count(workspace.workflows_dir)
         pipelines_chip = self._chip(row, text=str(pipelines), palette=CHIP_NEUTRAL)
         pipelines_chip.pack(side="right", padx=(6, 0))
@@ -752,6 +776,15 @@ class LauncherApp:
         provided = ci.provided_credentials(workspace.git.ci_credentials)
         counts = ci.ci_counts(workspace.workflows_dir, provided)
         if counts["selected"] == 0 or counts["selected_eligible"] < counts["selected"]:
+            return CHIP_WARN
+        return CHIP_ACTIVE
+
+    @staticmethod
+    def _server_chip_palette(workspace: Workspace) -> tuple[str, str]:
+        """Color the server chip: neutral when off, warn on last deploy failure."""
+        if not workspace.server.enabled:
+            return CHIP_NEUTRAL
+        if workspace.server_last_error:
             return CHIP_WARN
         return CHIP_ACTIVE
 
@@ -978,6 +1011,11 @@ class LauncherApp:
             self._select_row(workspace_id)
         elif self._selected_id is not None:
             self._select_row(self._selected_id)
+        try:
+            workspace = self._selected()
+        except ValueError:
+            return
+        self._build_context_menu(workspace)
         if self._menu is not None:
             self._menu.tk_popup(event.x_root, event.y_root)
 
@@ -1175,6 +1213,85 @@ class LauncherApp:
         self._select_row(workspace_id)
         self.configure_ci_selected()
 
+    def configure_server_selected(self) -> None:
+        """Ask for the server settings, then install the listener on it."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        server = prompt_server_config(
+            self.root,
+            workspace.name,
+            workspace.server,
+            f"n8n-launcher/{workspace.id}",
+        )
+        if server is None:
+            return
+
+        def action() -> None:
+            # Install first so a failed connection never persists a broken
+            # config; a re-run is idempotent on both sides.
+            self.workspace_manager.install_server(workspace, server)
+            self.workspace_manager.update(workspace.id, server=server)
+
+        def on_success() -> None:
+            self.set_status(f"Serveur configuré pour « {workspace.name} ».")
+            self.refresh()
+
+        self._run_async(action, on_success=on_success)
+
+    def publish_selected(self) -> None:
+        """Deploy the current exports to the configured server."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None or not workspace.server.enabled:
+            return
+        self._run_async(
+            lambda: self.workspace_manager.publish(workspace),
+            on_success=lambda: self.set_status(f"Pipelines publiées pour « {workspace.name} »."),
+        )
+
+    def disable_server_selected(self) -> None:
+        """Turn the server deployment off for the selected workspace."""
+        if self._closing:
+            return
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+        if not workspace.server.enabled:
+            messagebox.showinfo(
+                "n8n Launcher",
+                "Le serveur n'est pas configuré pour ce workspace.",
+                parent=self.root,
+            )
+            return
+        confirmed = messagebox.askyesno(
+            "Désactiver le serveur",
+            "Cesser de publier vers le serveur ?\n"
+            "Les fichiers déjà déployés sur le serveur sont conservés.",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+
+        def on_success() -> None:
+            self.set_status(f"Serveur désactivé pour « {workspace.name} ».")
+            self.refresh()
+
+        self._run_async(
+            lambda: self.workspace_manager.disable_server(workspace),
+            on_success=on_success,
+        )
+
+    def _on_server_chip_click(self, workspace_id: str) -> None:
+        """Clicking the server chip opens the server configuration dialog."""
+        if self._closing:
+            return
+        self._select_row(workspace_id)
+        self.configure_server_selected()
+
     def configure_ci_selected(self) -> None:
         """Enable CI if needed, then open the pipeline selection dialog."""
         if self._closing:
@@ -1260,11 +1377,11 @@ class LauncherApp:
         return lambda panel: self._ci_runs_run(workspace, panel)
 
     def _ci_latest_branch(self, workspace: Workspace) -> str:
-        """Branch of the most recent cached run, else ``main`` as a fallback."""
+        """Branch of the most recent cached run, else ``dev`` as a fallback."""
         snapshot = self._ci_runs_cache.get(workspace.id)
         if snapshot and snapshot.runs and snapshot.runs[0].branch:
             return snapshot.runs[0].branch
-        return "main"
+        return "dev"
 
     def _ci_runs_run(self, workspace: Workspace, panel: RunsPanel) -> None:
         """Trigger the CI workflow on a chosen ref, then refresh the panel.
