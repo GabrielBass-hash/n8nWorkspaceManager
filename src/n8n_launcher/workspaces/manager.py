@@ -965,7 +965,7 @@ class WorkspaceManager:
         document = build_secrets_document(config.owner_email, config.owner_password, credentials)
         write_remote_file(
             server,
-            marker_path(server, workspace.id).rsplit("/", 1)[0] + "/secrets.json",
+            self._secrets_remote_path(workspace),
             json.dumps(document, indent=2, ensure_ascii=False),
         )
         chmod_remote(server, self._secrets_remote_path(workspace), mode="600")

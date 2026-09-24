@@ -124,7 +124,7 @@ def test_config_store_does_not_create_advisory_lock_file(tmp_path: Path) -> None
 
 
 def test_config_store_missing_config_raises(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="does not exist"):
+    with pytest.raises(ConfigError, match="n'existe pas"):
         ConfigStore(tmp_path / "config.json").load()
 
 
