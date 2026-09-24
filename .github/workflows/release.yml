@@ -91,11 +91,23 @@ jobs:
       - name: Build executable
         run: uv run python scripts/build.py
 
+      - name: Build AppImage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/build_appimage.sh
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+      - name: Upload AppImage artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: n8n-launcher-linux-x86_64.AppImage
+          path: dist/n8n-launcher-linux-x86_64.AppImage
           if-no-files-found: error
 
   release:

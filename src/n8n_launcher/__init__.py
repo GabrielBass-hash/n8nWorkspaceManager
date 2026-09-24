@@ -4,4 +4,4 @@
 #: ``pyproject.toml`` declares ``dynamic = ["version"]`` and reads it from here,
 #: ``scripts/build.py`` embeds it into the bundle and ``platform/updater.py``
 #: compares it against GitHub releases. Edit it by hand before a release.
-__version__ = "5.0.2"
+__version__ = "5.0.3"

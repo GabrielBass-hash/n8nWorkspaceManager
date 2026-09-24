@@ -98,7 +98,8 @@ def test_render_hook_contains_marker_and_filters_main() -> None:
     assert deploy.GENERATED_MARKER in hook
     assert "refs/heads/main" in hook
     assert "git archive" in hook
-    assert "docker compose -p" in hook
+    assert "docker compose -f" in hook
+    assert '-p "$PROJECT"' in hook
     assert "up -d" in hook
     assert '--git-dir="$BARE"' in hook
     assert "n8n-launcher/abc123.git" in hook
@@ -112,11 +113,23 @@ def test_render_hook_serializes_deploys_with_flock() -> None:
     assert '9>>"$BASE/.deploy.lock"' in hook
 
 
+def test_render_hook_anchors_paths_on_home() -> None:
+    # Git sets the hook cwd to the bare repo; because BASE/BARE/WORKFLOW are
+    # home-relative, the hook must cd "$HOME" first or the flock file (and
+    # every compose/deploy path) resolves inside the bare repo.
+    hook = deploy.render_hook(CFG, "abc123")
+
+    assert 'cd "$HOME"' in hook
+    assert hook.index('cd "$HOME"') < hook.index("flock -x 9")
+
+
 def test_render_hook_pins_the_compose_project() -> None:
     hook = deploy.render_hook(CFG, "abc123")
 
     assert "PROJECT='n8n-ws-abc123'" in hook
-    assert 'docker compose -p "$PROJECT" up -d' in hook
+    assert "docker compose -f" in hook
+    assert '"$WORKFLOW/compose.yml"' in hook
+    assert 'docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d' in hook
     assert 'DEPLOY_PROJECT="$PROJECT"' in hook
 
 

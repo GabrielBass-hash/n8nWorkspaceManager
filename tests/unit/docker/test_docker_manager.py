@@ -1,4 +1,5 @@
 from pathlib import Path
+from subprocess import TimeoutExpired
 from unittest.mock import patch
 
 import pytest
@@ -27,6 +28,35 @@ def test_check_available_reports_daemon_state() -> None:
         status = DockerManager().check_available()
 
     assert status.available is True
+
+
+def test_check_available_uses_probe_timeout() -> None:
+    with patch("n8n_launcher.docker.manager.subprocess.run", return_value=completed()) as run:
+        DockerManager(check_timeout=7.0).check_available()
+
+    assert run.call_args.kwargs["timeout"] == 7.0
+
+
+def test_check_available_does_not_raise_when_daemon_times_out() -> None:
+    with patch(
+        "n8n_launcher.docker.manager.subprocess.run",
+        side_effect=TimeoutExpired("docker info", 10.0),
+    ):
+        status = DockerManager().check_available()
+
+    assert status.available is False
+    assert "Docker daemon is not accessible" in status.message
+
+
+def test_check_available_does_not_raise_when_cli_is_missing() -> None:
+    with patch(
+        "n8n_launcher.docker.manager.subprocess.run",
+        side_effect=FileNotFoundError("docker"),
+    ):
+        status = DockerManager().check_available()
+
+    assert status.available is False
+    assert "Docker daemon is not accessible" in status.message
 
 
 def test_up_uses_isolated_compose_project(tmp_path: Path) -> None:

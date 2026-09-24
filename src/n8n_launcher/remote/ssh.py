@@ -33,7 +33,9 @@ def _ssh_argv(cfg: ServerConfig, command: str | None = None) -> list[str]:
         "StrictHostKeyChecking=accept-new",
     ]
     if cfg.key_path:
-        argv += ["-i", cfg.key_path]
+        # Only the configured key: OpenSSH may burn its MaxAuthTries on agent
+        # keys first, failing the whole connection before ``-i`` is offered.
+        argv += ["-o", "IdentitiesOnly=yes", "-i", cfg.key_path]
     argv.append(f"{cfg.user}@{cfg.host}")
     if command:
         argv.append(command)
