@@ -776,6 +776,7 @@ class LauncherApp:
         frame.pipelines_chip = pipelines_chip
         frame.action_button = action_button
         frame.dirty_dot = dirty_dot
+        frame.server_chip = server_chip
         return frame, name_label
 
     @staticmethod
