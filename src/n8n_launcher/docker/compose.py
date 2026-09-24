@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..core.models import DEFAULT_POSTGRES_IMAGE, DbMode, Workspace
+from ..core.models import (
+    DEFAULT_POSTGRES_IMAGE,
+    DbMode,
+    N8N_METADATA_DB_NAME,
+    N8N_METADATA_DB_PASSWORD,
+    N8N_METADATA_DB_USER,
+    Workspace,
+)
 
 
 def compose_project_name(workspace: Workspace) -> str:
@@ -85,12 +92,12 @@ def write_compose(workspace: Workspace, output: Path) -> Path:
 def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
     if workspace.db.mode is not DbMode.MANAGED:
         return "", "", ""
-    environment = """      DB_TYPE: postgresdb
+    environment = f"""      DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: \"5432\"
-      DB_POSTGRESDB_DATABASE: n8n
-      DB_POSTGRESDB_USER: n8n
-      DB_POSTGRESDB_PASSWORD: launcher-managed
+      DB_POSTGRESDB_DATABASE: {N8N_METADATA_DB_NAME}
+      DB_POSTGRESDB_USER: {N8N_METADATA_DB_USER}
+      DB_POSTGRESDB_PASSWORD: {N8N_METADATA_DB_PASSWORD}
 """
     postgres_image = workspace.postgres_image or DEFAULT_POSTGRES_IMAGE
     # TimescaleDB must be listed in shared_preload_libraries before the
@@ -102,13 +109,13 @@ def _database_parts(workspace: Workspace) -> tuple[str, str, str]:
     image: {postgres_image}
     restart: unless-stopped
 {command_block}    environment:
-      POSTGRES_DB: n8n
-      POSTGRES_USER: n8n
-      POSTGRES_PASSWORD: launcher-managed
+      POSTGRES_DB: {N8N_METADATA_DB_NAME}
+      POSTGRES_USER: {N8N_METADATA_DB_USER}
+      POSTGRES_PASSWORD: {N8N_METADATA_DB_PASSWORD}
     volumes:
       - pgdata-{workspace.id}:/var/lib/postgresql/data
     healthcheck:
-      test: [\"CMD-SHELL\", \"pg_isready -U n8n -d n8n\"]
+      test: [\"CMD-SHELL\", \"pg_isready -U {N8N_METADATA_DB_USER} -d {N8N_METADATA_DB_NAME}\"]
       interval: 5s
       timeout: 3s
       retries: 20

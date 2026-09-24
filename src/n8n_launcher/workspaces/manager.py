@@ -21,13 +21,13 @@ from ..core.models import (
     DbMode,
     GitConfig,
     ServerConfig,
+    WORKSPACE_DATA_DB_NAME,
+    WORKSPACE_DATA_DB_USER,
     Workspace,
     WorkspaceState,
 )
 from ..core.paths import compose_file
 from ..database import (
-    DATA_DATABASE,
-    DATA_USER,
     MigrationRunner,
     configure_db_credential,
     detect_migrations,
@@ -234,8 +234,8 @@ class WorkspaceManager:
             # a freshly generated password).
             db = DbConfig(
                 mode=DbMode.MANAGED,
-                database_name=db.database_name or DATA_DATABASE,
-                username=db.username or DATA_USER,
+                database_name=db.database_name or WORKSPACE_DATA_DB_NAME,
+                username=db.username or WORKSPACE_DATA_DB_USER,
                 password=db.password or secrets.token_hex(16),
             )
         selected_port = port or suggest_port(reserved=reserved)
@@ -311,8 +311,8 @@ class WorkspaceManager:
             # fields, defaulting only the missing ones.
             db = DbConfig(
                 mode=DbMode.MANAGED,
-                database_name=db.database_name or DATA_DATABASE,
-                username=db.username or DATA_USER,
+                database_name=db.database_name or WORKSPACE_DATA_DB_NAME,
+                username=db.username or WORKSPACE_DATA_DB_USER,
                 password=db.password or secrets.token_hex(16),
             )
         self._scaffold(workflows_dir, db)
@@ -610,8 +610,8 @@ class WorkspaceManager:
                     workspace.name,
                 )
             else:
-                db.database_name = db.database_name or DATA_DATABASE
-                db.username = db.username or DATA_USER
+                db.database_name = db.database_name or WORKSPACE_DATA_DB_NAME
+                db.username = db.username or WORKSPACE_DATA_DB_USER
                 db.password = db.password or secrets.token_hex(16)
                 self._scaffold(workspace.workflows_dir, db)
         return self.update(workspace.id, db=db)
@@ -1229,9 +1229,9 @@ class WorkspaceManager:
             if workspace.db.mode is not DbMode.MANAGED:
                 return
             if not workspace.db.database_name:
-                workspace.db.database_name = DATA_DATABASE
+                workspace.db.database_name = WORKSPACE_DATA_DB_NAME
             if not workspace.db.username:
-                workspace.db.username = DATA_USER
+                workspace.db.username = WORKSPACE_DATA_DB_USER
             if not workspace.db.password:
                 workspace.db.password = secrets.token_hex(16)
 
@@ -1241,8 +1241,8 @@ class WorkspaceManager:
     def _managed_db_config() -> DbConfig:
         return DbConfig(
             mode=DbMode.MANAGED,
-            database_name=DATA_DATABASE,
-            username=DATA_USER,
+            database_name=WORKSPACE_DATA_DB_NAME,
+            username=WORKSPACE_DATA_DB_USER,
             password=secrets.token_hex(16),
         )
 

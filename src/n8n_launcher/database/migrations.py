@@ -6,16 +6,16 @@ import subprocess
 import time
 from pathlib import Path
 
-from ..core.models import DbMode, Workspace
+from ..core.models import (
+    MAINTENANCE_DATABASE,
+    DbMode,
+    N8N_METADATA_DB_PASSWORD,
+    N8N_METADATA_DB_USER,
+    Workspace,
+)
 from ..docker.manager import DockerError, DockerManager
 from .credentials import data_db_target
 from .layout import migrate_files
-
-# Metadata role used only to run the maintenance bootstrap SQL (role + database
-# creation). The actual data-database credentials come from ``data_db_target``.
-METADATA_USER = "n8n"
-METADATA_PASSWORD = "launcher-managed"
-MAINTENANCE_DATABASE = "postgres"
 
 
 class MigrationError(RuntimeError):
@@ -63,8 +63,8 @@ class MigrationRunner:
             workspace,
             compose_file,
             database=MAINTENANCE_DATABASE,
-            user=METADATA_USER,
-            password=METADATA_PASSWORD,
+            user=N8N_METADATA_DB_USER,
+            password=N8N_METADATA_DB_PASSWORD,
             stdin=role_module + database_module,
         )
 
