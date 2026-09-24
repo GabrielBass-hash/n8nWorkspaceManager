@@ -72,6 +72,24 @@ def test_sync_runner_import_skips_unknown_and_non_workflow_files(tmp_path: Path)
     api.create_workflow.assert_not_called()
 
 
+def test_sync_runner_import_skips_by_export_id_even_when_renamed(tmp_path: Path) -> None:
+    api = MagicMock()
+    api.list_workflows.return_value = [{"id": "42", "name": "Meteo"}]
+    # The file name carries the workflow id; the name inside was re-exported as
+    # something else, so only the id suffix can catch the duplicate.
+    (tmp_path / "Meteo_jour-42.json").write_text(
+        '{"id": "42", "name": "Daily forecast", "nodes": [], "connections": {}}',
+        encoding="utf-8",
+    )
+    runner = SyncRunner(api, tmp_path)
+
+    report = runner.import_all()
+
+    assert report.pushed == 0
+    assert report.skipped == 1
+    api.create_workflow.assert_not_called()
+
+
 def test_sync_runner_export_refreshes_pipelines_and_root_mirror(tmp_path: Path) -> None:
     pipelines = tmp_path / "n8nPipelines"
     root = tmp_path

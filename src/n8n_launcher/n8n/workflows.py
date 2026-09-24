@@ -152,7 +152,7 @@ class SyncRunner:
         pushed = 0
         skipped = 0
         for path in sorted(self.workflows_dir.glob("*.json")):
-            if path.name in existing_ids:
+            if _export_id(path.stem) in existing_ids:
                 skipped += 1
                 continue
             try:
@@ -186,6 +186,18 @@ def _safe_name(value: object) -> str:
         character if character.isalnum() or character in "-_" else "_" for character in text
     )
     return safe or "workflow"
+
+
+def _export_id(stem: str) -> str:
+    """Extract the n8n workflow id carried by a launcher export file name.
+
+    Launcher exports follow the ``<safe_name>-<id>.json`` convention (see
+    :func:`_safe_name` and :meth:`SyncRunner.export_all`), so a file like
+    ``Meteo-42.json`` encodes the id ``42`` even when the workflow's ``name``
+    inside diverges from the file name — a renamed workflow is still skipped on
+    re-import by its id instead of being re-created as a duplicate.
+    """
+    return stem.rsplit("-", 1)[-1]
 
 
 def _create_payload(workflow: dict[str, Any]) -> dict[str, Any]:
