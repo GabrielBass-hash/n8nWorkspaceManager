@@ -44,7 +44,9 @@ def test_filelock_acquire_release_cycle(tmp_path: Path) -> None:
     fresh.release()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks are always exclusive")
 def test_filelock_shared_locks_do_not_conflict(tmp_path: Path) -> None:
+    """Shared holders must not compete — POSIX ``flock`` semantics only."""
     held = FileLock(tmp_path / "x.lock")
     with held.locked(shared=True):
         contender = FileLock(tmp_path / "x.lock")
