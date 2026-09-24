@@ -47,6 +47,8 @@ def _backup_unreadable_config(store: ConfigStore) -> None:
         "Le fichier de configuration n'a pas pu être lu.\n"
         "Une copie a été sauvegardée sous :\n"
         f"{backup}\n\n"
+        "⚠ Ce fichier contient vos identifiants (mot de passe du compte owner, "
+        "token GitHub) — ne le partagez pas.\n\n"
         "L'assistant de premier lancement va vous permettre de repartir.\n"
         "Ré-importez vos workspaces après coup si besoin.",
     )
