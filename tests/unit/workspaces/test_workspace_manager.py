@@ -24,7 +24,7 @@ from n8n_launcher.workspaces.manager import WorkspaceError, WorkspaceManager
 
 
 def manager(tmp_path: Path) -> tuple[WorkspaceManager, ConfigStore, MagicMock, MagicMock]:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock(return_value="api-key-123")
@@ -287,7 +287,7 @@ def test_start_managed_applies_migrations(tmp_path: Path) -> None:
 def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock(return_value="api-key-123")
@@ -312,7 +312,7 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
 def test_ensure_running_calls_on_ready_with_port_after_start(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     launcher = WorkspaceManager(
@@ -336,7 +336,7 @@ def test_ensure_running_calls_on_ready_with_port_after_start(tmp_path: Path) -> 
 def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock()
@@ -361,7 +361,7 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
 def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock(return_value="api-key-123")
@@ -383,7 +383,7 @@ def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> N
 def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -414,7 +414,7 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
             N8nApiError(label, status_code=status_code),
             None,
         ]
-        store = ConfigStore(tmp_path / "config.json")
+        store = ConfigStore(tmp_path / "launcher.db")
         store.save(AppConfig("owner@example.test", "secret", tmp_path))
         docker = MagicMock()
         booter = MagicMock(return_value="rotated-key")
@@ -439,7 +439,7 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
 def test_ensure_running_imports_folder_workflows(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -961,7 +961,7 @@ def test_configure_db_managed_noop_when_identity_unchanged(tmp_path: Path) -> No
 def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -990,7 +990,7 @@ def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> 
 def test_ensure_running_skips_pull_when_git_disabled(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -1331,7 +1331,7 @@ def test_ci_credentials_payload_reads_values_from_api(tmp_path: Path) -> None:
         "type": "httpRequest",
         "data": {"user": "u", "password": "p"},
     }
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     launcher = WorkspaceManager(store, MagicMock(), api_factory=MagicMock(return_value=fake_api))
     workspace = create_none(launcher, tmp_path)
@@ -1359,7 +1359,7 @@ def test_ci_credentials_payload_requires_api_key(tmp_path: Path) -> None:
 def test_ci_credentials_payload_reports_missing(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_credentials.return_value = [{"id": "c1", "name": "Other", "type": "postgres"}]
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     launcher = WorkspaceManager(store, MagicMock(), api_factory=MagicMock(return_value=fake_api))
     workspace = create_none(launcher, tmp_path)

@@ -51,7 +51,7 @@ def next_event(app):
 
 
 def test_update_check_scheduled_when_frozen(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     root = FakeRoot()
     with patch(
@@ -64,7 +64,7 @@ def test_update_check_scheduled_when_frozen(gui_mocks, tmp_path) -> None:
 
 
 def test_update_check_not_scheduled_from_source(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     root = FakeRoot()
     with patch("n8n_launcher.gui.update_flow.updater.install_target", return_value=None):

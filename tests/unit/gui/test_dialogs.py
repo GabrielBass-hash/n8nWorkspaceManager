@@ -173,7 +173,7 @@ def test_default_creation_db_uses_none_when_no_migrations(tmp_path) -> None:
 
 
 def test_empty_space_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     ws = make_workspace(tmp_path, "Existing", 5678)
@@ -198,7 +198,7 @@ def test_empty_space_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
 
 
 def test_canvas_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     ws = make_workspace(tmp_path, "Existing", 5678)
@@ -220,7 +220,7 @@ def test_canvas_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
 
 
 def test_create_affordance_click_creates(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = [make_workspace(tmp_path, "Existing", 5678)]
@@ -241,7 +241,7 @@ def test_create_affordance_click_creates(gui_mocks, tmp_path) -> None:
 
 
 def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -264,7 +264,7 @@ def test_empty_space_click_creates_workflow(gui_mocks, tmp_path) -> None:
 
 
 def test_empty_state_click_triggers_creation(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -285,7 +285,7 @@ def test_empty_state_click_triggers_creation(gui_mocks, tmp_path) -> None:
 
 
 def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = WorkspaceManager(store, MagicMock())
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
@@ -328,7 +328,7 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
 
 
 def test_delete_with_real_manager_removes_but_keeps_folder(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = WorkspaceManager(store, MagicMock())
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())
@@ -1170,7 +1170,7 @@ def test_clone_github_error_falls_back_to_manual(app, tmp_path) -> None:
 
 
 def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = WorkspaceManager(store, MagicMock())
     launcher = LauncherApp(store, manager, MagicMock(), root=FakeRoot(), browser_opener=MagicMock())

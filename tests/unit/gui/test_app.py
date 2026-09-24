@@ -219,7 +219,7 @@ def test_double_click_launches_selected(app) -> None:
 
 
 def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     held = make_workspace(tmp_path, "Hold", 5690)
@@ -243,7 +243,7 @@ def test_repeated_launch_is_ignored_while_first_runs(gui_mocks, tmp_path) -> Non
 
 
 def test_other_workspace_launches_while_one_is_in_flight(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     first = make_workspace(tmp_path, "A", 5671)
@@ -265,7 +265,7 @@ def test_other_workspace_launches_while_one_is_in_flight(gui_mocks, tmp_path) ->
 
 
 def test_double_click_launches_other_workspace_while_one_in_flight(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     held = make_workspace(tmp_path, "Hold", 5690)
@@ -286,7 +286,7 @@ def test_double_click_launches_other_workspace_while_one_in_flight(gui_mocks, tm
 
 
 def test_start_slot_released_even_when_boot_fails(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     held = make_workspace(tmp_path, "Hold", 5690)
@@ -687,7 +687,7 @@ def test_configure_db_applies_manager_change(app) -> None:
 
 
 def test_no_auto_prompt_on_empty_list(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -699,7 +699,7 @@ def test_no_auto_prompt_on_empty_list(gui_mocks, tmp_path) -> None:
 
 
 def test_create_workflow_guards_reentrant_click(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     launcher = LauncherApp(
         store, MagicMock(), MagicMock(), root=FakeRoot(), browser_opener=MagicMock()
@@ -720,7 +720,7 @@ def test_create_workflow_guards_reentrant_click(gui_mocks, tmp_path) -> None:
 
 
 def test_state_poll_runs_reconcile_and_reschedules(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -733,7 +733,7 @@ def test_state_poll_runs_reconcile_and_reschedules(gui_mocks, tmp_path) -> None:
 
 
 def test_poll_skips_refresh_when_state_unchanged(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -748,7 +748,7 @@ def test_poll_skips_refresh_when_state_unchanged(gui_mocks, tmp_path) -> None:
 
 
 def test_poll_refreshes_only_when_state_changed(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -764,7 +764,7 @@ def test_poll_refreshes_only_when_state_changed(gui_mocks, tmp_path) -> None:
 
 
 def test_poll_skips_overlapping_reconcile(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -781,7 +781,7 @@ def test_poll_skips_overlapping_reconcile(gui_mocks, tmp_path) -> None:
 
 
 def test_empty_list_has_empty_space_click_binding(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []
@@ -791,7 +791,7 @@ def test_empty_list_has_empty_space_click_binding(gui_mocks, tmp_path) -> None:
 
 
 def test_empty_list_subtitle_hints_create(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []

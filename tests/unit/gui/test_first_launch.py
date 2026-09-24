@@ -18,7 +18,7 @@ def test_interactive_first_launch_registers_fonts_on_root() -> None:
     # A caller-supplied root (the app's own) must still get the named UI fonts
     # registered on it; the wizard cancel path exits right after, so nothing
     # else can run on top of a root whose fonts are missing.
-    store = ConfigStore(Path("/tmp/unused-config.json"))
+    store = ConfigStore(Path("/tmp/unused-launcher.db"))
     docker = MagicMock()
     root = FakeRoot()
 
@@ -48,7 +48,7 @@ def test_interactive_first_launch_shows_error_when_docker_not_ready() -> None:
     ):
         assert (
             run_interactive_first_launch(
-                ConfigStore(Path("/tmp/unused-config.json")), docker, root=FakeRoot()
+                ConfigStore(Path("/tmp/unused-launcher.db")), docker, root=FakeRoot()
             )
             is None
         )
@@ -73,7 +73,7 @@ def test_interactive_first_launch_handles_docker_error_gracefully() -> None:
     ):
         assert (
             run_interactive_first_launch(
-                ConfigStore(Path("/tmp/unused-config.json")), docker, root=FakeRoot()
+                ConfigStore(Path("/tmp/unused-launcher.db")), docker, root=FakeRoot()
             )
             is None
         )
@@ -82,7 +82,7 @@ def test_interactive_first_launch_handles_docker_error_gracefully() -> None:
 
 
 def test_first_launch_checks_docker_saves_config_and_installs_shortcut(tmp_path: Path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     docker = MagicMock()
     docker.check_available.return_value.available = True
     installer = MagicMock(return_value=tmp_path / "shortcut")
@@ -108,7 +108,7 @@ def test_first_launch_rejects_unavailable_docker(tmp_path: Path) -> None:
 
     with pytest.raises(SetupWizardError, match="Docker is not ready"):
         run_first_launch(
-            ConfigStore(tmp_path / "config.json"),
+            ConfigStore(tmp_path / "launcher.db"),
             docker,
             email="owner@example.test",
             password="secret",
@@ -123,7 +123,7 @@ def test_first_launch_rejects_short_password(tmp_path: Path) -> None:
 
     with pytest.raises(SetupWizardError, match="8 to 64"):
         run_first_launch(
-            ConfigStore(tmp_path / "config.json"),
+            ConfigStore(tmp_path / "launcher.db"),
             docker,
             email="owner@example.test",
             password="short",
@@ -138,7 +138,7 @@ def test_first_launch_rejects_password_without_number(tmp_path: Path) -> None:
 
     with pytest.raises(SetupWizardError, match="number"):
         run_first_launch(
-            ConfigStore(tmp_path / "config.json"),
+            ConfigStore(tmp_path / "launcher.db"),
             docker,
             email="owner@example.test",
             password="UppercaseOnly",
@@ -153,7 +153,7 @@ def test_first_launch_rejects_password_without_uppercase(tmp_path: Path) -> None
 
     with pytest.raises(SetupWizardError, match="uppercase"):
         run_first_launch(
-            ConfigStore(tmp_path / "config.json"),
+            ConfigStore(tmp_path / "launcher.db"),
             docker,
             email="owner@example.test",
             password="test1234",
