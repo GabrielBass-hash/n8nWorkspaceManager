@@ -53,6 +53,7 @@ from ..git import (
     git_push_ref,
     git_remote_url,
     git_remove_remote,
+    git_rename_current_branch,
     git_set_remote_url,
     git_ssh_env,
     tokenize_remote_url,
@@ -89,6 +90,16 @@ def _is_push_rejection(exc: GitError) -> bool:
         marker in detail
         for marker in ("non-fast-forward", "[rejected]", "fetch first", "stale info")
     )
+
+
+def _is_legacy_branch(name: str) -> bool:
+    """Return True for a branch name from the pre-``dev`` branch policy.
+
+    These are renamed to ``dev`` once: per-workspace ``n8n/<id>`` branches and
+    the generic ``main``/``master`` defaults that older launcher versions left
+    behind when git was enabled on an existing repository.
+    """
+    return name in ("main", "master") or name.startswith("n8n/")
 
 
 def _project_live_state(projects: dict[str, dict[str, str]], project: str) -> WorkspaceState:
@@ -310,7 +321,7 @@ class WorkspaceManager:
             raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
 
         # ``git clone`` checks out the remote's default branch; the launcher
-        # then works on its own ``n8n/<id>`` branch (switched right after the
+        # then works on its canonical ``dev`` branch (switched right after the
         # workspace is registered), so the recorded GitConfig stays truthful.
         workspace_id = uuid4().hex[:8]
         workspace = Workspace(
@@ -757,17 +768,41 @@ class WorkspaceManager:
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     def _ensure_workspace_branch(self, workspace: Workspace) -> None:
-        """Make sure the workspace's own ``n8n/<id>`` branch is active when git is configured.
+        """Make sure the workspace's canonical ``dev`` branch is active.
 
-        Each workspace syncs on its own per-id branch, so a legacy checkout
-        (``dev``/``main`` from before the branch policy) is switched to
-        ``n8n/<id>`` on the fly, and the recorded :class:`GitConfig` branch is
-        kept in sync. Failures are logged and never block startup.
+        A legacy checkout (``n8n/*``, ``main`` or ``master`` from the
+        pre-``dev`` policy) is renamed to ``dev`` once — idempotently — and
+        pushed so auto-pull and the CI trigger can use it right away. The
+        recorded :class:`GitConfig` branch is kept in sync. Failures are
+        logged and never block startup.
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             return
         branch = workspace_branch(workspace.id)
         try:
+            current = git_current_branch(workspace.workflows_dir)
+            if current and current != branch and _is_legacy_branch(current):
+                if not git_rename_current_branch(workspace.workflows_dir, branch):
+                    return
+                logger.info(
+                    "Renamed workspace branch %s → %s for %s",
+                    current,
+                    branch,
+                    workspace.name,
+                )
+                # Bring the fresh dev branch up to the remote on this first visit
+                # (mirrors the generic ensure_workspace_branch push of a newly
+                # created branch) so auto-pull and CI trigger on dev immediately.
+                try:
+                    if git_has_remote(workspace.workflows_dir):
+                        git_push(workspace.workflows_dir)
+                except GitError as exc:
+                    logger.warning(
+                        "Could not push the renamed %s branch for %s: %s",
+                        branch,
+                        workspace.name,
+                        exc,
+                    )
             active = ensure_workspace_branch(workspace.workflows_dir, branch)
         except GitError as exc:
             logger.warning("ensure_workspace_branch failed for %s: %s", workspace.name, exc)
@@ -790,7 +825,7 @@ class WorkspaceManager:
         ``post-receive`` hook and the self-contained ``deploy.py`` are generated
         and streamed over SSH (no server-side package). The local repository
         gets a ``server`` remote pointing at the bare repo, so a later
-        :meth:`publish` can push ``n8n/<id>:main``. Nothing is persisted here —
+        :meth:`publish` can push ``dev:main``. Nothing is persisted here —
         the dialog saves the :class:`ServerConfig` itself.
         """
         if conflict := self._server_port_conflict(self.store.load(), workspace.id, server):
@@ -850,8 +885,8 @@ class WorkspaceManager:
         Deploys the *current* state of the local n8n instance: workflows are
         exported, the remote Compose definition is committed, the credentials
         secrets are re-uploaded (they never travel through the repository) and
-        the workspace branch is pushed to the ``server`` remote as ``main``
-        (``n8n/<id>:main``). The push fails fast on a non-fast-forward server
+        the workspace's ``dev`` branch is pushed to the ``server`` remote as
+        ``main`` (``dev:main``). The push fails fast on a non-fast-forward server
         branch so production main is never rewritten.
         """
         server = workspace.server

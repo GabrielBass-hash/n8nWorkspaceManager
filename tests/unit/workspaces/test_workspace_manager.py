@@ -1010,6 +1010,86 @@ def test_ensure_running_skips_pull_when_git_disabled(tmp_path: Path) -> None:
     pull.assert_not_called()
 
 
+def git_workspace(launcher, store, tmp_path: Path) -> Workspace:
+    """Persist *workspace* with git enabled under tmp_path and reload it."""
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True, remote_url="https://example.test/repo.git")
+    store.save(config)
+    return launcher.list()[0]
+
+
+def test_ensure_workspace_branch_renames_legacy_main_to_dev(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace = git_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="main"),
+        patch("n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True) as rename,
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+        patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    rename.assert_called_once_with(workspace.workflows_dir, "dev")
+    push.assert_called_once_with(workspace.workflows_dir)
+
+
+def test_ensure_workspace_branch_renames_legacy_per_id_branch(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace = git_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="n8n/abcd1234"),
+        patch("n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True) as rename,
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+        patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    rename.assert_called_once_with(workspace.workflows_dir, "dev")
+    # No remote → the renamed branch is not pushed yet (close flow will do it).
+    push.assert_not_called()
+
+
+def test_ensure_workspace_branch_does_not_rename_dev(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace = git_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_rename_current_branch") as rename,
+        patch("n8n_launcher.workspaces.manager.git_has_remote"),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+        patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    rename.assert_not_called()
+    push.assert_not_called()
+
+
+def test_ensure_workspace_branch_skipped_when_git_disabled(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo") as is_repo,
+        patch("n8n_launcher.workspaces.manager.git_rename_current_branch") as rename,
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    is_repo.assert_not_called()
+    rename.assert_not_called()
+
+
 def github_workspace(launcher, store, tmp_path: Path, port: int = 5701) -> Workspace:
     """Create a workspace persisted with git + GitHub remote enabled."""
     workspace = create_none(launcher, tmp_path, port=port)

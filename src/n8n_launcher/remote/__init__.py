@@ -1,11 +1,12 @@
 """Remote server deployment: SSH plumbing and the generated server listener.
 
 The launcher deploys a workspace to a production server through git: work
-lives on the per-workspace ``n8n/<id>`` branch, publishing pushes
-``n8n/<id>:main`` to a bare repository hosted on the server, and the server's
-``post-receive`` hook redeploys the stack (see ``deploy.py``). This package
-only communicates over the SSH key configured in ``ServerConfig`` —
-passphrases are left to the user's SSH agent.
+lives on the workspace's ``dev`` branch, publishing pushes ``dev:main`` to a
+bare repository hosted on the server (the server's ``main`` is the production
+reference, never created on GitHub), and the server's ``post-receive`` hook
+redeploys the stack (see ``deploy.py``). This package only communicates over
+the SSH key configured in ``ServerConfig`` — passphrases are left to the
+user's SSH agent.
 """
 
 from .deploy import (

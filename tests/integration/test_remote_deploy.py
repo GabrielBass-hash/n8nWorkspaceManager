@@ -2,7 +2,7 @@
 
 This is the only end-to-end coverage of the whole remote flow:
 ``install_server`` (probe + generated listener + bare repo), ``publish``
-(git push of ``n8n/<id>:main``), the ``post-receive`` hook (compose up +
+(git push of ``dev:main``), the ``post-receive`` hook (compose up +
 ``deploy.py``) and the resulting ``last-deploy.json`` marker.
 
 The listener is exercised against a throwaway ``sshd`` container built from

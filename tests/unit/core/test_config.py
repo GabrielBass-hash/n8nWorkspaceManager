@@ -44,7 +44,7 @@ def _sample_config(work_dir: Path) -> AppConfig:
                 git=GitConfig(
                     enabled=True,
                     remote_url="https://github.com/o/r.git",
-                    branch="n8n/ws-b",
+                    branch="dev",
                     ci_enabled=True,
                     ci_credentials=[{"name": "GitHub", "type": "githubOAuth2Api"}],
                 ),
