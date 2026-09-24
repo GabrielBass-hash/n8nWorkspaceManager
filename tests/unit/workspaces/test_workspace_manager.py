@@ -726,7 +726,7 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_init") as init,
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore") as ensure_ignore,
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes") as ensure_ignore,
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_add_remote") as add_remote,
     ):
@@ -750,7 +750,7 @@ def test_git_init_workspace_detaches_remote_when_url_cleared(tmp_path: Path) -> 
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True) as is_repo,
         patch("n8n_launcher.workspaces.manager.git_init") as init,
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove_remote,
     ):
@@ -792,7 +792,7 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url") as set_url,
     ):
@@ -816,7 +816,7 @@ def test_configure_git_detaches_remote_when_url_cleared(tmp_path: Path) -> None:
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove_remote,
     ):
@@ -842,7 +842,7 @@ def test_git_init_workspace_preserves_ci_metadata(tmp_path: Path) -> None:
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_init"),
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_add_remote"),
     ):
@@ -866,7 +866,7 @@ def test_configure_git_preserves_ci_metadata(tmp_path: Path) -> None:
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url"),
     ):

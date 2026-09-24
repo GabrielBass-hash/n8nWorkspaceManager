@@ -31,7 +31,7 @@ GIT_LOCK_FILENAME = ".n8n-launcher.git.lock"
 # launcher's ``git add -A`` from sweeping volatile or environment files into
 # workflow history. The git lock file itself is ignored so a ``git add -A``
 # never stages a lock that exist only while the launcher runs.
-GITIGNORE_BODY = """# n8n-Launcher : fichiers locaux ou volatiles exclus du versionnement.
+EXCLUDE_BODY = """# n8n-Launcher : fichiers locaux ou volatiles exclus du versionnement.
 .env
 .env.*
 *.log
@@ -85,7 +85,7 @@ def workspace_git_lock(path: Path) -> Iterator[None]:
     as ``sync_git`` → ``_commit_and_push`` share one OS lock) but exclusive
     between threads and between separate processes. The OS lock lives in a
     dedicated ``.n8n-launcher.git.lock`` file inside the working tree, ignored
-    by ``git add -A`` (see :data:`GITIGNORE_BODY`).
+    by ``git add -A`` (see :data:`EXCLUDE_BODY`).
     """
     if not git_is_repo(path):
         yield
@@ -231,7 +231,7 @@ def git_init(path: Path, *, remote_url: str | None = None, branch: str | None = 
     _run_git(["init"], cwd=path)
     _run_git(["branch", "-M", branch or WORKSPACE_BRANCH], cwd=path)
     _configure_repo_identity(path)
-    ensure_gitignore(path)
+    ensure_local_excludes(path)
     if remote_url:
         _run_git(["remote", "add", "origin", remote_url], cwd=path)
     logger.info("Initialized git repo at %s", path)
@@ -247,7 +247,7 @@ def _configure_repo_identity(path: Path) -> None:
         _run_git(["config", "user.email", LAUNCHER_GIT_EMAIL], cwd=path)
 
 
-def ensure_gitignore(path: Path) -> None:
+def ensure_local_excludes(path: Path) -> None:
     """Apply the launcher's default ignore rules to *path*'s repository.
 
     Rules are written into the repository-local ``.git/info/exclude`` file
@@ -259,11 +259,11 @@ def ensure_gitignore(path: Path) -> None:
     excludes = path / ".git" / "info" / "exclude"
     excludes.parent.mkdir(parents=True, exist_ok=True)
     existing = excludes.read_text(encoding="utf-8") if excludes.exists() else ""
-    marker = GITIGNORE_BODY.splitlines()[0]
+    marker = EXCLUDE_BODY.splitlines()[0]
     if marker in existing:
         return
     separator = "" if not existing or existing.endswith("\n") else "\n"
-    excludes.write_text(existing + separator + GITIGNORE_BODY, encoding="utf-8")
+    excludes.write_text(existing + separator + EXCLUDE_BODY, encoding="utf-8")
     logger.info("Ensured launcher ignore rules at %s", excludes)
 
 

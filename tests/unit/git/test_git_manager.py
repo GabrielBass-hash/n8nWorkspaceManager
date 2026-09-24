@@ -7,7 +7,7 @@ import pytest
 from n8n_launcher.git import (
     GitError,
     GitProbeStatus,
-    ensure_gitignore,
+    ensure_local_excludes,
     ensure_workspace_branch,
     git_add,
     git_add_remote,
@@ -170,24 +170,24 @@ def test_git_init_adds_remote_when_provided(tmp_path: Path) -> None:
     ]
 
 
-def test_ensure_gitignore_writes_default_only_once(tmp_path: Path) -> None:
+def test_ensure_local_excludes_writes_default_only_once(tmp_path: Path) -> None:
     (tmp_path / ".git" / "info").mkdir(parents=True)
     excludes = tmp_path / ".git" / "info" / "exclude"
 
-    ensure_gitignore(tmp_path)
+    ensure_local_excludes(tmp_path)
     first = excludes.read_text(encoding="utf-8")
     assert ".env" in first
 
-    ensure_gitignore(tmp_path)
+    ensure_local_excludes(tmp_path)
     assert excludes.read_text(encoding="utf-8") == first
 
 
-def test_ensure_gitignore_preserves_user_entries(tmp_path: Path) -> None:
+def test_ensure_local_excludes_preserves_user_entries(tmp_path: Path) -> None:
     (tmp_path / ".git" / "info").mkdir(parents=True)
     excludes = tmp_path / ".git" / "info" / "exclude"
     excludes.write_text("# user rules\nsecret.yml\n", encoding="utf-8")
 
-    ensure_gitignore(tmp_path)
+    ensure_local_excludes(tmp_path)
 
     content = excludes.read_text(encoding="utf-8")
     assert "# user rules" in content
@@ -901,6 +901,6 @@ def test_workspace_git_lock_creates_and_releases_lock_file(tmp_path: Path) -> No
 
 
 def test_gitignore_locks_out_the_git_lock_file() -> None:
-    from n8n_launcher.git.manager import GITIGNORE_BODY
+    from n8n_launcher.git.manager import EXCLUDE_BODY
 
-    assert ".n8n-launcher.git.lock" in GITIGNORE_BODY
+    assert ".n8n-launcher.git.lock" in EXCLUDE_BODY

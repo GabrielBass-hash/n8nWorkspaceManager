@@ -39,7 +39,7 @@ from ..github import auth
 from ..github.api import GitHubClient, GitHubError
 from ..git import (
     GitError,
-    ensure_gitignore,
+    ensure_local_excludes,
     ensure_workspace_branch,
     git_add,
     git_add_remote,
@@ -523,7 +523,7 @@ class WorkspaceManager:
         """Initialize a git repository in the workspace folder."""
         if not git_is_repo(workspace.workflows_dir):
             git_init(workspace.workflows_dir, branch=workspace_branch(workspace.id))
-        ensure_gitignore(workspace.workflows_dir)
+        ensure_local_excludes(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
@@ -618,7 +618,7 @@ class WorkspaceManager:
 
     def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Attach, update or detach the remote of an existing git repository."""
-        ensure_gitignore(workspace.workflows_dir)
+        ensure_local_excludes(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)

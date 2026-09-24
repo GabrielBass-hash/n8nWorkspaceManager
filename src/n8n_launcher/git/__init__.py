@@ -7,7 +7,7 @@ The public surface is re-exported here so consumers can import from
 from .manager import (
     GitError,
     GitProbeStatus,
-    ensure_gitignore,
+    ensure_local_excludes,
     ensure_workspace_branch,
     git_add,
     git_add_remote,
@@ -39,7 +39,7 @@ from .manager import (
 __all__ = [
     "GitError",
     "GitProbeStatus",
-    "ensure_gitignore",
+    "ensure_local_excludes",
     "ensure_workspace_branch",
     "git_add",
     "git_add_remote",
