@@ -151,18 +151,25 @@ def test_git_row_status_chips(app, tmp_path) -> None:
 
 
 def test_refresh_updates_rows_in_place_when_order_unchanged(app) -> None:
-    rows_before = {wid: (frame, frame.git_chip) for wid, (frame, _label) in app.app._rows.items()}
+    rows_before = {
+        wid: (frame, frame.git_chip, frame.server_chip)
+        for wid, (frame, _label) in app.app._rows.items()
+    }
     status = GitRowStatus(is_repo=True, diverged=True)
     with patch("n8n_launcher.gui.display.git_row_status", return_value=status):
         app.app.refresh()
 
     # Same workspace set + order: nothing is destroyed, widgets are patched.
-    for wid, (frame, git_chip) in rows_before.items():
+    # ``server_chip`` is wired on the row frame, so the in-place refresh must
+    # reach it without raising (regression: it was never assigned in _build_row).
+    for wid, (frame, git_chip, server_chip) in rows_before.items():
         assert app.app._rows[wid][0] is frame
         assert not frame.destroyed
         assert app.app._rows[wid][0].git_chip is git_chip
         assert row_chip_text(app, wid, "git_chip") == "git <>"
         assert row_chip_colors(app, wid, "git_chip") == WARN_CHIP
+        assert app.app._rows[wid][0].server_chip is server_chip
+        assert row_chip_text(app, wid, "server_chip") == "serv"
 
 
 def test_refresh_rebuilds_when_order_changes(app) -> None:
