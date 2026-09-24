@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .api import N8nApiClient
+
+# Matches the launcher's own export filenames (``<name>-<id>.json``) so the
+# root mirror can tell its files apart from user-authored JSON (package.json,
+# manually named exports…) and clean only its own orphans.
+EXPORT_NAME_RE = re.compile(r".+-\d+\.json$")
 
 
 @dataclass(frozen=True)
@@ -91,28 +97,47 @@ class SyncRunner:
             pulled += 1
         return SyncReport(pulled=pulled, skipped=skipped)
 
-    def export_all(self) -> SyncReport:
-        """Refresh every workflow from n8n and remove stale local exports."""
+    def export_all(self, mirror: Path | None = None) -> SyncReport:
+        """Refresh every workflow from n8n and remove stale local exports.
+
+        When *mirror* is given (the workspace root, on close/stop/publish) the
+        same per-workflow bodies are written there too — import and the CI
+        harness read both the ``n8nPipelines/`` folder and the root, so without
+        this the root copies would stay stale forever. Cleanup in the mirror is
+        restricted to launcher-named files (``<name>-<id>.json``), so unrelated
+        root files (``package.json``, hand-written exports with a different
+        naming) are never touched.
+        """
         self.workflows_dir.mkdir(parents=True, exist_ok=True)
         workflows = self.api.list_workflows()
         exported = set()
+        live_mirror = set() if mirror is not None else None
         pulled = 0
         for workflow in workflows:
             workflow_id = str(workflow.get("id", ""))
             if not workflow_id:
                 continue
-            target = (
-                self.workflows_dir
-                / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
-            )
-            detail = self.api.get_workflow(workflow_id)
-            target.write_text(json.dumps(detail, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            exported.add(target.name)
+            name = _safe_name(workflow.get("name", workflow_id))
+            filename = f"{name}-{workflow_id}.json"
+            body = json.dumps(self.api.get_workflow(workflow_id), indent=2, sort_keys=True) + "\n"
+            (self.workflows_dir / filename).write_text(body, encoding="utf-8")
+            exported.add(filename)
+            if mirror is not None and live_mirror is not None:
+                (mirror / filename).write_text(body, encoding="utf-8")
+                live_mirror.add(filename)
             pulled += 1
         for stale in self.workflows_dir.glob("*.json"):
             if stale.name not in exported:
                 stale.unlink()
+        if mirror is not None and live_mirror is not None:
+            self._clean_mirror(mirror, live_mirror)
         return SyncReport(pulled=pulled)
+
+    def _clean_mirror(self, mirror: Path, live: set[str]) -> None:
+        """Remove launcher-owned root exports that no longer match a workflow."""
+        for orphan in mirror.glob("*.json"):
+            if EXPORT_NAME_RE.match(orphan.name) and orphan.name not in live:
+                orphan.unlink()
 
     def import_all(self) -> SyncReport:
         """Create in n8n every workflow JSON stored in the workspace folder.

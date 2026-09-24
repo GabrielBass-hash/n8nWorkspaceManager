@@ -134,11 +134,13 @@ def test_mkdir_remote_builds_command() -> None:
     assert run.call_args.args[0][-1] == "mkdir -p 'n8n launcher/abc123'"
 
 
-def test_write_remote_file_streams_content_via_stdin() -> None:
+def test_write_remote_file_streams_content_via_stdin_and_moves_atomically() -> None:
     with patch("n8n_launcher.remote.ssh.subprocess.run", return_value=completed()) as run:
         write_remote_file(CFG, "dir with spaces/deploy.py", "#!/usr/bin/env python3\nprint(1)\n")
 
-    assert run.call_args.args[0][-1] == "cat > 'dir with spaces/deploy.py'"
+    command = run.call_args.args[0][-1]
+    assert command.startswith("cat > 'dir with spaces/deploy.py'.tmp && mv -f")
+    assert "deploy.py'.tmp 'dir with spaces/deploy.py'" in command
     assert run.call_args.kwargs["input"] == "#!/usr/bin/env python3\nprint(1)\n"
 
 

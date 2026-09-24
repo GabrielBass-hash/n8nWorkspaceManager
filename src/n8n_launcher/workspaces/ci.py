@@ -99,17 +99,27 @@ def collect_workflows(workflows_dir: Path) -> list[str]:
     Mirrors the launcher's own import behaviour: ``n8nPipelines/*.json`` plus
     root-level ``*.json`` files. JSON files that are manifest/lock files are
     excluded.
+
+    Root-level exports that duplicate a pipeline already found under
+    ``n8nPipelines/`` (same basename) are dropped — the mirror is only for
+    freshness, the canonical copies are the ones exported to the pipeline
+    folder.
     """
-    found: list[str] = []
+    found_paths: list[str] = []
+    seen_basename: set[str] = set()
     pipelines_dir = workflows_dir / "n8nPipelines"
     if pipelines_dir.is_dir():
         for path in sorted(pipelines_dir.glob("*.json")):
             if path.is_file():
-                found.append(f"n8nPipelines/{path.name}")
+                rel = f"n8nPipelines/{path.name}"
+                found_paths.append(rel)
+                seen_basename.add(path.name)
     for path in sorted(workflows_dir.glob("*.json")):
         if path.is_file() and path.name not in ROOT_BLOCKLIST:
-            found.append(path.name)
-    return sorted(set(found))
+            if path.name in seen_basename:
+                continue
+            found_paths.append(path.name)
+    return sorted(found_paths)
 
 
 def load_export(workflows_dir: Path, rel: str) -> dict[str, Any] | None:
@@ -351,7 +361,7 @@ name: n8n-launcher CI
 
 on:
   push:
-    branches: ["dev"]
+    branches: ["n8n/**"]
   pull_request:
   workflow_dispatch:
 

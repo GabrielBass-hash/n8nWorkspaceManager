@@ -1,13 +1,15 @@
 """Remote server deployment: SSH plumbing and the generated server listener.
 
 The launcher deploys a workspace to a production server through git: work
-lives on ``dev``, publishing pushes ``HEAD:main`` to a bare repository hosted
-on the server, and the server's ``post-receive`` hook redeploys the stack (see
-``deploy.py``). This package only communicates over the SSH key configured in
-``ServerConfig`` — passphrases are left to the user's SSH agent.
+lives on the per-workspace ``n8n/<id>`` branch, publishing pushes
+``n8n/<id>:main`` to a bare repository hosted on the server, and the server's
+``post-receive`` hook redeploys the stack (see ``deploy.py``). This package
+only communicates over the SSH key configured in ``ServerConfig`` —
+passphrases are left to the user's SSH agent.
 """
 
 from .deploy import (
+    bare_dir,
     build_secrets_document,
     marker_path,
     render_deploy_script,
@@ -26,6 +28,7 @@ from .ssh import (
 
 __all__ = [
     "SshError",
+    "bare_dir",
     "build_secrets_document",
     "chmod_remote",
     "marker_path",

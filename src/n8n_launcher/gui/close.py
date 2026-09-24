@@ -101,7 +101,7 @@ class CloseController:
             return
         api = N8nApiClient(f"http://127.0.0.1:{workspace.port}/api/v1", api_key)
         pipelines_dir = workspace.workflows_dir / "n8nPipelines"
-        SyncRunner(api, pipelines_dir).export_all()
+        SyncRunner(api, pipelines_dir).export_all(mirror=workspace.workflows_dir)
 
     def _stop(self, workspace: Workspace, rest: list[Workspace]) -> None:
         self._set_status(f"Fermeture : arrêt de « {workspace.name} »…")

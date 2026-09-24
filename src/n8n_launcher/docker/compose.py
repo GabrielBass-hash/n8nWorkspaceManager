@@ -23,8 +23,17 @@ def render_remote_compose(workspace: Workspace) -> str:
     The workflow checkout lives next to the Compose file on the server, so the
     volume path is relative (``./:/workflows``) and the n8n port binds loopback
     only: the launcher reaches the instance through SSH, never over the LAN.
+    The project is pinned by a top-level ``name:`` (``n8n-ws-<id>``) so the
+    server-side ``post-receive`` hook and ``deploy.py`` reach the right,
+    isolated project regardless of the checkout directory (``workflow``).
     """
-    return _render(workspace, "./", workspace.server.n8n_port, loopback=True)
+    return _render(
+        workspace,
+        "./",
+        workspace.server.n8n_port,
+        loopback=True,
+        name=compose_project_name(workspace),
+    )
 
 
 def _render(
@@ -33,6 +42,7 @@ def _render(
     n8n_port: int,
     *,
     loopback: bool = False,
+    name: str | None = None,
 ) -> str:
     n8n_image = f"n8nio/n8n:{workspace.n8n_version}"
     db_environment, db_service, db_dependency = _database_parts(workspace)
@@ -40,6 +50,7 @@ def _render(
     if workspace.db.mode is DbMode.MANAGED:
         data_volumes += f"  pgdata-{workspace.id}:\n"
     bind_host = "127.0.0.1:" if loopback else ""
+    project_line = f"name: {name}\n" if name else ""
     service_block = f"""  n8n:
     image: {n8n_image}
     restart: unless-stopped
@@ -58,7 +69,7 @@ def _render(
       timeout: 3s
       retries: 20
 """
-    return f"""services:
+    return f"""{project_line}services:
 {db_service}{service_block}
 volumes:
 {data_volumes}"""

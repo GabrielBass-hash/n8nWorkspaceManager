@@ -88,20 +88,24 @@ BASE=__BASE__
 BARE=__BARE__
 WORKFLOW=__WORKFLOW__
 LOG=__LOG__
+PROJECT=__PROJECT__
 
 marker() {
     python3 - "$1" "$2" "$3" "$BASE" <<'PY'
-import json, sys, time
+import json, os, sys, time
 payload = {"sha": sys.argv[1], "status": sys.argv[2], "at": int(time.time())}
 if sys.argv[3]:
     payload["error"] = sys.argv[3]
-with open(sys.argv[4] + "/last-deploy.json", "w", encoding="utf-8") as fh:
+path = sys.argv[4] + "/last-deploy.json"
+# Atomic write: readers (the launcher's _poll_deploy) never see a partial file.
+with open(path + ".tmp", "w", encoding="utf-8") as fh:
     json.dump(payload, fh)
+os.replace(path + ".tmp", path)
 PY
 }
 
 while read -r old new ref; do
-    # Only main is deployed; dev pushes go to GitHub/Actions instead.
+    # Only main is deployed; n8n/ branches go to GitHub/Actions instead.
     [ "$ref" = "refs/heads/main" ] || continue
     # A deleted main produces an all-zeros sha — nothing to deploy.
     [ "$new" != "0000000000000000000000000000000000000000" ] || continue
@@ -111,11 +115,12 @@ while read -r old new ref; do
         marker "$new" "error" "git archive a échoué"
         exit 0
     fi
-    if ! (cd "$WORKFLOW" && docker compose up -d) >> "$LOG" 2>&1; then
+    if ! docker compose -p "$PROJECT" up -d >> "$LOG" 2>&1; then
         marker "$new" "error" "docker compose up -d a échoué"
         exit 0
     fi
-    DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" DEPLOY_N8N_PORT=__N8N_PORT__ \
+    DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" DEPLOY_PROJECT="$PROJECT" \
+        DEPLOY_N8N_PORT=__N8N_PORT__ \
         python3 "$BASE/deploy.py" "$new" >> "$LOG" 2>&1
 done
 exit 0
@@ -130,6 +135,9 @@ def render_hook(cfg: ServerConfig, workspace_id: str | None = None) -> str:
     content = content.replace("__BARE__", _sh_sq(bare_dir(cfg, workspace_id)))
     content = content.replace("__WORKFLOW__", _sh_sq(checkout_dir(cfg, workspace_id)))
     content = content.replace("__LOG__", _sh_sq(log_path(cfg, workspace_id)))
+    content = content.replace(
+        "__PROJECT__", _sh_sq(f"n8n-ws-{workspace_id}" if workspace_id else "")
+    )
     content = content.replace("__N8N_PORT__", str(cfg.n8n_port))
     return content
 
@@ -157,11 +165,13 @@ from urllib.request import HTTPCookieProcessor, build_opener
 
 CHECKOUT = os.environ.get("DEPLOY_CHECKOUT", ".")
 DEPLOY_BASE = os.environ.get("DEPLOY_BASE", ".")
+PROJECT = os.environ.get("DEPLOY_PROJECT", "n8n-ws-deploy") or "n8n-ws-deploy"
 N8N_PORT = int(os.environ.get("DEPLOY_N8N_PORT", "5678"))
 ROOT = "http://127.0.0.1:%d" % N8N_PORT
 SHA = sys.argv[1] if len(sys.argv) > 1 else "unknown"
 SECRETS = os.path.join(DEPLOY_BASE, "secrets.json")
 MARKER = os.path.join(DEPLOY_BASE, "last-deploy.json")
+COMPOSE_CMD = ["docker", "compose", "-p", PROJECT]
 
 WORKFLOW_KEYS = (
     "name",
@@ -184,8 +194,10 @@ def write_marker(status, error=None):
     payload = {"sha": SHA, "status": status, "at": int(time.time())}
     if error:
         payload["error"] = error
-    with open(MARKER, "w", encoding="utf-8") as fh:
+    # Atomic replace: the launcher polls the marker, never a partial file.
+    with open(MARKER + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(payload, fh)
+    os.replace(MARKER + ".tmp", MARKER)
 
 
 # --- pure helpers (unit-tested via exec) -----------------------------------
@@ -197,15 +209,27 @@ def load_secrets(path):
 
 
 def collect_workflow_files(checkout):
-    # n8nPipelines/*.json + root *.json, mirroring the local import.
+    # n8nPipelines/*.json + root *.json, mirroring the local import; root files
+    # that duplicate a pipeline basename are skipped (the root is only a
+    # freshness mirror, the pipeline copy is canonical).
     files = []
-    for folder in (os.path.join(checkout, "n8nPipelines"), checkout):
-        if not os.path.isdir(folder):
-            continue
-        for name in sorted(os.listdir(folder)):
-            entry = os.path.join(folder, name)
+    pipelines = os.path.join(checkout, "n8nPipelines")
+    pipeline_names = set()
+    if not os.path.isdir(checkout):
+        return files
+    if os.path.isdir(pipelines):
+        for name in sorted(os.listdir(pipelines)):
+            entry = os.path.join(pipelines, name)
             if os.path.isfile(entry) and name.endswith(".json"):
                 files.append(entry)
+                pipeline_names.add(name)
+    for name in sorted(os.listdir(checkout)):
+        entry = os.path.join(checkout, name)
+        if not os.path.isfile(entry) or not name.endswith(".json"):
+            continue
+        if name in pipeline_names:
+            continue
+        files.append(entry)
     return files
 
 
@@ -400,11 +424,14 @@ def sync_workflows(http, id_map):
 
 
 def run_migrations():
+    # Runs on the server's data database (the postgres volume backing the
+    # workspace), addressed by the pinned ``-p`` project so the container is
+    # the one started by the hook, whatever the checkout directory is named.
     migrations = migration_files(CHECKOUT)
     if not migrations:
         return
     services = subprocess.run(
-        ["docker", "compose", "config", "--services"],
+        COMPOSE_CMD + ["config", "--services"],
         capture_output=True,
         text=True,
         cwd=CHECKOUT,
@@ -417,9 +444,8 @@ def run_migrations():
         with open(path, encoding="utf-8") as fh:
             sql = fh.read()
         result = subprocess.run(
-            [
-                "docker",
-                "compose",
+            COMPOSE_CMD
+            + [
                 "exec",
                 "-T",
                 "postgres",

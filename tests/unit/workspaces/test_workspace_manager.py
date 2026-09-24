@@ -15,7 +15,7 @@ from n8n_launcher.core.models import (
     WorkspaceState,
 )
 from n8n_launcher.docker.manager import ComposeStatus, DockerError
-from n8n_launcher.git import GitError
+from n8n_launcher.git import GitError, workspace_branch
 from n8n_launcher.n8n.api import N8nApiError
 from n8n_launcher.n8n.owner import OwnerSetupError
 from n8n_launcher.remote.ssh import SshError
@@ -54,6 +54,36 @@ def test_create_managed_workspace_when_migrations_exist(tmp_path: Path) -> None:
     assert workspace.db.password
     assert workspace.port == 5680
     assert store.load().workspaces == [workspace]
+
+
+def test_create_preserves_provided_managed_db_fields(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workflows_dir = tmp_path / "workflows"
+    provided = DbConfig(
+        mode=DbMode.MANAGED,
+        database_name="my-data",
+        username="my-user",
+        password="my-pass",
+    )
+
+    workspace = launcher.create("Demo", workflows_dir, db=provided)
+
+    assert workspace.db.mode is DbMode.MANAGED
+    assert workspace.db.database_name == "my-data"
+    assert workspace.db.username == "my-user"
+    assert workspace.db.password == "my-pass"
+
+
+def test_create_generates_password_only_for_missing_managed_fields(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workflows_dir = tmp_path / "workflows"
+    provided = DbConfig(mode=DbMode.MANAGED, database_name="my-data", username="my-user")
+
+    workspace = launcher.create("Demo", workflows_dir, db=provided)
+
+    assert workspace.db.database_name == "my-data"
+    assert workspace.db.username == "my-user"
+    assert workspace.db.password
 
 
 def test_create_scaffolds_pipelines_and_db_layout(tmp_path: Path) -> None:
@@ -120,6 +150,24 @@ def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
 
     assert stopped.state is WorkspaceState.STOPPED
     docker.down.assert_not_called()
+
+
+def test_stop_transitions_through_stopping_while_tearing_down(tmp_path: Path) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    def check_state_on_down(*_args, **_kwargs) -> None:
+        assert store.load().workspaces[0].state is WorkspaceState.STOPPING
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.start(workspace.id)
+        with patch.object(docker, "down", side_effect=check_state_on_down):
+            stopped = launcher.stop(workspace.id)
+
+    assert stopped.state is WorkspaceState.STOPPED
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
 
 
 def test_stop_is_idempotent_on_already_stopped(tmp_path: Path) -> None:
@@ -627,7 +675,7 @@ def test_stop_with_sync_exports_and_syncs_before_stop(tmp_path: Path) -> None:
     ):
         launcher.stop_with_sync(workspace.id)
 
-    run.return_value.export_all.assert_called_once_with()
+    run.return_value.export_all.assert_called_once_with(mirror=workspace.workflows_dir)
     sync.assert_called_once()
     assert sync.call_args.args[0].id == workspace.id
     assert sync.call_args.kwargs == {"push": True}
@@ -685,7 +733,7 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
     ):
         launcher.git_init_workspace(workspace, remote_url="https://example.test/repo.git")
 
-    init.assert_called_once_with(workspace.workflows_dir)
+    init.assert_called_once_with(workspace.workflows_dir, branch=workspace_branch(workspace.id))
     ensure_ignore.assert_called_once_with(workspace.workflows_dir)
     add_remote.assert_called_once_with(
         workspace.workflows_dir, "origin", "https://example.test/repo.git"
@@ -1211,10 +1259,6 @@ def test_clone_from_git_clones_and_registers(tmp_path: Path) -> None:
 
     with (
         patch("n8n_launcher.workspaces.manager.git_pull_new_repo", side_effect=fake_clone) as clone,
-        patch(
-            "n8n_launcher.workspaces.manager.git_current_branch",
-            return_value="develop",
-        ),
         patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5680),
         patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
     ):
@@ -1230,7 +1274,7 @@ def test_clone_from_git_clones_and_registers(tmp_path: Path) -> None:
     assert workspace.workflows_dir == dest
     assert workspace.git.enabled is True
     assert workspace.git.remote_url == "https://example.test/repo.git"
-    assert workspace.git.branch == "develop"
+    assert workspace.git.branch == workspace_branch(workspace.id)
     assert workspace.db.mode is DbMode.NONE
     assert (dest / "n8nPipelines").is_dir()
     assert store.load().workspaces == [workspace]
@@ -1440,6 +1484,7 @@ def test_install_server_pushes_hook_and_deploy_script(tmp_path: Path) -> None:
 
     with (
         patch("n8n_launcher.workspaces.manager.test_connection") as probe,
+        patch("n8n_launcher.workspaces.manager.ssh_run") as ssh,
         patch("n8n_launcher.workspaces.manager.render_hook", return_value="#hook#") as hook,
         patch(
             "n8n_launcher.workspaces.manager.render_deploy_script", return_value="#deploy#"
@@ -1453,6 +1498,9 @@ def test_install_server_pushes_hook_and_deploy_script(tmp_path: Path) -> None:
         launcher.install_server(workspace, server_cfg())
 
     probe.assert_called_once()
+    # The bare repository is created first so the hook directory exists.
+    assert ssh.call_args.args[1].startswith("git init --bare ")
+    assert "launcher/demo.git" in ssh.call_args.args[1]
     mkdir.assert_called_once()
     hook.assert_called_once()
     write.assert_any_call(

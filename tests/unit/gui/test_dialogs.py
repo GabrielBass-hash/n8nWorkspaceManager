@@ -13,6 +13,7 @@ from helpers import (
 
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, ServerConfig
+from n8n_launcher.git import workspace_branch
 from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui import CreatePlan, LauncherApp
 from n8n_launcher.gui.dialogs import (
@@ -1185,7 +1186,6 @@ def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None
         patch("n8n_launcher.gui.app.prompt_clone_dest", return_value=dest),
         patch("n8n_launcher.workspaces.manager.git_pull_new_repo"),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url"),
-        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="develop"),
         patch("n8n_launcher.workspaces.manager.suggest_port", return_value=5680),
         patch("n8n_launcher.workspaces.manager.has_db_layout", return_value=False),
     ):
@@ -1195,5 +1195,5 @@ def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None
     workspace = store.load().workspaces[0]
     assert workspace.name == "flows"
     assert workspace.git.remote_url == "https://github.com/octo/flows.git"
-    assert workspace.git.branch == "develop"
+    assert workspace.git.branch == workspace_branch(workspace.id)
     assert "ghp_secret" not in str(workspace.to_dict())

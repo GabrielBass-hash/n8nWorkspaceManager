@@ -6,8 +6,8 @@ import pytest
 
 from n8n_launcher.git import (
     GitError,
-    ensure_dev_branch,
     ensure_gitignore,
+    ensure_workspace_branch,
     git_add,
     git_add_remote,
     git_clone,
@@ -26,6 +26,8 @@ from n8n_launcher.git import (
     git_remove_remote,
     git_set_remote_url,
     tokenize_remote_url,
+    workspace_branch,
+    workspace_git_lock,
 )
 from n8n_launcher.git.manager import git_current_branch
 
@@ -618,25 +620,25 @@ def test_git_ssh_env_embeds_key_and_batch_mode(tmp_path: Path) -> None:
     assert "StrictHostKeyChecking=accept-new" in command
 
 
-def test_ensure_dev_branch_noop_when_already_dev(tmp_path: Path) -> None:
+def test_ensure_workspace_branch_noop_when_already_active(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
         return_value=completed(0, "dev\n"),
     ) as run:
-        assert ensure_dev_branch(tmp_path) == "dev"
+        assert ensure_workspace_branch(tmp_path, "dev") == "dev"
     assert run.call_count == 1
     assert run.call_args.args[0] == ["git", "symbolic-ref", "--short", "HEAD"]
 
 
-def test_ensure_dev_branch_returns_none_when_not_a_repo(tmp_path: Path) -> None:
+def test_ensure_workspace_branch_returns_none_when_not_a_repo(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
         return_value=completed(128, "", "fatal: not a git repository"),
     ):
-        assert ensure_dev_branch(tmp_path) is None
+        assert ensure_workspace_branch(tmp_path, "dev") is None
 
 
-def test_ensure_dev_branch_switches_to_existing_local_dev(tmp_path: Path) -> None:
+def test_ensure_workspace_branch_switches_to_existing_local_branch(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
         side_effect=[
@@ -646,30 +648,32 @@ def test_ensure_dev_branch_switches_to_existing_local_dev(tmp_path: Path) -> Non
             completed(),  # checkout dev
         ],
     ) as run:
-        assert ensure_dev_branch(tmp_path) == "dev"
+        assert ensure_workspace_branch(tmp_path, "dev") == "dev"
 
     calls = [call.args[0] for call in run.call_args_list]
     assert calls[-1] == ["git", "checkout", "dev"]
 
 
-def test_ensure_dev_branch_switches_to_remote_dev_without_push(tmp_path: Path) -> None:
+def test_ensure_workspace_branch_switches_to_remote_branch_without_push(
+    tmp_path: Path,
+) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
         side_effect=[
             completed(0, "main\n"),
             completed(0, ""),  # HEAD exists
-            completed(0, ""),  # no local dev
-            completed(0, "refs/remotes/origin/dev\n"),  # origin/dev known
-            completed(),  # checkout -b dev origin/dev
+            completed(0, ""),  # no local branch
+            completed(0, "refs/remotes/origin/n8n/abc123\n"),  # origin branch known
+            completed(),  # checkout -b n8n/abc123 origin/n8n/abc123
         ],
     ) as run:
-        assert ensure_dev_branch(tmp_path) == "dev"
+        assert ensure_workspace_branch(tmp_path, "n8n/abc123") == "n8n/abc123"
 
     calls = [call.args[0] for call in run.call_args_list]
-    assert calls[-1] == ["git", "checkout", "-b", "dev", "origin/dev"]
+    assert calls[-1] == ["git", "checkout", "-b", "n8n/abc123", "origin/n8n/abc123"]
 
 
-def test_ensure_dev_branch_creates_local_dev_and_pushes_when_origin_lacks_dev(
+def test_ensure_workspace_branch_creates_local_and_pushes_when_origin_lacks_it(
     tmp_path: Path,
 ) -> None:
     with patch(
@@ -677,45 +681,45 @@ def test_ensure_dev_branch_creates_local_dev_and_pushes_when_origin_lacks_dev(
         side_effect=[
             completed(0, "main\n"),  # symbolic-ref
             completed(0, ""),  # HEAD exists
-            completed(0, ""),  # no local dev
-            completed(0, ""),  # no origin/dev tracking
+            completed(0, ""),  # no local branch
+            completed(0, ""),  # no origin tracking
             completed(),  # fetch origin
-            completed(0, ""),  # still no origin/dev
-            completed(),  # checkout -b dev
-            completed(0, "origin\n"),  # ensure_dev_branch git_has_remote
+            completed(0, ""),  # still no origin branch
+            completed(),  # checkout -b n8n/abc123
+            completed(0, "origin\n"),  # ensure_workspace_branch git_has_remote
             completed(0, "origin\n"),  # git_push git_has_remote
-            completed(0, "dev\n"),  # git_push _current_branch
-            completed(),  # push -u origin dev
+            completed(0, "n8n/abc123\n"),  # git_push _current_branch
+            completed(),  # push -u origin n8n/abc123
         ],
     ) as run:
-        assert ensure_dev_branch(tmp_path) == "dev"
+        assert ensure_workspace_branch(tmp_path, "n8n/abc123") == "n8n/abc123"
 
     calls = [call.args[0] for call in run.call_args_list]
-    assert ["git", "checkout", "-b", "dev"] in calls
-    assert ["git", "push", "-u", "origin", "dev"] in calls
+    assert ["git", "checkout", "-b", "n8n/abc123"] in calls
+    assert ["git", "push", "-u", "origin", "n8n/abc123"] in calls
 
 
-def test_ensure_dev_branch_fetches_then_uses_remote_dev(tmp_path: Path) -> None:
+def test_ensure_workspace_branch_fetches_then_uses_remote_branch(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
         side_effect=[
             completed(0, "main\n"),
             completed(0, ""),  # HEAD exists
-            completed(0, ""),  # no local dev
-            completed(0, ""),  # no origin/dev tracking yet
+            completed(0, ""),  # no local branch
+            completed(0, ""),  # no origin tracking yet
             completed(),  # fetch origin
-            completed(0, "refs/remotes/origin/dev\n"),  # now present
-            completed(),  # checkout -b dev origin/dev
+            completed(0, "refs/remotes/origin/n8n/abc123\n"),  # now present
+            completed(),  # checkout -b n8n/abc123 origin/n8n/abc123
         ],
     ) as run:
-        assert ensure_dev_branch(tmp_path) == "dev"
+        assert ensure_workspace_branch(tmp_path, "n8n/abc123") == "n8n/abc123"
 
     calls = [call.args[0] for call in run.call_args_list]
     assert ["git", "fetch", "origin"] in calls
-    assert calls[-1] == ["git", "checkout", "-b", "dev", "origin/dev"]
+    assert calls[-1] == ["git", "checkout", "-b", "n8n/abc123", "origin/n8n/abc123"]
 
 
-def test_ensure_dev_branch_renames_unborn_main_to_dev(tmp_path: Path) -> None:
+def test_ensure_workspace_branch_renames_unborn_main(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
         side_effect=[
@@ -724,9 +728,14 @@ def test_ensure_dev_branch_renames_unborn_main_to_dev(tmp_path: Path) -> None:
             completed(),  # symbolic-ref HEAD refs/heads/dev
         ],
     ) as run:
-        assert ensure_dev_branch(tmp_path) == "dev"
+        assert ensure_workspace_branch(tmp_path, "dev") == "dev"
 
     assert run.call_args.args[0] == ["git", "symbolic-ref", "HEAD", "refs/heads/dev"]
+
+
+def test_workspace_branch_is_per_id(tmp_path: Path) -> None:
+    assert workspace_branch("ab12cd34") == "n8n/ab12cd34"
+    assert workspace_branch("xyz") == "n8n/xyz"
 
 
 def test_git_remote_url_named(tmp_path: Path) -> None:
@@ -743,3 +752,37 @@ def test_git_remote_url_named(tmp_path: Path) -> None:
         ["git", "remote", "get-url", "server"],
         ["git", "remote", "get-url", "server"],
     ]
+
+
+def test_workspace_git_lock_is_noop_outside_a_repo(tmp_path: Path) -> None:
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            return_value=completed(128, "", "fatal: not a git repository"),
+        ),
+        workspace_git_lock(tmp_path),
+    ):
+        pass
+    assert not (tmp_path / ".n8n-launcher.git.lock").exists()
+
+
+def test_workspace_git_lock_creates_and_releases_lock_file(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, "/tmp/.git\n"),
+    ):
+        with workspace_git_lock(tmp_path):
+            assert (tmp_path / ".n8n-launcher.git.lock").exists()
+            # Re-entrant across nested layers shares one OS lock.
+            with workspace_git_lock(tmp_path):
+                pass
+        # After the outermost layer, the OS lock is released and the file may
+        # be taken safely by a fresh process.
+        with workspace_git_lock(tmp_path):
+            pass
+
+
+def test_gitignore_locks_out_the_git_lock_file() -> None:
+    from n8n_launcher.git.manager import GITIGNORE_BODY
+
+    assert ".n8n-launcher.git.lock" in GITIGNORE_BODY

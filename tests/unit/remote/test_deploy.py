@@ -6,7 +6,9 @@ generated ``deploy.py`` are exercised by ``exec``-ing its source, so the code
 that actually runs in production is the code under test.
 """
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from n8n_launcher.core.models import DbConfig, DbMode, ServerConfig, Workspace
 from n8n_launcher.remote import deploy
@@ -91,14 +93,31 @@ def test_render_deploy_script_contains_marker_and_stdlib_only() -> None:
 
 
 def test_render_hook_contains_marker_and_filters_main() -> None:
-    hook = deploy.render_hook(CFG)
+    hook = deploy.render_hook(CFG, "abc123")
 
     assert deploy.GENERATED_MARKER in hook
     assert "refs/heads/main" in hook
     assert "git archive" in hook
-    assert "docker compose up -d" in hook
+    assert "docker compose -p" in hook
+    assert "up -d" in hook
     assert '--git-dir="$BARE"' in hook
     assert "n8n-launcher/abc123.git" in hook
+    assert "last-deploy.json" in hook
+
+
+def test_render_hook_pins_the_compose_project() -> None:
+    hook = deploy.render_hook(CFG, "abc123")
+
+    assert "PROJECT='n8n-ws-abc123'" in hook
+    assert 'docker compose -p "$PROJECT" up -d' in hook
+    assert 'DEPLOY_PROJECT="$PROJECT"' in hook
+
+
+def test_render_hook_writes_marker_atomically() -> None:
+    hook = deploy.render_hook(CFG, "abc123")
+
+    assert 'path + ".tmp"' in hook or '".tmp"' in hook
+    assert "os.replace" in hook
     assert "last-deploy.json" in hook
 
 
@@ -123,11 +142,15 @@ def test_deploy_collect_workflow_files(tmp_path: Path) -> None:
     (tmp_path / "root.json").write_text("{}", encoding="utf-8")
     (tmp_path / "notes.txt").write_text("nope", encoding="utf-8")
     (tmp_path / "compose.yml").write_text("ignored", encoding="utf-8")
+    # The publish mirror also copies pipelines files at the root; the canonical
+    # pipeline copy wins so the workflow is not uploaded twice.
+    (tmp_path / "b.json").write_text("{}", encoding="utf-8")
 
     files = ns["collect_workflow_files"](str(tmp_path))
 
     names = [Path(f).name for f in files]
     assert sorted(names) == ["a.json", "b.json", "root.json"]
+    assert [Path(f).name for f in files].count("b.json") == 1
 
 
 def test_deploy_collect_workflow_files_missing_pipelines(tmp_path: Path) -> None:
@@ -242,6 +265,57 @@ def test_deploy_load_secrets(tmp_path: Path) -> None:
 
     assert data["owner_email"] == "o@test"
     assert data["credentials"] == []
+
+
+def test_deploy_pins_project_and_uses_it_for_compose(tmp_path: Path) -> None:
+    migrations = tmp_path / "db" / "migrations"
+    migrations.mkdir(parents=True)
+    (migrations / "001_x.sql").write_text("SELECT 1;\n", encoding="utf-8")
+    os.environ["DEPLOY_PROJECT"] = "n8n-ws-abc123"
+    os.environ["DEPLOY_CHECKOUT"] = str(tmp_path)
+    try:
+        ns = _exec_deploy()
+
+        assert ns["PROJECT"] == "n8n-ws-abc123"
+        assert ns["COMPOSE_CMD"] == ["docker", "compose", "-p", "n8n-ws-abc123"]
+
+        # run_migrations resolves the postgres service via the pinned project.
+        with patch.object(ns["subprocess"], "run") as run:
+            run.side_effect = [
+                CompletedProcessStub(["docker", "compose"], 0, "postgres\nn8n\n", ""),
+                CompletedProcessStub(["docker", "compose"], 0, "", ""),
+            ]
+            ns["run_migrations"]()
+
+        first, second = run.call_args_list
+        assert first.args[0][:4] == ["docker", "compose", "-p", "n8n-ws-abc123"]
+        assert first.args[0][4:] == ["config", "--services"]
+        assert second.args[0][:4] == ["docker", "compose", "-p", "n8n-ws-abc123"]
+        assert "postgres" in second.args[0]
+    finally:
+        os.environ.pop("DEPLOY_PROJECT", None)
+        os.environ.pop("DEPLOY_CHECKOUT", None)
+
+
+class CompletedProcessStub:
+    """Minimal stand-in for the subprocess result used by exec-based tests."""
+
+    def __init__(self, argv, returncode, stdout, stderr):
+        self.argv = argv
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_deploy_write_marker_is_atomic(tmp_path: Path) -> None:
+    ns = _exec_deploy()
+    ns["MARKER"] = str(tmp_path / "last-deploy.json")
+    ns["SHA"] = "deadbeef"
+
+    ns["write_marker"]("ok")
+
+    assert '"status": "ok"' in (tmp_path / "last-deploy.json").read_text(encoding="utf-8")
+    assert not (tmp_path / "last-deploy.json.tmp").exists()
 
 
 def test_build_secrets_document(tmp_path: Path) -> None:

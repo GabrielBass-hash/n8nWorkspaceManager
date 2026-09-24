@@ -125,9 +125,12 @@ def write_remote_file(cfg: ServerConfig, path: str, content: str) -> None:
 
     The file is streamed through the ssh process stdin, so it accepts
     arbitrary bytes (generated scripts, JSON) without shell mangling. The
-    remote ``cat`` keeps the exact content.
+    write is atomic: the bytes land in ``<path>.tmp`` first, then ``mv``
+    replaces the final file, so a reader (e.g. ``_poll_deploy`` tailing
+    ``last-deploy.json``) never observes a half-written document.
     """
-    ssh_run(cfg, f"cat > {_remote_quote(path)}", stdin=content, timeout=60.0)
+    quoted = _remote_quote(path)
+    ssh_run(cfg, f"cat > {quoted}.tmp && mv -f {quoted}.tmp {quoted}", stdin=content, timeout=60.0)
 
 
 def chmod_remote(cfg: ServerConfig, path: str, mode: str = "+x") -> None:

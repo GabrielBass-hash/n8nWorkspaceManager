@@ -6,8 +6,8 @@ The public surface is re-exported here so consumers can import from
 
 from .manager import (
     GitError,
-    ensure_dev_branch,
     ensure_gitignore,
+    ensure_workspace_branch,
     git_add,
     git_add_remote,
     git_clone,
@@ -25,15 +25,18 @@ from .manager import (
     git_push_ref,
     git_remote_url,
     git_remove_remote,
+    git_seed_remote,
     git_set_remote_url,
     git_ssh_env,
     tokenize_remote_url,
+    workspace_branch,
+    workspace_git_lock,
 )
 
 __all__ = [
     "GitError",
-    "ensure_dev_branch",
     "ensure_gitignore",
+    "ensure_workspace_branch",
     "git_add",
     "git_add_remote",
     "git_clone",
@@ -51,7 +54,10 @@ __all__ = [
     "git_push_ref",
     "git_remote_url",
     "git_remove_remote",
+    "git_seed_remote",
     "git_set_remote_url",
     "git_ssh_env",
     "tokenize_remote_url",
+    "workspace_branch",
+    "workspace_git_lock",
 ]

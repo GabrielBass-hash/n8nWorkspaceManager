@@ -186,7 +186,7 @@ class Workspace:
             db=DbConfig.from_dict(db_data),
             git=GitConfig.from_dict(data.get("git")),
             server=ServerConfig.from_dict(data.get("server")),
-            n8n_version=data.get("n8n_version", "2.33.3"),
+            n8n_version=data.get("n8n_version", "2.40.0"),
             postgres_image=data.get("postgres_image"),
             postgres_preload_timescaledb=bool(data.get("postgres_preload_timescaledb", False)),
             state=state,

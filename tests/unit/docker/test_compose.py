@@ -114,6 +114,9 @@ def test_render_remote_compose_binds_loopback_remote_port(tmp_path) -> None:
     # The remote image/name/volume isolation is identical to the local render.
     assert "image: n8nio/n8n:2.40.0" in rendered
     assert "n8ndata-abc:/home/node/.n8n" in rendered
+    # The project is pinned by a top-level name so the server hook and
+    # deploy.py reach the right isolated project whatever the directory name.
+    assert rendered.startswith("name: n8n-ws-abc\n")
 
 
 def test_render_remote_compose_defaults_loopback_port(tmp_path) -> None:
