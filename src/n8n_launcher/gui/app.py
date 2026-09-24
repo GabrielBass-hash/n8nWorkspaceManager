@@ -1970,7 +1970,7 @@ class LauncherApp:
             None,
         )
         if current is None:
-            raise WorkspaceError(f"Unknown workspace: {workspace.id}")
+            raise WorkspaceError(f"Workspace inconnu : {workspace.id}")
         needs_bootstrap = not bool(current.api_key)
         self.workspace_manager.ensure_running(current.id, on_ready=self._wait_until_healthy)
         if needs_bootstrap:
@@ -2017,16 +2017,18 @@ class LauncherApp:
                 if api_response is not None and _api_router_mounted(api_response):
                     return
             if time.monotonic() >= deadline:
-                raise RuntimeError(f"n8n did not become ready on {url} within {timeout:.0f}s")
+                raise RuntimeError(
+                    f"n8n n'est pas devenu prêt sur {url} dans les {timeout:.0f}s"
+                )
             time.sleep(interval)
 
     def _selected(self) -> Workspace:
         if self._selected_id is None:
-            raise ValueError("Select a workflow first")
+            raise ValueError("Sélectionnez d'abord un workspace")
         for workspace in self.workspace_manager.list():
             if workspace.id == self._selected_id:
                 return workspace
-        raise ValueError("Select a workflow first")
+        raise ValueError("Sélectionnez d'abord un workspace")
 
     def _selected_or_warn(self) -> Workspace | None:
         try:

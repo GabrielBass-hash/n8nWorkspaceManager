@@ -222,7 +222,7 @@ class WorkspaceManager:
     ) -> Workspace:
         """Create and persist a new workspace, scaffolding its folders."""
         if not name.strip():
-            raise WorkspaceError("Workspace name is required")
+            raise WorkspaceError("Le nom du workspace est requis")
         reserved = {workspace.port for workspace in self.store.load().workspaces}
         workspace_id = uuid4().hex[:8]
         migrations = detect_migrations(workflows_dir)
@@ -240,7 +240,7 @@ class WorkspaceManager:
             )
         selected_port = port or suggest_port(reserved=reserved)
         if selected_port in reserved:
-            raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
+            raise WorkspaceError(f"Le port {selected_port}")
         self._scaffold(workflows_dir, db)
         workspace = Workspace(
             id=workspace_id,
@@ -255,7 +255,7 @@ class WorkspaceManager:
             # Re-check under the lock: a concurrent creation may have claimed
             # the port suggested from an earlier snapshot.
             if workspace.port in {item.port for item in config.workspaces}:
-                raise WorkspaceError(f"Port is already used by another workspace: {workspace.port}")
+                raise WorkspaceError(f"Le port {workspace.port}")
             config.workspaces.append(workspace)
             return workspace
 
@@ -320,7 +320,7 @@ class WorkspaceManager:
         reserved = {workspace.port for workspace in self.store.load().workspaces}
         selected_port = port or suggest_port(reserved=reserved)
         if selected_port in reserved:
-            raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
+            raise WorkspaceError(f"Le port {selected_port}")
 
         # ``git clone`` checks out the remote's default branch; the launcher
         # then works on its canonical ``dev`` branch (switched right after the
@@ -340,7 +340,7 @@ class WorkspaceManager:
             # Re-check under the lock: a concurrent creation may have claimed
             # the port suggested from an earlier snapshot.
             if workspace.port in {item.port for item in config.workspaces}:
-                raise WorkspaceError(f"Port is already used by another workspace: {workspace.port}")
+                raise WorkspaceError(f"Le port {workspace.port}")
             config.workspaces.append(workspace)
             return workspace
 
@@ -353,7 +353,9 @@ class WorkspaceManager:
         allowed = {"name", "workflows_dir", "port", "db", "git", "n8n_version", "server"}
         unknown = set(changes) - allowed
         if unknown:
-            raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
+            raise WorkspaceError(
+                f"Champs de workspace non pris en charge : {', '.join(sorted(unknown))}"
+            )
 
         if "server" in changes:
             server = changes["server"]
@@ -381,7 +383,7 @@ class WorkspaceManager:
         def remove(config: AppConfig) -> None:
             workspace = self._find(config, workspace_id)
             if workspace.state is not WorkspaceState.STOPPED:
-                raise WorkspaceError("Workspace must be stopped before deletion")
+                raise WorkspaceError("Le workspace doit être arrêté avant suppression")
             config.workspaces.remove(workspace)
 
         self.store.mutate(remove)
@@ -1261,7 +1263,7 @@ class WorkspaceManager:
         for workspace in config.workspaces:
             if workspace.id == workspace_id:
                 return workspace
-        raise WorkspaceError(f"Unknown workspace: {workspace_id}")
+        raise WorkspaceError(f"Workspace inconnu : {workspace_id}")
 
     @staticmethod
     def _server_port_conflict(

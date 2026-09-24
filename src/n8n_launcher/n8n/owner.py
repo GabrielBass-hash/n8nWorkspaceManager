@@ -65,7 +65,7 @@ class OwnerSetup:
         )
         token = login.get("data", {}).get("token")
         if not token and "n8n-auth" not in self.session.cookies:
-            raise OwnerSetupError("n8n login did not return a session token")
+            raise OwnerSetupError("La connexion n8n n'a pas renvoyé de jeton de session")
         self._remove_launcher_keys(root)
         response = self._request(
             "POST",
@@ -74,7 +74,7 @@ class OwnerSetup:
         )
         api_key = response.get("data", {}).get("rawApiKey") or response.get("rawApiKey")
         if not api_key:
-            raise OwnerSetupError("n8n did not return an API key")
+            raise OwnerSetupError("n8n n'a pas renvoyé de clé API")
         return ApiCredentials(api_key)
 
     def _remove_launcher_keys(self, root: str) -> None:
@@ -118,18 +118,18 @@ class OwnerSetup:
                     raise
                 last_error = exc
             except requests.RequestException as exc:
-                last_error = OwnerSetupError(f"n8n owner setup request failed: {exc}")
+                last_error = OwnerSetupError(f"La requête de configuration du compte n8n a échoué : {exc}")
             time.sleep(2.0)
-        raise last_error or OwnerSetupError("n8n did not become ready for owner setup")
+        raise last_error or OwnerSetupError("n8n n'est pas devenu prêt pour la configuration du compte propriétaire")
 
     def _request(self, method: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = self.session.request(method, url, json=payload, timeout=self.timeout)
         if not response.ok:
             detail = response.text[:300].strip() or response.reason
-            raise OwnerSetupError(f"n8n returned HTTP {response.status_code}: {detail}")
+            raise OwnerSetupError(f"n8n a renvoyé HTTP {response.status_code} : {detail}")
         try:
             return response.json()
         except ValueError as exc:
             raise OwnerSetupError(
-                f"n8n returned a non-JSON response: {response.text[:120].strip()!r}"
+                f"n8n a renvoyé une réponse non-JSON : {response.text[:120].strip()!r}"
             ) from exc

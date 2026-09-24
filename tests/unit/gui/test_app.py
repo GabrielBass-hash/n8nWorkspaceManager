@@ -377,7 +377,7 @@ def test_launch_reports_health_timeout(app, gui_mocks) -> None:
         app.app._drain_events()
 
     app.browser.assert_not_called()
-    assert "did not become ready" in app.mocks.messagebox.errors[0]
+    assert "n'est pas devenu prêt" in app.mocks.messagebox.errors[0]
 
 
 def test_wait_until_healthy_waits_through_api_404_window(app, gui_mocks) -> None:
@@ -409,7 +409,7 @@ def test_wait_until_healthy_times_out_when_router_stuck_on_404(app, gui_mocks) -
     with (
         patch("n8n_launcher.gui.app.requests.get", side_effect=fake_get),
         patch("n8n_launcher.gui.app.time.monotonic", side_effect=[0, 1, 300]),
-        pytest.raises(RuntimeError, match="did not become ready"),
+        pytest.raises(RuntimeError, match="n'est pas devenu prêt"),
     ):
         app.app._wait_until_healthy(5678)
 
@@ -440,7 +440,7 @@ def test_action_without_selection_warns_instead_of_crashing(app) -> None:
     app.app.launch_selected()
     app.app.open_workflows()
 
-    assert app.mocks.messagebox.warnings == ["Select a workflow first"] * 2
+    assert app.mocks.messagebox.warnings == ["Sélectionnez d'abord un workspace"] * 2
     app.manager.ensure_running.assert_not_called()
     app.manager.stop.assert_not_called()
 

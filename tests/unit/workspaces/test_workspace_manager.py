@@ -483,7 +483,7 @@ def test_ensure_running_propagates_bootstrap_error(tmp_path: Path) -> None:
 def test_ensure_running_unknown_workspace(tmp_path: Path) -> None:
     launcher, _, _, booter = manager(tmp_path)
 
-    with pytest.raises(WorkspaceError, match="Unknown workspace"):
+    with pytest.raises(WorkspaceError, match="Workspace inconnu"):
         launcher.ensure_running("nope")
 
     booter.assert_not_called()
@@ -1624,7 +1624,7 @@ def test_update_rejects_unknown_fields(tmp_path: Path) -> None:
     launcher, _, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with pytest.raises(WorkspaceError, match="Unsupported"):
+    with pytest.raises(WorkspaceError, match="Champs de workspace non pris en charge"):
         launcher.update(workspace.id, server_enabled=True)
 
 

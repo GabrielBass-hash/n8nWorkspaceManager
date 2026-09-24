@@ -162,7 +162,7 @@ class MigrationRunner:
                 time.sleep(interval)
                 continue
         if last_error is None:
-            raise DockerError("PostgreSQL did not become reachable for migrations")
+            raise DockerError("PostgreSQL n'est pas devenu joignable pour les migrations")
         if check:
             raise last_error
         return last_error
