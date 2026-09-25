@@ -16,6 +16,7 @@ from n8n_launcher.core.models import (
 )
 from n8n_launcher.docker.manager import ComposeStatus, DockerError
 from n8n_launcher.git import GitError, workspace_branch
+from n8n_launcher.github.api import GitHubError
 from n8n_launcher.n8n.api import N8nApiError
 from n8n_launcher.n8n.owner import OwnerSetupError
 from n8n_launcher.remote.ssh import SshError
@@ -23,7 +24,7 @@ from n8n_launcher.workspaces.manager import WorkspaceError, WorkspaceManager
 
 
 def manager(tmp_path: Path) -> tuple[WorkspaceManager, ConfigStore, MagicMock, MagicMock]:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock(return_value="api-key-123")
@@ -286,7 +287,7 @@ def test_start_managed_applies_migrations(tmp_path: Path) -> None:
 def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock(return_value="api-key-123")
@@ -311,7 +312,7 @@ def test_ensure_running_starts_stopped_and_bootstraps_owner(tmp_path: Path) -> N
 def test_ensure_running_calls_on_ready_with_port_after_start(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     launcher = WorkspaceManager(
@@ -335,7 +336,7 @@ def test_ensure_running_calls_on_ready_with_port_after_start(tmp_path: Path) -> 
 def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock()
@@ -360,7 +361,7 @@ def test_ensure_running_skips_bootstrap_when_key_present(tmp_path: Path) -> None
 def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     docker = MagicMock()
     booter = MagicMock(return_value="api-key-123")
@@ -382,7 +383,7 @@ def test_ensure_running_running_without_key_only_bootstraps(tmp_path: Path) -> N
 def test_ensure_running_skips_credentials_without_database(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -413,7 +414,7 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
             N8nApiError(label, status_code=status_code),
             None,
         ]
-        store = ConfigStore(tmp_path / "config.json")
+        store = ConfigStore(tmp_path / "launcher.db")
         store.save(AppConfig("owner@example.test", "secret", tmp_path))
         docker = MagicMock()
         booter = MagicMock(return_value="rotated-key")
@@ -438,7 +439,7 @@ def test_ensure_running_rotates_key_on_forbidden_scope(tmp_path: Path) -> None:
 def test_ensure_running_imports_folder_workflows(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -482,7 +483,7 @@ def test_ensure_running_propagates_bootstrap_error(tmp_path: Path) -> None:
 def test_ensure_running_unknown_workspace(tmp_path: Path) -> None:
     launcher, _, _, booter = manager(tmp_path)
 
-    with pytest.raises(WorkspaceError, match="Unknown workspace"):
+    with pytest.raises(WorkspaceError, match="Workspace inconnu"):
         launcher.ensure_running("nope")
 
     booter.assert_not_called()
@@ -725,7 +726,7 @@ def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> N
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_init") as init,
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore") as ensure_ignore,
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes") as ensure_ignore,
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_add_remote") as add_remote,
     ):
@@ -749,7 +750,7 @@ def test_git_init_workspace_detaches_remote_when_url_cleared(tmp_path: Path) -> 
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True) as is_repo,
         patch("n8n_launcher.workspaces.manager.git_init") as init,
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove_remote,
     ):
@@ -791,7 +792,7 @@ def test_configure_git_sets_remote_url(tmp_path: Path) -> None:
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url") as set_url,
     ):
@@ -815,7 +816,7 @@ def test_configure_git_detaches_remote_when_url_cleared(tmp_path: Path) -> None:
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_remove_remote") as remove_remote,
     ):
@@ -841,7 +842,7 @@ def test_git_init_workspace_preserves_ci_metadata(tmp_path: Path) -> None:
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_init"),
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_add_remote"),
     ):
@@ -865,7 +866,7 @@ def test_configure_git_preserves_ci_metadata(tmp_path: Path) -> None:
     store.save(config)
 
     with (
-        patch("n8n_launcher.workspaces.manager.ensure_gitignore"),
+        patch("n8n_launcher.workspaces.manager.ensure_local_excludes"),
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_set_remote_url"),
     ):
@@ -960,7 +961,7 @@ def test_configure_db_managed_noop_when_identity_unchanged(tmp_path: Path) -> No
 def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -989,7 +990,7 @@ def test_ensure_running_pulls_before_import_when_git_enabled(tmp_path: Path) -> 
 def test_ensure_running_skips_pull_when_git_disabled(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_workflows.return_value = []
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     booter = MagicMock(return_value="api-key-123")
     launcher = WorkspaceManager(
@@ -1008,6 +1009,90 @@ def test_ensure_running_skips_pull_when_git_disabled(tmp_path: Path) -> None:
         launcher.ensure_running(launcher.list()[0].id)
 
     pull.assert_not_called()
+
+
+def git_workspace(launcher, store, tmp_path: Path) -> Workspace:
+    """Persist *workspace* with git enabled under tmp_path and reload it."""
+    config = store.load()
+    config.workspaces[0].git = GitConfig(enabled=True, remote_url="https://example.test/repo.git")
+    store.save(config)
+    return launcher.list()[0]
+
+
+def test_ensure_workspace_branch_renames_legacy_main_to_dev(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace = git_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="main"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True
+        ) as rename,
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+        patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    rename.assert_called_once_with(workspace.workflows_dir, "dev")
+    push.assert_called_once_with(workspace.workflows_dir)
+
+
+def test_ensure_workspace_branch_renames_legacy_per_id_branch(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace = git_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="n8n/abcd1234"),
+        patch(
+            "n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True
+        ) as rename,
+        patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+        patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    rename.assert_called_once_with(workspace.workflows_dir, "dev")
+    # No remote → the renamed branch is not pushed yet (close flow will do it).
+    push.assert_not_called()
+
+
+def test_ensure_workspace_branch_does_not_rename_dev(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace = git_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_rename_current_branch") as rename,
+        patch("n8n_launcher.workspaces.manager.git_has_remote"),
+        patch("n8n_launcher.workspaces.manager.git_push") as push,
+        patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    rename.assert_not_called()
+    push.assert_not_called()
+
+
+def test_ensure_workspace_branch_skipped_when_git_disabled(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo") as is_repo,
+        patch("n8n_launcher.workspaces.manager.git_rename_current_branch") as rename,
+    ):
+        launcher._ensure_workspace_branch(workspace)
+
+    is_repo.assert_not_called()
+    rename.assert_not_called()
 
 
 def github_workspace(launcher, store, tmp_path: Path, port: int = 5701) -> Workspace:
@@ -1031,10 +1116,13 @@ def test_enable_ci_writes_harness_and_commits(tmp_path: Path) -> None:
             "n8n_launcher.workspaces.manager.git_remote_url",
             return_value="https://github.com/owner/repo.git",
         ),
+        patch.object(launcher, "_ensure_workspace_branch") as ensured,
         patch.object(launcher, "_commit_and_push") as commit,
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
     ):
         enabled = launcher.enable_ci(workspace)
 
+    ensured.assert_called_once_with(workspace)
     assert enabled.git.ci_enabled is True
     assert (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").is_file()
     assert (workspace.workflows_dir / ".n8n-tests" / "runner.py").is_file()
@@ -1097,11 +1185,70 @@ def test_enable_ci_preserves_existing_selection(tmp_path: Path) -> None:
             "n8n_launcher.workspaces.manager.git_remote_url",
             return_value="https://github.com/owner/repo.git",
         ),
+        patch.object(launcher, "_ensure_workspace_branch"),
         patch.object(launcher, "_commit_and_push"),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
     ):
         launcher.enable_ci(workspace)
 
     assert '"n8nPipelines/keep.json"' in selection.read_text(encoding="utf-8")
+
+
+def test_ensure_ci_default_branch_patches_repo_when_token_available(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    client = MagicMock()
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value="ghp_x"),
+        patch("n8n_launcher.workspaces.manager.GitHubClient", return_value=client),
+    ):
+        launcher._ensure_ci_default_branch(workspace)
+
+    client.set_default_branch.assert_called_once_with("owner/repo", "dev")
+
+
+def test_ensure_ci_default_branch_skipped_without_token(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
+        patch("n8n_launcher.workspaces.manager.GitHubClient") as client,
+    ):
+        launcher._ensure_ci_default_branch(workspace)
+
+    client.assert_not_called()
+
+
+def test_ensure_ci_default_branch_logs_api_failure(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = github_workspace(launcher, store, tmp_path)
+
+    client = MagicMock()
+    client.set_default_branch.side_effect = GitHubError("forbidden", status_code=403)
+    with (
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="https://github.com/owner/repo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value="ghp_x"),
+        patch("n8n_launcher.workspaces.manager.GitHubClient", return_value=client),
+    ):
+        launcher._ensure_ci_default_branch(workspace)
+
+    client.set_default_branch.assert_called_once_with("owner/repo", "dev")
 
 
 def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
@@ -1113,15 +1260,22 @@ def test_disable_ci_removes_harness_but_keeps_selection(tmp_path: Path) -> None:
             "n8n_launcher.workspaces.manager.git_remote_url",
             return_value="https://github.com/owner/repo.git",
         ),
+        patch.object(launcher, "_ensure_workspace_branch"),
         patch.object(launcher, "_commit_and_push"),
+        patch("n8n_launcher.workspaces.manager.auth.resolve_github_token", return_value=None),
     ):
         launcher.enable_ci(workspace)
     selection = workspace.workflows_dir / ".n8n-tests" / "tests.json"
     selection.write_text('{"selected": ["n8nPipelines/keep.json"]}', encoding="utf-8")
 
-    with patch.object(launcher, "_commit_and_push") as commit:
-        disabled = launcher.disable_ci(launcher.list()[0])
+    current = launcher.list()[0]
+    with (
+        patch.object(launcher, "_ensure_workspace_branch") as ensured,
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
+        disabled = launcher.disable_ci(current)
 
+    ensured.assert_called_once_with(current)
     assert disabled.git.ci_enabled is False
     assert not (workspace.workflows_dir / ".github" / "workflows" / "n8n-ci.yml").exists()
     assert not (workspace.workflows_dir / ".n8n-tests" / "runner.py").exists()
@@ -1147,9 +1301,13 @@ def test_save_ci_selection_pushes_when_requested(tmp_path: Path) -> None:
     launcher, _store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with patch.object(launcher, "_commit_and_push") as commit:
+    with (
+        patch.object(launcher, "_ensure_workspace_branch") as ensured,
+        patch.object(launcher, "_commit_and_push") as commit,
+    ):
         launcher.save_ci_selection(workspace, {"n8nPipelines/a.json"}, push=True)
 
+    ensured.assert_called_once_with(workspace)
     commit.assert_called_once_with(
         workspace, "n8n-launcher: mettre à jour les tests GitHub Actions"
     )
@@ -1177,7 +1335,7 @@ def test_ci_credentials_payload_reads_values_from_api(tmp_path: Path) -> None:
         "type": "httpRequest",
         "data": {"user": "u", "password": "p"},
     }
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     launcher = WorkspaceManager(store, MagicMock(), api_factory=MagicMock(return_value=fake_api))
     workspace = create_none(launcher, tmp_path)
@@ -1205,7 +1363,7 @@ def test_ci_credentials_payload_requires_api_key(tmp_path: Path) -> None:
 def test_ci_credentials_payload_reports_missing(tmp_path: Path) -> None:
     fake_api = MagicMock()
     fake_api.list_credentials.return_value = [{"id": "c1", "name": "Other", "type": "postgres"}]
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     launcher = WorkspaceManager(store, MagicMock(), api_factory=MagicMock(return_value=fake_api))
     workspace = create_none(launcher, tmp_path)
@@ -1470,7 +1628,7 @@ def test_update_rejects_unknown_fields(tmp_path: Path) -> None:
     launcher, _, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
-    with pytest.raises(WorkspaceError, match="Unsupported"):
+    with pytest.raises(WorkspaceError, match="Champs de workspace non pris en charge"):
         launcher.update(workspace.id, server_enabled=True)
 
 

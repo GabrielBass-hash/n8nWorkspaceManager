@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import tkinter as tk
+import weakref
 from collections.abc import Callable
 from datetime import datetime
 from tkinter import ttk
@@ -166,7 +167,10 @@ class RunsPanel(tk.Frame):
     run while one is running would cancel the live one.
     """
 
-    instances: ClassVar[list[RunsPanel]] = []
+    # Panels alive in this process. Held weakly so a closed dialog does not
+    # keep its widget tree (and Tcl interpreter plumbing) alive after the
+    # host has dropped its own references.
+    instances: ClassVar[weakref.WeakSet[RunsPanel]] = weakref.WeakSet()
 
     def __init__(
         self,
@@ -183,7 +187,7 @@ class RunsPanel(tk.Frame):
         self._expanded: set[str] = set()
         self._active: set[str] = set()
         self._last: ci_runs.RunsSnapshot = ci_runs.RunsSnapshot("")
-        RunsPanel.instances.append(self)
+        RunsPanel.instances.add(self)
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
         header.pack(fill="x", padx=14, pady=(10, 4))

@@ -396,3 +396,29 @@ def test_dispatch_workflow_wraps_network_errors() -> None:
         client.dispatch_workflow("octo/repo", "wf.yml", ref="main")
 
     assert "requête GitHub impossible" in str(excinfo.value)
+
+
+def test_set_default_branch_patches_repo() -> None:
+    url = "https://api.github.com/repos/octo/repo"
+    session = FakeSession({("PATCH", url): FakeResponse(200, {"default_branch": "main"})})
+    client = GitHubClient("ghp_token", session=session)
+
+    client.set_default_branch("octo/repo", "dev")
+
+    method, _url, kwargs = session.calls[0]
+    assert method == "PATCH"
+    assert kwargs["json"] == {"default_branch": "dev"}
+
+
+def test_set_default_branch_raises_with_status_on_403() -> None:
+    url = "https://api.github.com/repos/octo/repo"
+    session = FakeSession(
+        {("PATCH", url): FakeResponse(403, {"message": "Must have admin rights"})}
+    )
+    client = GitHubClient("ghp_token", session=session)
+
+    with pytest.raises(GitHubError) as excinfo:
+        client.set_default_branch("octo/repo", "dev")
+
+    assert excinfo.value.status_code == 403
+    assert "Must have admin rights" in str(excinfo.value)

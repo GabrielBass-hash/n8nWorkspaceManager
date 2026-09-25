@@ -106,7 +106,7 @@ class ConfigStore:
                     if self._legacy_json is not None and self._legacy_json.exists():
                         self._migrate_legacy()
                     else:
-                        raise ConfigError("Launcher configuration does not exist")
+                        raise ConfigError("La configuration du launcher n'existe pas")
                 with self._connect() as conn:
                     return self._read(conn)
             except (OSError, sqlite3.Error) as exc:
@@ -143,7 +143,7 @@ class ConfigStore:
                     if self._legacy_json is not None and self._legacy_json.exists():
                         self._migrate_legacy()
                     else:
-                        raise ConfigError("Launcher configuration does not exist")
+                        raise ConfigError("La configuration du launcher n'existe pas")
                 conn = self._connect()
                 with self._transaction(conn):
                     config = self._read(conn)
@@ -206,7 +206,7 @@ class ConfigStore:
         """Read and validate the stored configuration (callers hold the lock)."""
         meta = dict(conn.execute("SELECT key, value FROM meta"))
         if "owner_email" not in meta:
-            raise ConfigError("Launcher configuration does not exist")
+            raise ConfigError("Configuration launcher vide ou incomplète")
         payload: dict[str, object] = {key: meta.get(key) or None for key in _APP_KEYS}
         try:
             payload["workspaces"] = [
@@ -252,7 +252,7 @@ class ConfigStore:
         """Import a legacy ``config.json`` once into the SQLite database."""
         legacy = self._legacy_json
         if legacy is None:
-            raise ConfigError("Launcher configuration does not exist")
+            raise ConfigError("La configuration du launcher n'existe pas")
         try:
             with legacy.open(encoding="utf-8") as handle:
                 config = AppConfig.from_dict(json.load(handle))

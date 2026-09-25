@@ -58,7 +58,7 @@ def test_on_close_retries_sync_then_destroys(app) -> None:
 
 
 def test_on_close_destroys_when_no_workspaces(gui_mocks, tmp_path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     manager.list.return_value = []

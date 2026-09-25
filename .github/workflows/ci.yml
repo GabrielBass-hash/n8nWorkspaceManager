@@ -122,7 +122,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run integration tests
-        run: uv run pytest -m integration --junitxml=pytest-report-integration.xml
+        run: uv run pytest tests/integration -m integration --junitxml=pytest-report-integration.xml
 
       - name: Upload pytest report
         uses: actions/upload-artifact@v4

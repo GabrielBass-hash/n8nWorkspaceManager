@@ -16,6 +16,8 @@ from uuid import uuid4
 
 from ..core.config import ConfigStore
 from ..core.models import (
+    WORKSPACE_DATA_DB_NAME,
+    WORKSPACE_DATA_DB_USER,
     AppConfig,
     DbConfig,
     DbMode,
@@ -26,8 +28,6 @@ from ..core.models import (
 )
 from ..core.paths import compose_file
 from ..database import (
-    DATA_DATABASE,
-    DATA_USER,
     MigrationRunner,
     configure_db_credential,
     detect_migrations,
@@ -37,7 +37,7 @@ from ..docker.compose import compose_project_name, render_remote_compose, write_
 from ..docker.manager import DockerManager, parse_compose_status
 from ..git import (
     GitError,
-    ensure_gitignore,
+    ensure_local_excludes,
     ensure_workspace_branch,
     git_add,
     git_add_remote,
@@ -53,12 +53,15 @@ from ..git import (
     git_push_ref,
     git_remote_url,
     git_remove_remote,
+    git_rename_current_branch,
     git_set_remote_url,
     git_ssh_env,
     tokenize_remote_url,
     workspace_branch,
     workspace_git_lock,
 )
+from ..github import auth
+from ..github.api import GitHubClient, GitHubError
 from ..n8n.api import N8nApiClient, N8nApiError
 from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner
@@ -89,6 +92,16 @@ def _is_push_rejection(exc: GitError) -> bool:
         marker in detail
         for marker in ("non-fast-forward", "[rejected]", "fetch first", "stale info")
     )
+
+
+def _is_legacy_branch(name: str) -> bool:
+    """Return True for a branch name from the pre-``dev`` branch policy.
+
+    These are renamed to ``dev`` once: per-workspace ``n8n/<id>`` branches and
+    the generic ``main``/``master`` defaults that older launcher versions left
+    behind when git was enabled on an existing repository.
+    """
+    return name in ("main", "master") or name.startswith("n8n/")
 
 
 def _project_live_state(projects: dict[str, dict[str, str]], project: str) -> WorkspaceState:
@@ -209,7 +222,7 @@ class WorkspaceManager:
     ) -> Workspace:
         """Create and persist a new workspace, scaffolding its folders."""
         if not name.strip():
-            raise WorkspaceError("Workspace name is required")
+            raise WorkspaceError("Le nom du workspace est requis")
         reserved = {workspace.port for workspace in self.store.load().workspaces}
         workspace_id = uuid4().hex[:8]
         migrations = detect_migrations(workflows_dir)
@@ -221,13 +234,13 @@ class WorkspaceManager:
             # a freshly generated password).
             db = DbConfig(
                 mode=DbMode.MANAGED,
-                database_name=db.database_name or DATA_DATABASE,
-                username=db.username or DATA_USER,
+                database_name=db.database_name or WORKSPACE_DATA_DB_NAME,
+                username=db.username or WORKSPACE_DATA_DB_USER,
                 password=db.password or secrets.token_hex(16),
             )
         selected_port = port or suggest_port(reserved=reserved)
         if selected_port in reserved:
-            raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
+            raise WorkspaceError(f"Le port {selected_port}")
         self._scaffold(workflows_dir, db)
         workspace = Workspace(
             id=workspace_id,
@@ -242,7 +255,7 @@ class WorkspaceManager:
             # Re-check under the lock: a concurrent creation may have claimed
             # the port suggested from an earlier snapshot.
             if workspace.port in {item.port for item in config.workspaces}:
-                raise WorkspaceError(f"Port is already used by another workspace: {workspace.port}")
+                raise WorkspaceError(f"Le port {workspace.port}")
             config.workspaces.append(workspace)
             return workspace
 
@@ -298,8 +311,8 @@ class WorkspaceManager:
             # fields, defaulting only the missing ones.
             db = DbConfig(
                 mode=DbMode.MANAGED,
-                database_name=db.database_name or DATA_DATABASE,
-                username=db.username or DATA_USER,
+                database_name=db.database_name or WORKSPACE_DATA_DB_NAME,
+                username=db.username or WORKSPACE_DATA_DB_USER,
                 password=db.password or secrets.token_hex(16),
             )
         self._scaffold(workflows_dir, db)
@@ -307,10 +320,10 @@ class WorkspaceManager:
         reserved = {workspace.port for workspace in self.store.load().workspaces}
         selected_port = port or suggest_port(reserved=reserved)
         if selected_port in reserved:
-            raise WorkspaceError(f"Port is already used by another workspace: {selected_port}")
+            raise WorkspaceError(f"Le port {selected_port}")
 
         # ``git clone`` checks out the remote's default branch; the launcher
-        # then works on its own ``n8n/<id>`` branch (switched right after the
+        # then works on its canonical ``dev`` branch (switched right after the
         # workspace is registered), so the recorded GitConfig stays truthful.
         workspace_id = uuid4().hex[:8]
         workspace = Workspace(
@@ -327,7 +340,7 @@ class WorkspaceManager:
             # Re-check under the lock: a concurrent creation may have claimed
             # the port suggested from an earlier snapshot.
             if workspace.port in {item.port for item in config.workspaces}:
-                raise WorkspaceError(f"Port is already used by another workspace: {workspace.port}")
+                raise WorkspaceError(f"Le port {workspace.port}")
             config.workspaces.append(workspace)
             return workspace
 
@@ -340,7 +353,9 @@ class WorkspaceManager:
         allowed = {"name", "workflows_dir", "port", "db", "git", "n8n_version", "server"}
         unknown = set(changes) - allowed
         if unknown:
-            raise WorkspaceError(f"Unsupported workspace fields: {', '.join(sorted(unknown))}")
+            raise WorkspaceError(
+                f"Champs de workspace non pris en charge : {', '.join(sorted(unknown))}"
+            )
 
         if "server" in changes:
             server = changes["server"]
@@ -368,7 +383,7 @@ class WorkspaceManager:
         def remove(config: AppConfig) -> None:
             workspace = self._find(config, workspace_id)
             if workspace.state is not WorkspaceState.STOPPED:
-                raise WorkspaceError("Workspace must be stopped before deletion")
+                raise WorkspaceError("Le workspace doit être arrêté avant suppression")
             config.workspaces.remove(workspace)
 
         self.store.mutate(remove)
@@ -508,7 +523,7 @@ class WorkspaceManager:
         """Initialize a git repository in the workspace folder."""
         if not git_is_repo(workspace.workflows_dir):
             git_init(workspace.workflows_dir, branch=workspace_branch(workspace.id))
-        ensure_gitignore(workspace.workflows_dir)
+        ensure_local_excludes(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
@@ -595,15 +610,15 @@ class WorkspaceManager:
                     workspace.name,
                 )
             else:
-                db.database_name = db.database_name or DATA_DATABASE
-                db.username = db.username or DATA_USER
+                db.database_name = db.database_name or WORKSPACE_DATA_DB_NAME
+                db.username = db.username or WORKSPACE_DATA_DB_USER
                 db.password = db.password or secrets.token_hex(16)
                 self._scaffold(workspace.workflows_dir, db)
         return self.update(workspace.id, db=db)
 
     def configure_git(self, workspace: Workspace, *, remote_url: str | None = None) -> None:
         """Attach, update or detach the remote of an existing git repository."""
-        ensure_gitignore(workspace.workflows_dir)
+        ensure_local_excludes(workspace.workflows_dir)
         if remote_url:
             if git_has_remote(workspace.workflows_dir):
                 git_set_remote_url(workspace.workflows_dir, "origin", remote_url)
@@ -634,9 +649,12 @@ class WorkspaceManager:
         """Generate the CI harness in the workspace repository and enable CI.
 
         Requires a real git repository with a GitHub remote: without one there
-        is nowhere for a GitHub Actions workflow to run. The persisted
-        selection (``tests.json``) is preserved across disable/re-enable
-        cycles instead of being reset.
+        is nowhere for a GitHub Actions workflow to run. The workspace is
+        brought onto its canonical ``dev`` branch first (legacy ``n8n/*`` /
+        ``main`` checkouts are renamed) so the opening commit and every push
+        target the branch the workflow listens on. The persisted selection
+        (``tests.json``) is preserved across disable/re-enable cycles instead
+        of being reset.
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             raise WorkspaceError(
@@ -647,6 +665,7 @@ class WorkspaceManager:
                 "Les tests GitHub Actions nécessitent un dépôt distant GitHub "
                 "(ex. https://github.com/utilisateur/repo.git)."
             )
+        self._ensure_workspace_branch(workspace)
         files = ci.render_harness(workspace.n8n_version)
         selection = ci.selection_path(workspace.workflows_dir)
         for rel, content in files.items():
@@ -666,11 +685,46 @@ class WorkspaceManager:
 
         workspace = self.store.mutate(apply)
         self._commit_and_push(workspace, "n8n-launcher: activer les tests GitHub Actions")
+        self._ensure_ci_default_branch(workspace)
         logger.info("Enabled CI for %s", workspace.name)
         return workspace
 
+    def _ensure_ci_default_branch(self, workspace: Workspace) -> None:
+        """Point the GitHub repository's default branch at the workspace's ``dev``.
+
+        ``workflow_dispatch`` only resolves a workflow file that lives on the
+        repository's default branch: a dev-only push into a repo whose default
+        is still ``main`` would make the manual run 404. The token is resolved
+        silently (persisted override → ``gh`` CLI → OS git credential) and any
+        failure is logged, never raised — CI enable must not depend on this
+        convenience step. When no token is available the user is expected to
+        change the default branch by hand (documented in the README).
+        """
+        repo_path = ci.github_repo_path(self.git_remote_url(workspace))
+        token = auth.resolve_github_token(self.github_token())
+        if not repo_path or not token:
+            logger.info(
+                "Skipping GitHub default-branch update for %s (missing %s)",
+                workspace.name,
+                "remote" if not repo_path else "token",
+            )
+            return
+        branch = workspace_branch(workspace.id)
+        try:
+            GitHubClient(token).set_default_branch(repo_path, branch)
+        except GitHubError as exc:
+            logger.warning(
+                "Could not set the default branch of GitHub repo %s to %s: %s",
+                repo_path,
+                branch,
+                exc,
+            )
+            return
+        logger.info("Set GitHub default branch to %s for %s", branch, workspace.name)
+
     def disable_ci(self, workspace: Workspace) -> Workspace:
         """Remove the generated CI harness while keeping the pipeline selection."""
+        self._ensure_workspace_branch(workspace)
         for rel in ci.DISABLE_FILES:
             target = workspace.workflows_dir / rel
             try:
@@ -715,6 +769,7 @@ class WorkspaceManager:
         """Persist the pipeline selection and optionally commit/push it."""
         ci.write_selection(workspace.workflows_dir, set(selected))
         if push:
+            self._ensure_workspace_branch(workspace)
             self._commit_and_push(workspace, "n8n-launcher: mettre à jour les tests GitHub Actions")
         return workspace
 
@@ -757,17 +812,41 @@ class WorkspaceManager:
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     def _ensure_workspace_branch(self, workspace: Workspace) -> None:
-        """Make sure the workspace's own ``n8n/<id>`` branch is active when git is configured.
+        """Make sure the workspace's canonical ``dev`` branch is active.
 
-        Each workspace syncs on its own per-id branch, so a legacy checkout
-        (``dev``/``main`` from before the branch policy) is switched to
-        ``n8n/<id>`` on the fly, and the recorded :class:`GitConfig` branch is
-        kept in sync. Failures are logged and never block startup.
+        A legacy checkout (``n8n/*``, ``main`` or ``master`` from the
+        pre-``dev`` policy) is renamed to ``dev`` once — idempotently — and
+        pushed so auto-pull and the CI trigger can use it right away. The
+        recorded :class:`GitConfig` branch is kept in sync. Failures are
+        logged and never block startup.
         """
         if not workspace.git.enabled or not git_is_repo(workspace.workflows_dir):
             return
         branch = workspace_branch(workspace.id)
         try:
+            current = git_current_branch(workspace.workflows_dir)
+            if current and current != branch and _is_legacy_branch(current):
+                if not git_rename_current_branch(workspace.workflows_dir, branch):
+                    return
+                logger.info(
+                    "Renamed workspace branch %s → %s for %s",
+                    current,
+                    branch,
+                    workspace.name,
+                )
+                # Bring the fresh dev branch up to the remote on this first visit
+                # (mirrors the generic ensure_workspace_branch push of a newly
+                # created branch) so auto-pull and CI trigger on dev immediately.
+                try:
+                    if git_has_remote(workspace.workflows_dir):
+                        git_push(workspace.workflows_dir)
+                except GitError as exc:
+                    logger.warning(
+                        "Could not push the renamed %s branch for %s: %s",
+                        branch,
+                        workspace.name,
+                        exc,
+                    )
             active = ensure_workspace_branch(workspace.workflows_dir, branch)
         except GitError as exc:
             logger.warning("ensure_workspace_branch failed for %s: %s", workspace.name, exc)
@@ -790,7 +869,7 @@ class WorkspaceManager:
         ``post-receive`` hook and the self-contained ``deploy.py`` are generated
         and streamed over SSH (no server-side package). The local repository
         gets a ``server`` remote pointing at the bare repo, so a later
-        :meth:`publish` can push ``n8n/<id>:main``. Nothing is persisted here —
+        :meth:`publish` can push ``dev:main``. Nothing is persisted here —
         the dialog saves the :class:`ServerConfig` itself.
         """
         if conflict := self._server_port_conflict(self.store.load(), workspace.id, server):
@@ -850,8 +929,8 @@ class WorkspaceManager:
         Deploys the *current* state of the local n8n instance: workflows are
         exported, the remote Compose definition is committed, the credentials
         secrets are re-uploaded (they never travel through the repository) and
-        the workspace branch is pushed to the ``server`` remote as ``main``
-        (``n8n/<id>:main``). The push fails fast on a non-fast-forward server
+        the workspace's ``dev`` branch is pushed to the ``server`` remote as
+        ``main`` (``dev:main``). The push fails fast on a non-fast-forward server
         branch so production main is never rewritten.
         """
         server = workspace.server
@@ -886,7 +965,7 @@ class WorkspaceManager:
         document = build_secrets_document(config.owner_email, config.owner_password, credentials)
         write_remote_file(
             server,
-            marker_path(server, workspace.id).rsplit("/", 1)[0] + "/secrets.json",
+            self._secrets_remote_path(workspace),
             json.dumps(document, indent=2, ensure_ascii=False),
         )
         chmod_remote(server, self._secrets_remote_path(workspace), mode="600")
@@ -1150,9 +1229,9 @@ class WorkspaceManager:
             if workspace.db.mode is not DbMode.MANAGED:
                 return
             if not workspace.db.database_name:
-                workspace.db.database_name = DATA_DATABASE
+                workspace.db.database_name = WORKSPACE_DATA_DB_NAME
             if not workspace.db.username:
-                workspace.db.username = DATA_USER
+                workspace.db.username = WORKSPACE_DATA_DB_USER
             if not workspace.db.password:
                 workspace.db.password = secrets.token_hex(16)
 
@@ -1162,8 +1241,8 @@ class WorkspaceManager:
     def _managed_db_config() -> DbConfig:
         return DbConfig(
             mode=DbMode.MANAGED,
-            database_name=DATA_DATABASE,
-            username=DATA_USER,
+            database_name=WORKSPACE_DATA_DB_NAME,
+            username=WORKSPACE_DATA_DB_USER,
             password=secrets.token_hex(16),
         )
 
@@ -1184,7 +1263,7 @@ class WorkspaceManager:
         for workspace in config.workspaces:
             if workspace.id == workspace_id:
                 return workspace
-        raise WorkspaceError(f"Unknown workspace: {workspace_id}")
+        raise WorkspaceError(f"Workspace inconnu : {workspace_id}")
 
     @staticmethod
     def _server_port_conflict(
