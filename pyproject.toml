@@ -56,9 +56,6 @@ ignore = []
 # `docker`/`git` by design (docker/manager.py, git/manager.py, github/auth.py).
 # Each call site is a deliberate shell-out, not an injection vector.
 [tool.ruff.lint.per-file-ignores]
-# Bandit subprocess rules are intentionally silenced: the launcher wraps
-# `docker`/`git` by design (docker/manager.py, git/manager.py, github/auth.py).
-# Each call site is a deliberate shell-out, not an injection vector.
 "src/n8n_launcher/docker/**" = ["S603", "S604", "S607"]
 "src/n8n_launcher/git/**" = ["S603", "S604", "S607"]
 "src/n8n_launcher/github/**" = ["S603", "S604", "S607"]

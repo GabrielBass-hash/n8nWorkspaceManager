@@ -2,7 +2,7 @@
 
 **n8n-launcher** is a cross-platform desktop application (Python 3.12+, Tkinter) for managing isolated Docker-based n8n workspaces. Each workspace runs as its own Docker Compose project with its own data volume and optional PostgreSQL database, providing full environment isolation without manual Compose management.
 
-- **Version**: 4.0.2 (single-source SemVer in `src/n8n_launcher/__init__.py`)
+- **Version**: 5.0.3 (single-source SemVer in `src/n8n_launcher/__init__.py`)
 - **License**: See repository
 - **Entry point**: `n8n-launcher` console script → `n8n_launcher.__main__:main`
 

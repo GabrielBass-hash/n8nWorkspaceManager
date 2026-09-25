@@ -34,6 +34,24 @@ class WorkspaceState(StrEnum):
 
 DEFAULT_POSTGRES_IMAGE = "postgres:16"
 
+# Defaults applied when a managed workspace carries no explicit database
+# parameters. They are defined here — not in ``database/`` or ``docker/`` — so
+# that Compose rendering (n8n's own schema) and the migration runner (the
+# per-workspace data role) can both consume them without an import cycle
+# (``database/migrations.py`` imports ``docker.manager``).
+WORKSPACE_DATA_DB_NAME = "data"
+WORKSPACE_DATA_DB_USER = "n8ndata"
+WORKSPACE_DATA_DB_PASSWORD = "launcher-managed-data"  # noqa: S105
+
+# Credentials of the maintenance role n8n itself uses for its own Postgres
+# database (``DB_POSTGRESDB_*`` in Compose) and that the migration runner uses
+# to bootstrap the data role and database. Values must stay in sync between the
+# Compose renderer and ``migrations.py``.
+N8N_METADATA_DB_NAME = "n8n"
+N8N_METADATA_DB_USER = "n8n"
+N8N_METADATA_DB_PASSWORD = "launcher-managed"  # noqa: S105
+MAINTENANCE_DATABASE = "postgres"
+
 
 @dataclass
 class GitConfig:

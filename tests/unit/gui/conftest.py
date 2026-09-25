@@ -59,7 +59,7 @@ def gui_mocks():
 
 @pytest.fixture
 def app(gui_mocks, tmp_path: Path):
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path))
     manager = MagicMock()
     running = make_workspace(tmp_path, "Running", 5678)

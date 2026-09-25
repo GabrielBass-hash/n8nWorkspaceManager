@@ -39,11 +39,12 @@ def repo_url_path(repo_path: str) -> str:
 class GitHubClient:
     """Token-authenticated client for the GitHub REST API.
 
-    The client covers four concerns: repository creation (:meth:`create_repo`),
+    The client covers five concerns: repository creation (:meth:`create_repo`),
     read-only discovery of the linked account's repositories and their branches
     (:meth:`list_user_repos`, :meth:`list_repo_branches`), CI inspection
-    (:meth:`list_workflow_runs`, :meth:`list_run_jobs`, :meth:`fetch_job_logs`)
-    and triggering a run (:meth:`dispatch_workflow`).
+    (:meth:`list_workflow_runs`, :meth:`list_run_jobs`, :meth:`fetch_job_logs`),
+    triggering a run (:meth:`dispatch_workflow`) and pointing a repository's
+    default branch at the launcher's ``dev`` (:meth:`set_default_branch`).
     The token is never persisted by this class nor by its callers — it lives
     only in memory for the lifetime of the session. Errors are wrapped in
     :class:`GitHubError` with the HTTP status preserved so the GUI can explain
@@ -199,6 +200,21 @@ class GitHubClient:
             "POST",
             f"/repos/{repo_url_path(repo_path)}/actions/workflows/{workflow_id}/dispatches",
             json=payload,
+        )
+
+    def set_default_branch(self, repo_path: str, branch: str) -> None:
+        """Point a repository's default branch at *branch*.
+
+        ``workflow_dispatch`` only finds a workflow file on the repository's
+        default branch — a dev-only push into a repo whose default is still
+        ``main`` would make the manual run 404. Callers resolve the token
+        silently and treat failures as warnings: this is a convenience, not a
+        hard requirement for CI enable.
+        """
+        self._request_action(
+            "PATCH",
+            f"/repos/{repo_url_path(repo_path)}",
+            json={"default_branch": branch},
         )
 
     def _headers(self) -> dict[str, str]:

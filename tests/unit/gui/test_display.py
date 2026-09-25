@@ -195,7 +195,7 @@ def test_git_row_status_reports_dirty_diverged_and_remote(tmp_path) -> None:
     probe = GitProbeStatus(
         is_repo=True,
         dirty=True,
-        upstream="origin/n8n/w1",
+        upstream="origin/dev",
         ahead=1,
         remote_url="https://example.test/repo.git",
     )

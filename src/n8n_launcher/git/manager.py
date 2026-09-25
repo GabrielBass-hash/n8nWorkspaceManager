@@ -31,7 +31,7 @@ GIT_LOCK_FILENAME = ".n8n-launcher.git.lock"
 # launcher's ``git add -A`` from sweeping volatile or environment files into
 # workflow history. The git lock file itself is ignored so a ``git add -A``
 # never stages a lock that exist only while the launcher runs.
-GITIGNORE_BODY = """# n8n-Launcher : fichiers locaux ou volatiles exclus du versionnement.
+EXCLUDE_BODY = """# n8n-Launcher : fichiers locaux ou volatiles exclus du versionnement.
 .env
 .env.*
 *.log
@@ -45,15 +45,23 @@ __pycache__/
 """
 
 
-def workspace_branch(workspace_id: str) -> str:
-    """Return the per-workspace git branch the launcher coordinates on.
+# Canonical working branch of every workspace. ``dev`` is the only branch the
+# launcher pulls, commits and pushes on: each workspace has its own isolated
+# repository, so there are no branches to keep apart. ``main`` is deliberately
+# absent here — it exists only on the deployment server (``publish`` maps
+# ``dev → main``) and is never created on GitHub.
+WORKSPACE_BRANCH = "dev"
 
-    Every workspace syncs on its own ``n8n/<id>`` branch, so two workspaces
-    pushing from different machines (or two instances of the same workspace)
-    never fight over ``dev``/``main``: each branch behaves like an append-only
-    per-workspace queue that a remote server can draft spontaneously.
+
+def workspace_branch(workspace_id: str) -> str:
+    """Return the workspace's canonical working branch (always ``dev``).
+
+    The *workspace_id* argument is kept for backward compatibility with call
+    sites and persisted :class:`~n8n_launcher.core.models.GitConfig` values.
+    ``dev`` is where auto-pull (start), auto-push (close) and the GitHub
+    Actions CI all operate; ``main`` is reserved for the production server.
     """
-    return f"n8n/{workspace_id}"
+    return WORKSPACE_BRANCH
 
 
 class _GitLockOwner:
@@ -77,7 +85,7 @@ def workspace_git_lock(path: Path) -> Iterator[None]:
     as ``sync_git`` → ``_commit_and_push`` share one OS lock) but exclusive
     between threads and between separate processes. The OS lock lives in a
     dedicated ``.n8n-launcher.git.lock`` file inside the working tree, ignored
-    by ``git add -A`` (see :data:`GITIGNORE_BODY`).
+    by ``git add -A`` (see :data:`EXCLUDE_BODY`).
     """
     if not git_is_repo(path):
         yield
@@ -216,14 +224,14 @@ def _branch_ab_count(token: str) -> int:
 def git_init(path: Path, *, remote_url: str | None = None, branch: str | None = None) -> None:
     """Initialize a new git repo at *path* and optionally add a remote.
 
-    The primary branch is *branch* (the per-workspace ``n8n/<id>`` when called
-    by the manager), falling back to ``dev`` for backward compatibility.
+    The primary branch is *branch* (the workspace's ``dev`` when called by the
+    manager), falling back to the canonical :data:`WORKSPACE_BRANCH`.
     """
     path.mkdir(parents=True, exist_ok=True)
     _run_git(["init"], cwd=path)
-    _run_git(["branch", "-M", branch or "dev"], cwd=path)
+    _run_git(["branch", "-M", branch or WORKSPACE_BRANCH], cwd=path)
     _configure_repo_identity(path)
-    ensure_gitignore(path)
+    ensure_local_excludes(path)
     if remote_url:
         _run_git(["remote", "add", "origin", remote_url], cwd=path)
     logger.info("Initialized git repo at %s", path)
@@ -239,7 +247,7 @@ def _configure_repo_identity(path: Path) -> None:
         _run_git(["config", "user.email", LAUNCHER_GIT_EMAIL], cwd=path)
 
 
-def ensure_gitignore(path: Path) -> None:
+def ensure_local_excludes(path: Path) -> None:
     """Apply the launcher's default ignore rules to *path*'s repository.
 
     Rules are written into the repository-local ``.git/info/exclude`` file
@@ -251,11 +259,11 @@ def ensure_gitignore(path: Path) -> None:
     excludes = path / ".git" / "info" / "exclude"
     excludes.parent.mkdir(parents=True, exist_ok=True)
     existing = excludes.read_text(encoding="utf-8") if excludes.exists() else ""
-    marker = GITIGNORE_BODY.splitlines()[0]
+    marker = EXCLUDE_BODY.splitlines()[0]
     if marker in existing:
         return
     separator = "" if not existing or existing.endswith("\n") else "\n"
-    excludes.write_text(existing + separator + GITIGNORE_BODY, encoding="utf-8")
+    excludes.write_text(existing + separator + EXCLUDE_BODY, encoding="utf-8")
     logger.info("Ensured launcher ignore rules at %s", excludes)
 
 
@@ -606,3 +614,26 @@ def git_pull_new_repo(url: str, dest: Path, *, branch: str | None = None) -> Non
 def git_current_branch(path: Path) -> str:
     """Return the active branch name (public alias of :func:`_current_branch`)."""
     return _current_branch(path)
+
+
+def git_rename_current_branch(path: Path, new_branch: str) -> bool:
+    """Rename the active branch to *new_branch* (``git branch -M``).
+
+    Idempotent: returns True when the active branch already *is* *new_branch*
+    (nothing to do) and when the rename succeeds, False when there is no
+    active branch (detached HEAD / not a repository) or the rename fails.
+    Renaming with ``-M`` keeps the commit history, working tree and any
+    existing upstream-tracking configuration intact.
+    """
+    current = _current_branch(path)
+    if not current:
+        return False
+    if current == new_branch:
+        return True
+    try:
+        _run_git(["branch", "-M", new_branch], cwd=path)
+    except GitError as exc:
+        logger.warning("Could not rename branch %s to %s in %s: %s", current, new_branch, path, exc)
+        return False
+    logger.info("Renamed branch %s to %s in %s", current, new_branch, path)
+    return True

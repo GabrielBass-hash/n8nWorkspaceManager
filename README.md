@@ -19,7 +19,7 @@ Each workspace is a user-defined n8n instance bound to a folder of workflow expo
 
 ### Git synchronization
 
-Git is optional per-workspace and configured at creation or later via the "Configurer Git…" context menu. Every launcher-created repo works on its own branch **`n8n/<id>`** (legacy `main`/`dev` branches are renamed on first start); git lifecycle calls are serialized per-workspace. When enabled with a remote:
+Git is optional per-workspace and configured at creation or later via the "Configurer Git…" context menu. Every launcher-created repo works on its own branch **`dev`** (legacy `main`/`n8n/*` branches are renamed once on first start); git lifecycle calls are serialized per-workspace. When enabled with a remote:
 
 - **Auto-pull on start** — `git pull --rebase` brings remote JSON changes into the workspace folder before workflow import.
 - **Auto-push on close** — n8n workflows are exported to JSON, staged, committed with a timestamped message, and pushed. Push is skipped when there is nothing to commit *and* no unpushed commits. Server-side push rejections are retried once.
@@ -31,7 +31,7 @@ When no remote is set, the "Créer sur GitHub…" flow creates the repository vi
 
 ### Remote server deployment
 
-Deployment to a production server is optional per-workspace ("Configurer le serveur…", persisted as `ServerConfig`) and driven from the same git repo: publishing pushes the workspace branch **`n8n/<id>`** to the server's bare repo as its `main` (the production reference). "Publier sur le serveur…" waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
+Deployment to a production server is optional per-workspace ("Configurer le serveur…", persisted as `ServerConfig`) and driven from the same git repo: publishing pushes the workspace **`dev`** branch to the server's bare repo as its `main` (the production reference). "Publier sur le serveur…" waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
 
 - `install_server` creates the bare repo (`git init --bare`), ships a generated `post-receive` hook and `deploy.py` (marker-commented, template strings), all transferred atomically (`write_remote_file`: `cat > path.tmp && mv`).
 - The server Compose file adds a top-level `name: n8n-ws-<id>` so the project is stable regardless of the checkout directory; the hook runs `docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d` and every remote migration/import uses that pinned project.
@@ -39,7 +39,7 @@ Deployment to a production server is optional per-workspace ("Configurer le serv
 
 ### GitHub Actions CI
 
-Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests, configured entirely from the GUI. Runs are triggered manually or by pushes on the per-workspace `n8n/**` branches:
+Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests, configured entirely from the GUI. Runs are triggered manually or by pushes on the per-workspace `dev` branch (the repo default branch is set to `dev` on enable):
 
 - **Enabling** (`Configurer les tests GitHub Actions…`) generates three files in the workspace repo — `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed selection `.n8n-tests/tests.json`. Every generated file carries the marker *« n8n-launcher : généré — ne pas modifier à la main »*. Changes are committed and pushed on enable.
 - **Pipeline eligibility**: a pipeline is testable iff it has a manual trigger, a schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every non-pinned node's credential types are covered by the recorded CI credentials. Ineligible pipelines are greyed out with a reason.
@@ -55,11 +55,11 @@ Tokens are resolved automatically from the OS Git credential helper (the same cr
 - "Détecter via gh CLI" and "Coller depuis le presse-papiers" buttons in token dialogs — the token is never typed or logged.
 - A cancel is recorded per session so the user is not prompted again on every action.
 
-### n8n 2.33.3 integration notes
+### n8n 2.33.x integration notes
 
 Findings from the integration spikes, baked into the code:
 
-- The owner bootstrap uses internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`) because n8n 2.33.3 requires a `firstName`/`lastName` for the owner, an 8-64 character password, and returns the session as an HttpOnly `n8n-auth` cookie rather than a body token.
+- The owner bootstrap uses internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`) because n8n 2.33.x requires a `firstName`/`lastName` for the owner, an 8-64 character password, and returns the session as an HttpOnly `n8n-auth` cookie rather than a body token.
 - API keys require a `scopes` array and a numeric `expiresAt` (`0` = no expiry); the launcher requests the six workflow scopes it needs and reads the key from `rawApiKey`.
 - During startup n8n answers with transient HTML pages (`n8n is starting up`, `Cannot POST ...`); `OwnerSetup.bootstrap` retries until the API responds with JSON or reports an already-configured owner.
 - Because of these constraints the launcher keeps the REST bootstrap instead of `N8N_INSTANCE_OWNER_*` env vars. `hash_owner_password` (bcrypt) stays available for a future hashed-env evaluation.
@@ -73,7 +73,7 @@ Finder/Dock/Launchpad start apps with a minimal `PATH`, so `docker` is resolved 
 
 ### Password policy
 
-`validate_password()` mirrors n8n 2.33.3 — 8 to 64 chars, at least one digit and one uppercase letter. `test1234` is rejected.
+`validate_password()` mirrors n8n 2.33.x — 8 to 64 chars, at least one digit and one uppercase letter. `test1234` is rejected.
 
 ### Public API is schema-strict
 
@@ -188,6 +188,6 @@ bash scripts/dequarantine.sh /path/to/n8n-launcher.app
 
 ## Releases
 
-The launcher version is a strict SemVer (`MAJOR.MINOR.PATCH`), defined in a single place — `__version__` in `src/n8n_launcher/__init__.py` (currently **4.0.2**). `pyproject.toml` inherits it (`dynamic = ["version"]`), `scripts/build.py` embeds it into the bundle and `platform/updater.py` compares it against GitHub releases. Bump it by hand in `__init__.py` before a release.
+The launcher version is a strict SemVer (`MAJOR.MINOR.PATCH`), defined in a single place — `__version__` in `src/n8n_launcher/__init__.py` (currently **5.0.3**). `pyproject.toml` inherits it (`dynamic = ["version"]`), `scripts/build.py` embeds it into the bundle and `platform/updater.py` compares it against GitHub releases. Bump it by hand in `__init__.py` before a release.
 
 Releases are published **only from `main`**. When a push to `main` carries a new source version, the release workflow tags it (`v<version>`), runs the tests, builds the per-OS distribution, and attaches all three artifacts to a GitHub Release. Pushes that do not change the version are skipped.

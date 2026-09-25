@@ -44,7 +44,7 @@ def _sample_config(work_dir: Path) -> AppConfig:
                 git=GitConfig(
                     enabled=True,
                     remote_url="https://github.com/o/r.git",
-                    branch="n8n/ws-b",
+                    branch="dev",
                     ci_enabled=True,
                     ci_credentials=[{"name": "GitHub", "type": "githubOAuth2Api"}],
                 ),
@@ -57,7 +57,7 @@ def _sample_config(work_dir: Path) -> AppConfig:
 
 
 def test_config_store_writes_and_reads_atomically(tmp_path: Path) -> None:
-    path = tmp_path / "config.json"
+    path = tmp_path / "launcher.db"
     config = _sample_config(tmp_path / "work")
     store = ConfigStore(path)
 
@@ -106,30 +106,30 @@ def test_ensure_directories_restricts_an_existing_config_dir(
 
 def test_config_store_persists_across_reopen(tmp_path: Path) -> None:
     config = _sample_config(tmp_path / "work")
-    ConfigStore(tmp_path / "config.json").save(config)
+    ConfigStore(tmp_path / "launcher.db").save(config)
 
-    reopened = ConfigStore(tmp_path / "config.json")
+    reopened = ConfigStore(tmp_path / "launcher.db")
 
     assert reopened.load() == config
 
 
 def test_config_store_does_not_create_advisory_lock_file(tmp_path: Path) -> None:
-    path = tmp_path / "config.json"
+    path = tmp_path / "launcher.db"
     store = ConfigStore(path)
     store.save(AppConfig("owner@example.test", "secret", tmp_path / "work"))
 
     # SQLite serializes writers itself; the old FileLock is gone.
     assert path.exists()
-    assert not (tmp_path / "config.json.lock").exists()
+    assert not list(tmp_path.glob("*.lock"))
 
 
 def test_config_store_missing_config_raises(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="does not exist"):
-        ConfigStore(tmp_path / "config.json").load()
+    with pytest.raises(ConfigError, match="n'existe pas"):
+        ConfigStore(tmp_path / "launcher.db").load()
 
 
 def test_config_store_rewrites_only_changed_workspace_row(tmp_path: Path) -> None:
-    path = tmp_path / "config.json"
+    path = tmp_path / "launcher.db"
     config = _sample_config(tmp_path / "work")
     store = ConfigStore(path)
     store.save(config)
@@ -155,7 +155,7 @@ def _row(path: Path, workspace_id: str) -> str | None:
 
 
 def test_config_mutate_returns_fn_result(tmp_path: Path) -> None:
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(AppConfig("owner@example.test", "secret", tmp_path / "work"))
 
     result = store.mutate(lambda cfg: len(cfg.workspaces))
@@ -164,7 +164,7 @@ def test_config_mutate_returns_fn_result(tmp_path: Path) -> None:
 
 
 def test_config_mutate_rolls_back_when_fn_raises(tmp_path: Path) -> None:
-    path = tmp_path / "config.json"
+    path = tmp_path / "launcher.db"
     config = _sample_config(tmp_path / "work")
     store = ConfigStore(path)
     store.save(config)
@@ -221,7 +221,7 @@ def test_config_store_corrupt_legacy_config_raises(tmp_path: Path) -> None:
 
 
 def test_config_store_corrupt_database_raises(tmp_path: Path) -> None:
-    path = tmp_path / "config.json"
+    path = tmp_path / "launcher.db"
     path.write_text("{broken json", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="Invalid launcher configuration"):
@@ -231,7 +231,7 @@ def test_config_store_corrupt_database_raises(tmp_path: Path) -> None:
 @pytest.mark.skipif(os.name == "nt", reason="flock semantics differ on Windows")
 def test_config_mutate_blocks_on_a_foreign_write_lock(tmp_path: Path) -> None:
     """A store cycle must not run while another process owns a write lock."""
-    db = tmp_path / "config.json"
+    db = tmp_path / "launcher.db"
     store = ConfigStore(db)
     store.save(AppConfig("owner@example.test", "secret", tmp_path / "work"))
     holder = (
@@ -257,7 +257,7 @@ def test_config_mutate_blocks_on_a_foreign_write_lock(tmp_path: Path) -> None:
 @pytest.mark.skipif(os.name == "nt", reason="flock semantics differ on Windows")
 def test_config_store_cycle_releases_the_write_lock_after_commit(tmp_path: Path) -> None:
     """Once a cycle commits, a sibling process may take the write lock."""
-    db = tmp_path / "config.json"
+    db = tmp_path / "launcher.db"
     store = ConfigStore(db)
     store.save(AppConfig("owner@example.test", "secret", tmp_path / "work"))
 
@@ -276,7 +276,7 @@ def test_config_store_cycle_releases_the_write_lock_after_commit(tmp_path: Path)
 
 def test_config_store_export_json(tmp_path: Path) -> None:
     config = _sample_config(tmp_path / "work")
-    store = ConfigStore(tmp_path / "config.json")
+    store = ConfigStore(tmp_path / "launcher.db")
     store.save(config)
 
     target = tmp_path / "export.json"

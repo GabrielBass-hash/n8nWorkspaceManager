@@ -7,7 +7,7 @@ The public surface is re-exported here so consumers can import from
 from .manager import (
     GitError,
     GitProbeStatus,
-    ensure_gitignore,
+    ensure_local_excludes,
     ensure_workspace_branch,
     git_add,
     git_add_remote,
@@ -27,6 +27,7 @@ from .manager import (
     git_push_ref,
     git_remote_url,
     git_remove_remote,
+    git_rename_current_branch,
     git_seed_remote,
     git_set_remote_url,
     git_ssh_env,
@@ -38,7 +39,7 @@ from .manager import (
 __all__ = [
     "GitError",
     "GitProbeStatus",
-    "ensure_gitignore",
+    "ensure_local_excludes",
     "ensure_workspace_branch",
     "git_add",
     "git_add_remote",
@@ -58,6 +59,7 @@ __all__ = [
     "git_push_ref",
     "git_remote_url",
     "git_remove_remote",
+    "git_rename_current_branch",
     "git_seed_remote",
     "git_set_remote_url",
     "git_ssh_env",

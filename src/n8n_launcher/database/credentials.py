@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..core.models import DbMode, Workspace
+from ..core.models import (
+    WORKSPACE_DATA_DB_NAME,
+    WORKSPACE_DATA_DB_PASSWORD,
+    WORKSPACE_DATA_DB_USER,
+    DbMode,
+    Workspace,
+)
 from ..n8n.api import N8nApiClient
-
-# Defaults applied when a managed workspace carries no explicit DB parameters.
-# These mirror the historical "data"/"n8ndata" naming and must stay in sync
-# with the MigrationRunner metadata credentials in ``migrations.py``.
-DATA_DATABASE = "data"
-DATA_USER = "n8ndata"
-DATA_PASSWORD = "launcher-managed-data"
 
 
 @dataclass(frozen=True)
@@ -32,9 +31,9 @@ def data_db_target(workspace: Workspace) -> DatabaseTarget | None:
         return DatabaseTarget(
             host="postgres",
             port=5432,
-            database=workspace.db.database_name or DATA_DATABASE,
-            user=workspace.db.username or DATA_USER,
-            password=workspace.db.password or DATA_PASSWORD,
+            database=workspace.db.database_name or WORKSPACE_DATA_DB_NAME,
+            user=workspace.db.username or WORKSPACE_DATA_DB_USER,
+            password=workspace.db.password or WORKSPACE_DATA_DB_PASSWORD,
         )
     return None
 

@@ -118,7 +118,7 @@ PY
     flock -x 9
 
     while read -r old new ref; do
-        # Only main is deployed; n8n/ branches go to GitHub/Actions instead.
+        # Only the server's main is deployed (dev stays on GitHub/Actions).
         [ "$ref" = "refs/heads/main" ] || continue
         # A deleted main produces an all-zeros sha — nothing to deploy.
         [ "$new" != "0000000000000000000000000000000000000000" ] || continue

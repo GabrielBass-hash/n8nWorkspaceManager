@@ -381,7 +381,7 @@ def test_prompt_ci_workflows_adds_runs_tab_when_source_provided(tmp_path) -> Non
     tabs = [notebook._tabs[index]["text"] for index in sorted(notebook._tabs)]
     assert tabs == ["Sélection", "Déroulement"]
 
-    panel = RunsPanel.instances[0]
+    panel = next(iter(RunsPanel.instances))
     assert panel.tree.item("run-11")["text"].startswith("+")
     assert refreshed == [panel]
 
@@ -405,7 +405,7 @@ def test_prompt_ci_workflows_without_source_has_no_notebook(tmp_path) -> None:
 
     assert result is None
     assert FakeTtk.Notebook.instances == []
-    assert RunsPanel.instances == []
+    assert not RunsPanel.instances
 
 
 # --- Auto-refresh polling (gui/ci_edit.py) ----------------------------------
