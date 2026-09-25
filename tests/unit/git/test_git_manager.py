@@ -16,6 +16,7 @@ from n8n_launcher.git import (
     git_has_remote,
     git_has_uncommitted,
     git_has_unpushed_commits,
+    git_head,
     git_init,
     git_is_repo,
     git_list_remote_branches,
@@ -27,6 +28,7 @@ from n8n_launcher.git import (
     git_remote_url,
     git_remove_remote,
     git_rename_current_branch,
+    git_seed_remote,
     git_set_remote_url,
     tokenize_remote_url,
     workspace_branch,
@@ -406,6 +408,16 @@ def test_git_remote_url_none_when_missing(tmp_path: Path) -> None:
         assert git_remote_url(tmp_path) is None
 
 
+def test_git_head_returns_current_commit(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        return_value=completed(0, "abc123def456\n"),
+    ) as run:
+        assert git_head(tmp_path) == "abc123def456"
+
+    assert run.call_args.args[0] == ["git", "rev-parse", "--verify", "HEAD"]
+
+
 def test_git_has_uncommitted_true(tmp_path: Path) -> None:
     with patch(
         "n8n_launcher.git.manager.subprocess.run",
@@ -465,6 +477,87 @@ def test_git_remove_remote_is_noop_when_missing(tmp_path: Path) -> None:
         git_remove_remote(tmp_path, "origin")
 
     assert run.call_args.args[0] == ["git", "remote", "remove", "origin"]
+
+
+def test_git_seed_remote_pushes_existing_head_without_upstream(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "dev\n"),
+            completed(0, "abc123\n"),
+            completed(),
+        ],
+    ) as run:
+        git_seed_remote(tmp_path, "https://github.com/octo/flows.git", "ghp_secret")
+
+    assert [call.args[0] for call in run.call_args_list] == [
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        ["git", "rev-parse", "--verify", "HEAD"],
+        [
+            "git",
+            "push",
+            "https://ghp_secret@github.com/octo/flows.git",
+            "dev",
+        ],
+    ]
+    assert all("-u" not in call.args[0] for call in run.call_args_list)
+
+
+def test_git_seed_remote_creates_initial_commit_for_unborn_branch(tmp_path: Path) -> None:
+    with patch(
+        "n8n_launcher.git.manager.subprocess.run",
+        side_effect=[
+            completed(0, "dev\n"),
+            completed(128, "", "fatal: bad revision HEAD"),
+            completed(),
+            completed(0, ""),
+            completed(0, ""),
+            completed(),
+            completed(),
+        ],
+    ) as run:
+        git_seed_remote(
+            tmp_path,
+            "https://github.com/octo/flows.git",
+            "ghp_secret",
+            message="initial workflows",
+        )
+
+    assert [call.args[0] for call in run.call_args_list] == [
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        ["git", "rev-parse", "--verify", "HEAD"],
+        ["git", "add", "-A"],
+        ["git", "config", "--get", "user.name"],
+        ["git", "config", "--get", "user.email"],
+        [
+            "git",
+            "-c",
+            "user.name=n8n-launcher",
+            "-c",
+            "user.email=n8n-launcher@local",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial workflows",
+        ],
+        [
+            "git",
+            "push",
+            "https://ghp_secret@github.com/octo/flows.git",
+            "dev",
+        ],
+    ]
+
+
+def test_git_seed_remote_rejects_repository_without_active_branch(tmp_path: Path) -> None:
+    with (
+        patch(
+            "n8n_launcher.git.manager.subprocess.run",
+            return_value=completed(1, "", "fatal: ref HEAD is not a symbolic ref"),
+        ),
+        pytest.raises(GitError, match="no active branch"),
+    ):
+        git_seed_remote(tmp_path, "https://github.com/octo/flows.git", "ghp_secret")
 
 
 def test_tokenize_remote_url_embeds_token() -> None:

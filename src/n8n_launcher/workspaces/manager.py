@@ -30,7 +30,6 @@ from ..core.paths import compose_file
 from ..database import (
     MigrationRunner,
     configure_db_credential,
-    detect_migrations,
     has_db_layout,
 )
 from ..docker.compose import compose_project_name, render_remote_compose, write_compose
@@ -45,6 +44,7 @@ from ..git import (
     git_current_branch,
     git_has_remote,
     git_has_unpushed_commits,
+    git_head,
     git_init,
     git_is_repo,
     git_pull,
@@ -225,9 +225,10 @@ class WorkspaceManager:
             raise WorkspaceError("Le nom du workspace est requis")
         reserved = {workspace.port for workspace in self.store.load().workspaces}
         workspace_id = uuid4().hex[:8]
-        migrations = detect_migrations(workflows_dir)
         if db is None:
-            db = self._managed_db_config() if migrations else DbConfig(DbMode.NONE)
+            db = (
+                self._managed_db_config() if has_db_layout(workflows_dir) else DbConfig(DbMode.NONE)
+            )
         if db.mode is DbMode.MANAGED:
             # Preserve any explicitly provided DB fields, filling only the
             # missing ones with the launcher defaults (name/user constants and
@@ -370,6 +371,9 @@ class WorkspaceManager:
         def apply(config: AppConfig) -> Workspace:
             current = self._find(config, workspace_id)
             updated = replace(current, **changes)
+            if "server" in changes and current.server != updated.server:
+                updated.server_last_deploy = None
+                updated.server_last_error = None
             if any(key in changes for key in ("workflows_dir", "port", "db", "n8n_version")):
                 updated.restart_required = True
             config.workspaces[config.workspaces.index(current)] = updated
@@ -889,16 +893,13 @@ class WorkspaceManager:
         chmod_remote(server, f"{base}.git/hooks/post-receive")
         write_remote_file(server, f"{base}/deploy.py", render_deploy_script())
         chmod_remote(server, f"{base}/deploy.py")
-        # Re-add the remote only when missing so a re-run is idempotent
-        # (``git remote add`` would fail on an existing ``server`` remote).
-        if (
-            workspace.git.enabled
-            and git_is_repo(workspace.workflows_dir)
-            and git_remote_url(workspace.workflows_dir, "server") is None
-        ):
-            git_add_remote(
-                workspace.workflows_dir, "server", server_remote_url(server, workspace.id)
-            )
+        if workspace.git.enabled and git_is_repo(workspace.workflows_dir):
+            remote_url = server_remote_url(server, workspace.id)
+            current_url = git_remote_url(workspace.workflows_dir, "server")
+            if current_url is None:
+                git_add_remote(workspace.workflows_dir, "server", remote_url)
+            elif current_url != remote_url:
+                git_set_remote_url(workspace.workflows_dir, "server", remote_url)
         logger.info("Installed server listener for %s on %s", workspace.name, server.host)
 
     def disable_server(self, workspace: Workspace) -> Workspace:
@@ -974,6 +975,7 @@ class WorkspaceManager:
             self._ensure_workspace_branch(workspace)
             self._commit_and_push(workspace, "n8n-launcher: publication")
             branch = git_current_branch(workspace.workflows_dir) or workspace_branch(workspace.id)
+            expected_sha = git_head(workspace.workflows_dir)
             try:
                 git_push_ref(
                     workspace.workflows_dir,
@@ -995,7 +997,7 @@ class WorkspaceManager:
                 self._record_server_status(workspace, "error", {"error": message})
                 raise WorkspaceError(message) from exc
 
-        status, marker = self._poll_deploy(server, workspace.id)
+        status, marker = self._poll_deploy(server, workspace.id, expected_sha=expected_sha)
         self._record_server_status(workspace, status, marker)
         if status == "error":
             raise WorkspaceError(marker.get("error") or "Le déploiement a échoué sur le serveur.")
@@ -1038,6 +1040,7 @@ class WorkspaceManager:
         self,
         cfg: ServerConfig,
         workspace_id: str,
+        expected_sha: str,
         *,
         timeout: float = 180.0,
         interval: float = 0.3,
@@ -1049,7 +1052,8 @@ class WorkspaceManager:
         Returns ``("ok" | "error", marker)`` or ``("timeout", {})``. The marker
         is written by the hook (compose failures) or ``deploy.py`` (n8n/code
         failures); an absent or unparsable marker means the deployment is still
-        in flight.
+        in flight. Markers from an earlier deployment are ignored unless their
+        ``sha`` matches *expected_sha*.
 
         The poll cadence backs off geometrically: waits start at ``interval``
         and double up to ``max_interval`` (0.3s → 0.6s → 1.2s → 1.2s…). Early
@@ -1066,6 +1070,10 @@ class WorkspaceManager:
                 marker = json.loads(result.stdout) if result.stdout else {}
             except ValueError:
                 marker = {}
+            if marker.get("sha") != expected_sha:
+                time.sleep(delay)
+                delay = min(delay * backoff_factor, max_interval)
+                continue
             if marker.get("status") == "ok":
                 return "ok", marker
             if marker.get("status") == "error":

@@ -28,7 +28,7 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
-from n8n_launcher.gui.app import window_size
+from n8n_launcher.gui.app import _api_router_mounted, window_size
 from n8n_launcher.gui.ci_runs import RunsPanel
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
 from n8n_launcher.gui.display import GitRowStatus
@@ -424,6 +424,12 @@ def test_wait_until_healthy_accepts_mounted_router(app, gui_mocks) -> None:
         app.app._wait_until_healthy(5678)
 
 
+def test_api_router_mounted_accepts_403_and_ok_fake() -> None:
+    assert _api_router_mounted(SimpleNamespace(ok=True, status_code=403)) is True
+    assert _api_router_mounted(SimpleNamespace(ok=True)) is True
+    assert _api_router_mounted(SimpleNamespace(ok=True, status_code=404)) is False
+
+
 def test_open_workflows_uses_xdg_open_on_linux(app, tmp_path) -> None:
     app.app._select_row("ws-stopped")
 
@@ -662,6 +668,25 @@ def test_git_chip_click_selects_row_and_opens_git_config(app) -> None:
 
     assert app.app._selected_id == "ws-stopped"
     remote.assert_called_once()
+
+
+def test_ci_chip_click_selects_row_and_opens_ci_config(app) -> None:
+    with patch.object(app.app, "configure_ci_selected") as configure:
+        app.app._rows["ws-stopped"][0].ci_chip._bindings["<Button-1>"](None)
+
+    assert app.app._selected_id == "ws-stopped"
+    configure.assert_called_once_with()
+
+
+def test_ci_chip_click_is_ignored_while_closing(app) -> None:
+    app.app._select_row("ws-running")
+    app.app._closing = True
+
+    with patch.object(app.app, "configure_ci_selected") as configure:
+        app.app._on_ci_chip_click("ws-stopped")
+
+    assert app.app._selected_id == "ws-running"
+    configure.assert_not_called()
 
 
 def test_db_chip_click_selects_row_and_opens_db_config(app) -> None:

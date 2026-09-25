@@ -616,6 +616,11 @@ def git_current_branch(path: Path) -> str:
     return _current_branch(path)
 
 
+def git_head(path: Path) -> str:
+    """Return the full commit SHA currently checked out in *path*."""
+    return _run_git(["rev-parse", "--verify", "HEAD"], cwd=path).stdout.strip()
+
+
 def git_rename_current_branch(path: Path, new_branch: str) -> bool:
     """Rename the active branch to *new_branch* (``git branch -M``).
 

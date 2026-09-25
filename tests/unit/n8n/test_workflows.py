@@ -120,6 +120,27 @@ def test_sync_runner_export_refreshes_pipelines_and_root_mirror(tmp_path: Path) 
     assert (root / "package.json").exists()
 
 
+def test_sync_runner_export_preserves_unmanaged_pipeline_json(tmp_path: Path) -> None:
+    pipelines = tmp_path / "n8nPipelines"
+    pipelines.mkdir()
+    custom = pipelines / "custom.json"
+    custom.write_text("user owned", encoding="utf-8")
+    directory_export = pipelines / "Archived-2.json"
+    directory_export.mkdir()
+    stale = pipelines / "Gone-9.json"
+    stale.write_text("stale", encoding="utf-8")
+    api = MagicMock()
+    api.list_workflows.return_value = [{"id": "1", "name": "Meteo"}]
+    api.get_workflow.return_value = {"id": "1", "name": "Meteo", "nodes": []}
+    runner = SyncRunner(api, pipelines)
+
+    runner.export_all()
+
+    assert not stale.exists()
+    assert custom.read_text(encoding="utf-8") == "user owned"
+    assert directory_export.is_dir()
+
+
 def test_sync_runner_export_without_mirror_leaves_root_untouched(tmp_path: Path) -> None:
     pipelines = tmp_path / "n8nPipelines"
     root = tmp_path
