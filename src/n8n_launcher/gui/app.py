@@ -28,11 +28,13 @@ from ..docker.manager import DockerManager
 from ..git.manager import git_seed_remote, workspace_branch
 from ..github import auth
 from ..github.api import GitHubClient, GitHubError
+from ..monitoring.events import Event
+from ..monitoring.store import EventStore
 from ..platform.browser import open_app, open_url
 from ..workspaces import ci, ci_runs
 from ..workspaces.ci_runs import RunsSnapshot
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
-from . import ci_edit, display
+from . import ci_edit, display, monitoring
 from .ci_runs import RunsPanel
 from .close import CloseController
 from .dialogs import (
@@ -113,6 +115,13 @@ _MAX_CONCURRENT_STARTS = 3
 # not pile hundreds of ``docker compose`` invocations onto one daemon.
 _MAX_BACKGROUND_ACTIONS = 8
 
+# Journal polling: the console only re-reads the event store on this cadence
+# (the SQLite read is cheap, but there is no reason to do it per UI tick), and
+# a snapshot never shows more than this many events — the panel is a triage
+# view, the full 30-day history is one "Exporter (JSON)" click away.
+_MONITOR_POLL_MS = 15000
+_MONITOR_EVENT_LIMIT = 500
+
 # Freshness window for a cached CI runs snapshot: the "Déroulement" tab
 # auto-polls every few seconds while a run is in flight, and each poll would
 # re-list runs (plus re-download the focus run's logs). A snapshot younger
@@ -123,6 +132,14 @@ CI_RUNS_TTL_SECONDS = 30.0
 # GitHub jobs API is fast but log bodies are large, so four downloads in
 # flight keep the dialog from stalling on a single slow body.
 _CI_LOG_WORKERS = 4
+
+
+def _server_panel_of(window: tk.Toplevel) -> monitoring.ServerPanel:
+    """Return the :class:`ServerPanel` packed inside a supervision window."""
+    panel = getattr(window, "server_panel", None)
+    if not isinstance(panel, monitoring.ServerPanel):
+        raise ValueError("supervision window has no server panel")
+    return panel
 
 
 def window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
@@ -197,10 +214,23 @@ class LauncherApp:
         *,
         root: tk.Tk | None = None,
         browser_opener: Callable[[str, Path], None] = open_n8n_app,
+        monitor: EventStore | None = None,
     ) -> None:
         self.config_store = config_store
         self.workspace_manager = workspace_manager
         self.docker = docker
+        # Persistent event store backing the monitoring console. ``None`` when
+        # the log directory is unwritable: the console then reports that no
+        # journal is available instead of failing to start.
+        self.monitor = monitor
+        # Open monitoring console (singleton: a second click focuses it) and the
+        # gate deciding when a critical event must raise it by itself.
+        self._monitor_window: tk.Toplevel | None = None
+        # Per-workspace page opened from the row context menu.
+        self._workspace_window: tk.Toplevel | None = None
+        self._monitor_gate = monitoring.CriticalGate()
+        self._monitor_last_id: int | None = None
+        self._monitor_in_flight = False
         self._owns_root = root is None
         self.root = root or tk.Tk()
         self.browser_opener = browser_opener
@@ -251,6 +281,10 @@ class LauncherApp:
         self.refresh()
         self.root.after(100, self._drain_events)
         self._poll_states()
+        # Journal polling runs for the whole session, not only while the console
+        # is open: that is what lets a critical incident raise the window by
+        # itself.
+        self._monitor_tick()
         self.close_flow = CloseController(
             root=self.root,
             manager=self.workspace_manager,
@@ -426,6 +460,14 @@ class LauncherApp:
             anchor="w",
         )
         self._subtitle.pack(side="left", fill="x")
+        # Global console: the header is the one place reachable without a
+        # workspace selection, so the monitoring journal is opened from here.
+        ttk.Button(
+            header,
+            text="Journal de bord",
+            style="Secondary.TButton",
+            command=self.show_monitoring,
+        ).pack(side="right", padx=(8, 0))
 
         status_border = tk.Frame(self.root, bg=BORDER_STRONG, height=1)
         status_border.pack(fill="x", side="bottom")
@@ -474,9 +516,14 @@ class LauncherApp:
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="Ouvrir n8n", command=self.launch_selected)
         menu.add_command(label="Ouvrir le dossier", command=self.open_workflows)
+        menu.add_command(label="Journal du workspace…", command=self.show_workspace_monitoring)
         if workspace.server.enabled:
             menu.add_separator()
             menu.add_command(label="Publier sur le serveur…", command=self.publish_selected)
+            menu.add_command(
+                label="Superviser le serveur…",
+                command=self.supervise_server_selected,
+            )
             menu.add_command(label="Désactiver le serveur", command=self.disable_server_selected)
         menu.add_separator()
         menu.add_command(label="Configurer Git…", command=self.configure_git_selected)
@@ -1112,6 +1159,93 @@ class LauncherApp:
             with contextlib.suppress(Exception):
                 self._status_label.unbind("<Button-1>")
 
+    # ------------------------------------------------------- monitoring
+    def _monitor_events(self) -> list[Event]:
+        """Read the newest journal events (bounded) for the console."""
+        if self.monitor is None:
+            return []
+        return self.monitor.search_events(limit=_MONITOR_EVENT_LIMIT)
+
+    def show_monitoring(self) -> None:
+        """Open (or focus) the monitoring console.
+
+        Reading the journal runs in a background worker because the store is a
+        SQLite file; the window itself is created immediately and filled in
+        when the worker lands, so a slow disk never blocks the UI.
+        """
+        if self._monitor_window is not None:
+            with contextlib.suppress(Exception):
+                if self._monitor_window.winfo_exists():
+                    self._monitor_window.lift()
+                    return
+        self._monitor_window = monitoring.prompt_monitoring(
+            self.root,
+            self.monitor,
+            read=self._monitor_events,
+            set_status=self.set_status,
+        )
+        self._monitor_window.bind(
+            "<Destroy>",
+            lambda _event: self._close_monitoring(),
+            add=True,
+        )
+        self._monitor_tick(initial=True)
+
+    def _close_monitoring(self) -> None:
+        """Forget the console window once it is destroyed."""
+        self._monitor_window = None
+
+    def _monitor_tick(self, initial: bool = False) -> None:
+        """Poll the journal and raise the console on a new critical event.
+
+        The console is raised only for an event the user has not already been
+        shown: :class:`~n8n_launcher.gui.monitoring.CriticalGate` groups repeats
+        of the same failure, and events at or below ``ERROR`` are ignored.
+        """
+        if self._closed or self.monitor_in_flight():
+            return
+
+        def worker() -> None:
+            try:
+                events = self._monitor_events()
+            except Exception:
+                events = []
+            self.events.put((lambda: self._apply_monitor_snapshot(events, initial), None))
+
+        self._set_monitor_in_flight(True)
+        threading.Thread(target=worker, name="n8n-launcher-monitor", daemon=True).start()
+        with contextlib.suppress(Exception):
+            self.root.after(_MONITOR_POLL_MS, self._monitor_tick)
+
+    def monitor_in_flight(self) -> bool:
+        """Return whether a journal read is already running."""
+        return self._monitor_in_flight
+
+    def _set_monitor_in_flight(self, value: bool) -> None:
+        """Set the journal-read guard."""
+        self._monitor_in_flight = value
+
+    def _apply_monitor_snapshot(self, events: list[Event], initial: bool = False) -> None:
+        """React to a fresh journal snapshot read in a background worker."""
+        self._set_monitor_in_flight(False)
+        newest = max((event.id or 0) for event in events) if events else None
+        fresh = [
+            event
+            for event in events
+            if self._monitor_last_id is None or (event.id or 0) > self._monitor_last_id
+        ]
+        if events:
+            self._monitor_last_id = newest
+        if initial or not fresh:
+            return
+        for event in fresh:
+            if self._monitor_gate.accept(event):
+                # Open the console first: it reports the row count in the status
+                # bar, and the incident line must survive that.
+                self.show_monitoring()
+                self.set_status(f"Incident critique : {event.name} — {event.message}")
+                return
+
     def _poll_states(self) -> None:
         if self._closed:
             return
@@ -1391,6 +1525,112 @@ class LauncherApp:
             self.refresh()
 
         self._run_async(action, on_success=on_success)
+
+    def show_workspace_monitoring(self) -> None:
+        """Open the per-workspace monitoring view for the selected workspace.
+
+        The journal read happens in a background worker (SQLite on the Tk thread
+        would stutter the list) and the window refreshes itself every
+        ``_MONITOR_POLL_MS`` so a workspace page can be left open.
+        """
+        workspace = self._selected_or_warn()
+        if workspace is None:
+            return
+
+        def read() -> list[Event]:
+            events = self._monitor_events()
+
+            def apply() -> None:
+                panel = getattr(self._workspace_window, "workspace_panel", None)
+                if isinstance(panel, monitoring.WorkspacePanel):
+                    panel.apply(monitoring.workspace_events(workspace, events))
+                self.set_status(f"Supervision « {workspace.name} » — {len(events)} ligne(s)")
+
+            if self._workspace_window is not None:
+                self.events.put((apply, None))
+            return events
+
+        open_server = None
+        if workspace.server.enabled:
+            open_server = self.supervise_server_selected
+        self._workspace_window = monitoring.prompt_workspace_monitoring(
+            self.root,
+            workspace,
+            read,
+            on_open_server=open_server,
+            set_status=self.set_status,
+        )
+
+    def supervise_server_selected(self) -> None:
+        """Open the read-only server supervision window for the selection.
+
+        The four SSH reads run in a background worker (``_run_async``) and each
+        failure degrades to an empty section: an unreachable server must leave
+        the rest of the view usable.
+        """
+        workspace = self._selected_or_warn()
+        if workspace is None or not workspace.server.enabled:
+            return
+        # The panel is created inside the dialog; the worker callback is queued
+        # on the Tk event loop, so this is always filled before it is read.
+        panel_slot: dict[str, monitoring.ServerPanel] = {}
+
+        def collect() -> None:
+            error: str | None = None
+            health = None
+            logs = ""
+            marker: dict[str, object] | None = None
+            history: tuple[dict[str, object], ...] = ()
+            executions = None
+            try:
+                health = self.workspace_manager.server_health(workspace.id)
+            except Exception as exc:
+                error = str(exc)
+            try:
+                logs = self.workspace_manager.server_logs(workspace.id)
+            except Exception as exc:
+                error = error or str(exc)
+            try:
+                marker, history = self.workspace_manager.server_deploy_status(workspace.id)
+            except Exception as exc:
+                error = error or str(exc)
+            try:
+                executions = self.workspace_manager.server_execution_status(workspace.id)
+            except Exception as exc:
+                error = error or str(exc)
+            snapshot = monitoring.ServerSnapshot(
+                health=health,
+                logs=logs,
+                marker=marker,
+                history=history,
+                executions=executions,
+                error=error,
+            )
+
+            def apply() -> None:
+                panel = panel_slot.get("panel")
+                if panel is not None:
+                    panel.apply(snapshot)
+                state = "sain" if snapshot.healthy else "à vérifier"
+                self.set_status(f"Supervision « {workspace.name} » — {state}")
+
+            self.events.put((apply, None))
+
+        def read() -> None:
+            self._run_async(collect, on_error=self._server_supervision_failed)
+
+        window = monitoring.prompt_server_supervision(
+            self.root,
+            workspace.name,
+            workspace.server.host,
+            read,
+            set_status=self.set_status,
+        )
+        panel_slot["panel"] = _server_panel_of(window)
+
+    def _server_supervision_failed(self) -> None:
+        """Report that the server could not be read at all."""
+        self.set_status("Lecture du serveur impossible.")
 
     def publish_selected(self) -> None:
         """Deploy the current exports to the configured server."""

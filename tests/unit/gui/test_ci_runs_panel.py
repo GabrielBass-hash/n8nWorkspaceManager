@@ -10,7 +10,13 @@ from n8n_launcher.gui.ci_runs import RunsPanel, _format_fetched_at, runs_summary
 from n8n_launcher.workspaces import ci_runs
 
 
-def _run(run_id: int = 11, *, conclusion: str | None = "success", status: str = "completed"):
+def _run(
+    run_id: int = 11,
+    *,
+    conclusion: str | None = "success",
+    status: str = "completed",
+    created_at: str | None = "2026-01-01T00:00:00Z",
+):
     return ci_runs.RunSummary(
         id=run_id,
         run_number=run_id,
@@ -18,7 +24,7 @@ def _run(run_id: int = 11, *, conclusion: str | None = "success", status: str = 
         head_sha="a" * 40,
         status=status,
         conclusion=conclusion,
-        created_at="2026-01-01T00:00:00Z",
+        created_at=created_at,
         url=f"https://github.com/octo/repo/actions/runs/{run_id}",
     )
 
@@ -30,6 +36,8 @@ def _job(
     conclusion: str | None = "success",
     status: str = "completed",
     steps=(),
+    started_at: str | None = None,
+    completed_at: str | None = None,
 ):
     return ci_runs.JobSummary(
         id=job_id,
@@ -38,15 +46,33 @@ def _job(
         conclusion=conclusion,
         url=f"https://github.com/octo/repo/actions/jobs/{job_id}",
         steps=tuple(steps),
+        started_at=started_at,
+        completed_at=completed_at,
     )
 
 
-def _pipeline(rel: str = "n8nPipelines/a.json", status: str = "success", detail: str = ""):
+def _pipeline(
+    rel: str = "n8nPipelines/a.json",
+    status: str = "success",
+    detail: str = "",
+    timestamp: str | None = None,
+):
     mark = {"success": "+", "failure": "!", "waiting": "*"}[status]
-    return ci_runs.PipelineResult(rel=rel, status=status, detail=detail, mark=mark)
+    return ci_runs.PipelineResult(
+        rel=rel, status=status, detail=detail, mark=mark, timestamp=timestamp
+    )
 
 
-def _snapshot(*, runs=(), jobs=None, pipelines=None, error=None, fetched_at=None):
+def _snapshot(
+    *,
+    runs=(),
+    jobs=None,
+    pipelines=None,
+    error=None,
+    fetched_at=None,
+    warnings=(),
+    partial_errors=(),
+):
     return ci_runs.RunsSnapshot(
         repo_path="octo/repo",
         runs=tuple(runs),
@@ -54,6 +80,8 @@ def _snapshot(*, runs=(), jobs=None, pipelines=None, error=None, fetched_at=None
         pipelines=dict(pipelines or {}),
         error=error,
         fetched_at=fetched_at,
+        warnings=tuple(warnings),
+        partial_errors=tuple(partial_errors),
     )
 
 
@@ -384,3 +412,108 @@ def test_format_fetched_at_helpers() -> None:
     assert _format_fetched_at("2026-09-18T14:03:05+02:00") == "14:03:05"
     assert _format_fetched_at("garbage") == ""
     assert _format_fetched_at("") == ""
+
+
+def test_apply_renders_partial_snapshot_without_dropping_runs() -> None:
+    snapshot = _snapshot(
+        runs=[_run(11)],
+        jobs={11: (_job(21),)},
+        warnings=["Les logs de certains jobs sont indisponibles."],
+        partial_errors=["Le job 21 n'a pas pu être détaillé."],
+    )
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+
+    assert panel.tree.get_children() == ["run-11"]
+    assert "Les logs de certains jobs sont indisponibles." in panel._empty._options["text"]
+    assert "Le job 21 n'a pas pu être détaillé." in panel._empty._options["text"]
+    assert "Avertissement" in panel._summary._options["text"]
+
+
+def test_apply_renders_pipeline_label_timestamp_and_failure_detail() -> None:
+    snapshot = _snapshot(
+        runs=[_run(11, created_at="2026-09-18T14:03:05+02:00")],
+        jobs={
+            11: (
+                _job(
+                    21,
+                    conclusion="failure",
+                    completed_at="2026-09-18T14:05:05+02:00",
+                ),
+            )
+        },
+        pipelines={
+            21: (
+                _pipeline(
+                    status="failure",
+                    detail="HTTP 500",
+                    timestamp="2026-09-18T14:05:00+02:00",
+                ),
+            )
+        },
+    )
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+
+    run_row = panel.tree.item("run-11")
+    assert "18/09/2026 14:03" in run_row["text"]
+    job_row = panel.tree.item("job-11-21")
+    assert "18/09/2026 14:05" in job_row["values"][0]
+    pipeline_id = panel.tree.get_children("job-11-21")[0]
+    pipeline_row = panel.tree.item(pipeline_id)
+    assert "en échec" in pipeline_row["text"]
+    assert "HTTP 500" in pipeline_row["values"][0]
+    assert "18/09/2026 14:05" in pipeline_row["values"][0]
+    assert pipeline_row["tags"] == ["failure"]
+
+
+def test_double_click_on_pipeline_opens_its_run() -> None:
+    snapshot = _snapshot(runs=[_run(11)], jobs={11: (_job(21),)}, pipelines={21: (_pipeline(),)})
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, open_run = _build()
+        panel.apply(snapshot)
+        pipeline_id = panel.tree.get_children("job-11-21")[0]
+        panel.tree.selection_set(pipeline_id)
+        panel.tree._bindings["<Double-1>"](None)
+
+    open_run.assert_called_once()
+    assert open_run.call_args.args[0].id == 11
+
+
+def test_apply_restores_selection_and_event_expansion() -> None:
+    snapshot = _snapshot(runs=[_run(11)], jobs={11: (_job(21),)})
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+        panel.tree.selection_set("job-11-21")
+        panel.tree._bindings["<<TreeviewOpen>>"](None)
+        assert "job-11-21" in panel.expanded
+
+        panel.apply(snapshot)
+        assert panel.tree.selection() == ["job-11-21"]
+        assert panel.tree.item("job-11-21")["open"] is True
+
+        panel.tree._bindings["<<TreeviewClose>>"](None)
+        assert "job-11-21" not in panel.expanded

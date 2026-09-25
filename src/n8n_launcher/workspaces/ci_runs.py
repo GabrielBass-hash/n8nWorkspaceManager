@@ -26,6 +26,7 @@ Two concerns live here:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +40,11 @@ PIPELINE_STATUS_LABELS: dict[str, str] = {
     PIPELINE_SUCCESS: "réussie",
     PIPELINE_WAITING: "en attente",
     PIPELINE_FAILURE: "en échec",
+    "error": "en échec",
+    "failed": "en échec",
+    "crashed": "crash",
+    "timeout": "délai dépassé",
+    "cancelled": "annulée",
 }
 
 # Character drawn in the logs' final summary block before each pipeline row.
@@ -52,12 +58,92 @@ _SUMMARY_FOOTER_PREFIX = "réussies :"
 
 # Regexes — anchored so we never match the summary's own rows.
 _PROGRESS_LINE = re.compile(
-    r"^\[runner\]\s+(?P<rel>.+?)\s*:\s*(?P<status>[a-z]+)"
-    r"(?P<suffix>\s+\([^)]*\))?\s*$"
+    r"^\[runner\]\s+(?P<rel>.+?)\s*:\s*(?P<status>[A-Za-z][A-Za-z_ -]*?)"
+    r"(?:\s+\((?P<detail>.*)\))?\s*$"
 )
 _SUMMARY_ROW = re.compile(
-    r"^-\s+(?P<mark>\u2714|\u25fb|\u2718)\s+(?P<rel>.+?)\s+\((?P<label>[^)]*)\)$"
+    r"^-\s+(?P<mark>[\u2714\u25fb\u2718+!*])\s+(?P<rel>.+?)\s+\((?P<label>.*)\)\s*$"
 )
+_FAILURE_DETAIL = re.compile(r"^échec\s*:\s*(?P<rel>.+?)\s+\((?P<detail>.*)\)\s*$", re.IGNORECASE)
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_TIMESTAMP_PREFIX = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+    r"(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+"
+)
+_FAILURE_STATUSES = frozenset(
+    {
+        PIPELINE_FAILURE,
+        "error",
+        "failed",
+        "crashed",
+        "timeout",
+        "timed_out",
+        "cancelled",
+    }
+)
+_DEFAULT_PIPELINE_DETAILS = frozenset(
+    {
+        "réussie",
+        "réussi",
+        "succès",
+        "en attente",
+        "en échec",
+        "échec",
+        "échoué",
+        "erreur",
+        "crash",
+        "délai dépassé",
+        "annulée",
+    }
+)
+_SUMMARY_MARK_STATUS: dict[str, str] = {
+    _MARK_SUCCESS: PIPELINE_SUCCESS,
+    _MARK_WAITING: PIPELINE_WAITING,
+    _MARK_FAILURE: PIPELINE_FAILURE,
+    "+": PIPELINE_SUCCESS,
+    "*": PIPELINE_WAITING,
+    "!": PIPELINE_FAILURE,
+}
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    return default
+
+
+def _as_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    parsed = _as_int(value, -1)
+    return parsed if parsed >= 0 else None
+
+
+def _as_str(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _optional_str(value: object) -> str | None:
+    text = _as_str(value).strip()
+    return text or None
+
+
+def _normalise_messages(values: Iterable[str] | str | None) -> tuple[str, ...]:
+    """Return non-empty, de-duplicated user-facing messages in stable order."""
+    if values is None:
+        return ()
+    raw_values: Iterable[object] = (values,) if isinstance(values, str) else values
+    messages: list[str] = []
+    for value in raw_values:
+        text = str(value).strip()
+        if text and text not in messages:
+            messages.append(text)
+    return tuple(messages)
 
 
 @dataclass(frozen=True)
@@ -72,11 +158,18 @@ class RunSummary:
     conclusion: str | None  # success | failure | cancelled | ...
     created_at: str | None
     url: str | None
+    updated_at: str | None = None
+    run_started_at: str | None = None
 
     @property
     def human_status(self) -> str:
         """End-user French label for the run's raw status."""
         return _RUN_STATUS_LABELS.get(self.status, self.status)
+
+    @property
+    def started_at(self) -> str | None:
+        """Return the runner start timestamp when GitHub provides one."""
+        return self.run_started_at
 
     @property
     def key(self) -> str:
@@ -94,6 +187,9 @@ class JobSummary:
     url: str | None
     # Workflow steps, purely decorative (displayed read-only under the job).
     steps: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    run_id: int | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
 
     @property
     def human_status(self) -> str:
@@ -126,10 +222,26 @@ class PipelineResult:
     status: str  # success | waiting | failure
     detail: str  # human suffix, e.g. a node/last-execution hint
     mark: str
+    timestamp: str | None = None
 
     @property
     def label(self) -> str:
         return PIPELINE_STATUS_LABELS.get(self.status, self.status)
+
+    @property
+    def human_status(self) -> str:
+        """Return the same human label through a status-oriented name."""
+        return self.label
+
+    @property
+    def failure_detail(self) -> str:
+        """Return the failure explanation, if this result is a failure."""
+        return self.detail if self.status == PIPELINE_FAILURE else ""
+
+    @property
+    def display_detail(self) -> str:
+        """Return a label and optional detail suitable for a details column."""
+        return f"{self.label} — {self.detail}" if self.detail else self.label
 
 
 # French labels for the GitHub *run*-level status strings.
@@ -173,21 +285,6 @@ def run_status_is_active(status: str) -> bool:
     return status in RUN_ACTIVE_STATUSES
 
 
-def _as_int(value: object, default: int = 0) -> int:
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return default
-    if isinstance(value, (int, float)):
-        return int(value)
-    return default
-
-
-def _as_str(value: object) -> str:
-    return value if isinstance(value, str) else ""
-
-
 def run_summary(payload: dict[str, Any]) -> RunSummary:
     """Normalise a ``workflow_runs[]`` payload into a :class:`RunSummary`."""
     return RunSummary(
@@ -197,8 +294,10 @@ def run_summary(payload: dict[str, Any]) -> RunSummary:
         head_sha=_as_str(payload.get("head_sha")),
         status=_as_str(payload.get("status")),
         conclusion=_as_str(payload.get("conclusion")) or None,
-        created_at=_as_str(payload.get("created_at")) or None,
-        url=_as_str(payload.get("html_url")) or None,
+        created_at=_optional_str(payload.get("created_at")),
+        url=_optional_str(payload.get("html_url")),
+        updated_at=_optional_str(payload.get("updated_at")),
+        run_started_at=_optional_str(payload.get("run_started_at")),
     )
 
 
@@ -219,9 +318,39 @@ def job_summary(payload: dict[str, Any]) -> JobSummary:
         name=_as_str(payload.get("name")),
         status=_as_str(payload.get("status")),
         conclusion=_as_str(payload.get("conclusion")) or None,
-        url=_as_str(payload.get("html_url")) or None,
+        url=_optional_str(payload.get("html_url")),
         steps=tuple(steps),
+        run_id=_as_optional_int(payload.get("run_id")),
+        started_at=_optional_str(payload.get("started_at")),
+        completed_at=_optional_str(payload.get("completed_at")),
     )
+
+
+def _clean_log_line(raw: str) -> tuple[str, str | None]:
+    """Remove transport noise and return ``(line, optional timestamp)``."""
+    line = _ANSI_ESCAPE.sub("", raw).rstrip("\r").lstrip()
+    match = _TIMESTAMP_PREFIX.match(line)
+    if match is None:
+        return line, None
+    return line[match.end() :].lstrip(), match.group("timestamp")
+
+
+def _normalise_pipeline_status(value: str) -> str | None:
+    """Map runner status variants to the three display states."""
+    status = value.strip().casefold().replace("-", "_")
+    if status == PIPELINE_SUCCESS:
+        return PIPELINE_SUCCESS
+    if status == PIPELINE_WAITING:
+        return PIPELINE_WAITING
+    if status in _FAILURE_STATUSES:
+        return PIPELINE_FAILURE
+    return None
+
+
+def _pipeline_detail(value: str) -> str:
+    """Discard a generic status label while preserving explanatory details."""
+    detail = value.strip()
+    return "" if detail.casefold() in _DEFAULT_PIPELINE_DETAILS else detail
 
 
 def parse_pipeline_lines(log_text: str) -> list[PipelineResult]:
@@ -229,57 +358,85 @@ def parse_pipeline_lines(log_text: str) -> list[PipelineResult]:
 
     The runner prints one ``[runner] <rel> : <status>`` progress line per
     pipeline as it executes, then a closing summary block. This function
-    prefers the final summary (it also carries the failure detail); when the
-    block is missing (log truncated mid-run, or an older runner), it falls
-    back to the last progress line seen per pipeline. Only lines that match
-    one of the two known shapes are considered; anything else is ignored.
+    prefers the final summary, but merges its row with the last progress line
+    for the same pipeline so a failure explanation is not replaced by the
+    summary's generic ``en échec`` label. When the block is missing (log
+    truncated mid-run, or an older runner), it falls back to the last progress
+    line seen per pipeline. Only lines that match one of the two known shapes
+    are considered; anything else is ignored.
     """
     summary_rows: list[PipelineResult] = []
     last_progress: dict[str, PipelineResult] = {}
-
+    failure_details: dict[str, str] = {}
     in_summary = False
+
     for raw in log_text.splitlines():
-        if raw.startswith(_SUMMARY_HEADER):
+        line, timestamp = _clean_log_line(raw)
+        if line.startswith(_SUMMARY_HEADER):
             in_summary = True
             continue
         if in_summary:
-            if raw.startswith(_SUMMARY_FOOTER_PREFIX) or not raw.lstrip().startswith("-"):
+            if line.startswith(_SUMMARY_FOOTER_PREFIX) or not line.lstrip().startswith("-"):
                 in_summary = False
                 continue
-            row = _SUMMARY_ROW.match(raw.lstrip())
+            row = _SUMMARY_ROW.match(line.lstrip())
             if row is None:
                 in_summary = False
                 continue
-            label = row.group("label") or ""
-            status = (
-                PIPELINE_SUCCESS
-                if row.group("mark") == _MARK_SUCCESS
-                else PIPELINE_WAITING
-                if row.group("mark") == _MARK_WAITING
-                else PIPELINE_FAILURE
-            )
+            status = _SUMMARY_MARK_STATUS.get(row.group("mark"))
+            if status is None:
+                in_summary = False
+                continue
+            rel = row.group("rel").strip()
+            detail = _pipeline_detail(row.group("label"))
+            previous = last_progress.get(rel)
+            if not detail and previous is not None:
+                detail = previous.detail
+            if not detail:
+                detail = failure_details.get(rel, "")
             summary_rows.append(
                 PipelineResult(
-                    rel=row.group("rel").strip(),
+                    rel=rel,
                     status=status,
-                    detail=label if label not in ("réussie", "en attente", "en échec") else "",
+                    detail=detail,
                     mark=row.group("mark"),
+                    timestamp=previous.timestamp if previous is not None else timestamp,
                 )
             )
             continue
 
-        progress = _PROGRESS_LINE.match(raw)
+        failure_line = _FAILURE_DETAIL.match(line)
+        if failure_line is not None:
+            rel = failure_line.group("rel").strip()
+            detail = _pipeline_detail(failure_line.group("detail"))
+            if detail:
+                failure_details[rel] = detail
+            previous = last_progress.get(rel)
+            if previous is None or previous.status != PIPELINE_FAILURE or not previous.detail:
+                last_progress[rel] = PipelineResult(
+                    rel=rel,
+                    status=PIPELINE_FAILURE,
+                    detail=detail or (previous.detail if previous is not None else ""),
+                    mark=_MARK_FAILURE,
+                    timestamp=previous.timestamp if previous is not None else timestamp,
+                )
+            continue
+
+        progress = _PROGRESS_LINE.match(line)
         if progress is not None:
-            status = progress.group("status")
-            if status not in (PIPELINE_SUCCESS, PIPELINE_WAITING, PIPELINE_FAILURE):
+            status = _normalise_pipeline_status(progress.group("status"))
+            if status is None:
                 continue
-            mark = _MARK_MAP[status]
-            suffix = progress.group("suffix")
-            last_progress[progress.group("rel").strip()] = PipelineResult(
-                rel=progress.group("rel").strip(),
+            rel = progress.group("rel").strip()
+            detail = _pipeline_detail(progress.group("detail") or "")
+            if not detail:
+                detail = failure_details.get(rel, "")
+            last_progress[rel] = PipelineResult(
+                rel=rel,
                 status=status,
-                detail=(suffix.strip().strip("()") if suffix else ""),
-                mark=mark,
+                detail=detail,
+                mark=_MARK_MAP[status],
+                timestamp=timestamp,
             )
 
     if summary_rows:
@@ -302,9 +459,11 @@ class RunsSnapshot:
     workflow runs with their jobs, and — once a job is finished — the
     per-pipeline outcomes extracted from its log. It is built by
     :func:`compose_snapshot`, which only accepts payloads already fetched by
-    the caller (the panel itself never touches the network). When ``error`` is
-    set the runs/jobs collections are empty and the panel shows the message
-    instead of a partial tree.
+    the caller (the panel itself never touches the network). A top-level
+    ``error`` means that the run list could not be obtained. ``warnings`` and
+    ``partial_errors`` describe failures that happened while enriching an
+    otherwise usable run list, so the panel can render the partial tree rather
+    than silently dropping it.
     """
 
     repo_path: str
@@ -313,10 +472,39 @@ class RunsSnapshot:
     pipelines: dict[int, tuple[PipelineResult, ...]] = field(default_factory=dict)
     error: str | None = None
     fetched_at: str | None = None  # ISO timestamp of the last successful poll
+    warnings: tuple[str, ...] = ()
+    partial_errors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalise message collections for direct dataclass construction."""
+        object.__setattr__(self, "warnings", _normalise_messages(self.warnings))
+        object.__setattr__(self, "partial_errors", _normalise_messages(self.partial_errors))
 
     @property
     def has_data(self) -> bool:
-        return bool(self.runs) and self.error is None
+        """Return whether the snapshot contains a renderable run tree."""
+        return bool(self.runs)
+
+    @property
+    def is_partial(self) -> bool:
+        """Return whether usable runs are accompanied by a partial failure."""
+        return self.has_data and bool(self.messages)
+
+    @property
+    def messages(self) -> tuple[str, ...]:
+        """Return all user-facing partial or top-level messages in order."""
+        values: list[str] = []
+        for message in (*self.warnings, *self.partial_errors):
+            if message not in values:
+                values.append(message)
+        if self.error and self.error not in values:
+            values.append(self.error)
+        return tuple(values)
+
+    @property
+    def has_partial_data(self) -> bool:
+        """Compatibility alias for :attr:`is_partial`."""
+        return self.is_partial
 
 
 def compose_snapshot(
@@ -327,6 +515,9 @@ def compose_snapshot(
     raw_jobs: dict[int, list[dict[str, Any]]] | None = None,
     error: str | None = None,
     fetched_at: str | None = None,
+    warnings: Iterable[str] | str | None = None,
+    partial_errors: Iterable[str] | str | None = None,
+    errors: Iterable[str] | str | None = None,
 ) -> RunsSnapshot:
     """Assemble a :class:`RunsSnapshot` from already-fetched API payloads.
 
@@ -334,20 +525,33 @@ def compose_snapshot(
     its ``jobs[]`` payload (already JSON-decoded by the caller) so this helper
     stays free of any I/O. Per-job pipeline outcomes in ``pipelines`` are keyed
     by **job id** and matched back to their run through the job's ``run_id``
-    field. Missing payloads yield empty collections, never exceptions.
+    field. Missing payloads yield empty collections, never exceptions. A
+    non-empty ``error`` is preserved alongside any runs that were fetched, and
+    ``warnings``/``partial_errors`` make enrichment failures explicit.
+    ``errors`` is accepted as a compatibility spelling for partial errors.
     """
     run_summaries = tuple(run_summary(run) for run in runs if isinstance(run, dict))
     jobs_by_run: dict[int, tuple[JobSummary, ...]] = {}
     pipelines_by_job: dict[int, tuple[PipelineResult, ...]] = {}
     if raw_jobs:
-        for run_id, job_payloads in raw_jobs.items():
+        for raw_run_id, job_payloads in raw_jobs.items():
+            run_id = _as_int(raw_run_id, -1)
+            if run_id < 0 or not isinstance(job_payloads, list):
+                continue
             summarized = tuple(job_summary(job) for job in job_payloads if isinstance(job, dict))
             if summarized:
                 jobs_by_run[run_id] = summarized
     if pipelines:
-        pipelines_by_job = {
-            int(job_id): tuple(results) for job_id, results in pipelines.items() if int(job_id) >= 0
-        }
+        for raw_job_id, results in pipelines.items():
+            job_id = _as_int(raw_job_id, -1)
+            if job_id < 0 or not isinstance(results, (list, tuple)):
+                continue
+            valid_results = tuple(
+                result for result in results if isinstance(result, PipelineResult)
+            )
+            if valid_results:
+                pipelines_by_job[job_id] = valid_results
+    combined_errors = (*_normalise_messages(partial_errors), *_normalise_messages(errors))
     return RunsSnapshot(
         repo_path=repo_path,
         runs=run_summaries,
@@ -355,4 +559,6 @@ def compose_snapshot(
         pipelines=pipelines_by_job,
         error=error,
         fetched_at=fetched_at,
+        warnings=_normalise_messages(warnings),
+        partial_errors=_normalise_messages(combined_errors),
     )

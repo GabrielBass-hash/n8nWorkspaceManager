@@ -2,6 +2,7 @@
 
 import atexit
 import contextlib
+import logging
 import os
 import signal
 import sys
@@ -11,10 +12,15 @@ from tkinter import messagebox
 
 from .core.config import ConfigError, ConfigStore
 from .core.filelock import LockError, acquire_single_instance_lock
+from .core.paths import logs_dir
 from .docker.manager import DockerManager, resolve_docker_command
 from .gui.app import LauncherApp, window_size
 from .gui.first_launch import run_interactive_first_launch
+from .monitoring.bootstrap import bootstrap_logging
+from .monitoring.store import EventStore
 from .workspaces.manager import WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 
 def _center(root: tk.Tk) -> None:
@@ -72,6 +78,26 @@ def _signal_shutdown(store: ConfigStore, docker: DockerManager, *_args: object) 
     sys.exit(0)
 
 
+def _start_monitoring() -> EventStore | None:
+    """Install the persistent event store, degrading to stderr-only on failure.
+
+    Monitoring must never keep the launcher from starting: an unwritable log
+    directory (read-only home, missing ``platformdirs`` path) falls back to
+    the default logging configuration instead of raising.
+    """
+    try:
+        store = bootstrap_logging(logs_dir())
+    except Exception as exc:
+        logging.basicConfig(level=logging.INFO)
+        logging.getLogger(__name__).warning("Journalisation persistante indisponible : %s", exc)
+        return None
+    logger.info(
+        "Surveillance active",
+        extra={"event_store": str(store.path), "retention_days": store.retention_days},
+    )
+    return store
+
+
 def main() -> None:
     """Application entry point: config, first-launch wizard, Tkinter GUI."""
     store = ConfigStore()
@@ -86,6 +112,7 @@ def main() -> None:
                 "Une autre instance de l'application est déjà en cours d'exécution.",
             )
         return
+    monitor = _start_monitoring()
     docker = DockerManager(command=resolve_docker_command())
     atexit.register(stop_all, store, docker)
     # LIFO: released after stop_all has finished its best-effort shutdown.
@@ -107,14 +134,23 @@ def main() -> None:
             _center(root)
             if store.path.exists():
                 _backup_unreadable_config(store)
+                logger.warning("Configuration illisible : copie de sauvegarde créée")
+            logger.info("Assistant de premier lancement affiché")
             if run_interactive_first_launch(store, docker, root=root) is None:
                 root.destroy()
                 return
         manager = WorkspaceManager(store, docker)
-        LauncherApp(store, manager, manager.docker, root=root).run()
+        logger.info(
+            "Interface ouverte",
+            extra={"workspaces": len(manager.list())},
+        )
+        LauncherApp(store, manager, manager.docker, root=root, monitor=monitor).run()
     finally:
         with contextlib.suppress(Exception):
             instance_lock.release()
+        if monitor is not None:
+            with contextlib.suppress(Exception):
+                monitor.close()
 
 
 if __name__ == "__main__":

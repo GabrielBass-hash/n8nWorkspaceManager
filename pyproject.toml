@@ -60,6 +60,10 @@ ignore = []
 "src/n8n_launcher/git/**" = ["S603", "S604", "S607"]
 "src/n8n_launcher/github/**" = ["S603", "S604", "S607"]
 "src/n8n_launcher/platform/**" = ["S603", "S604", "S607"]
+# ports.py: the availability probe binds the wildcard on purpose — docker-proxy
+# listens on 0.0.0.0, so a loopback-only probe reports a busy port as free. The
+# socket is closed without ever serving anything.
+"src/n8n_launcher/platform/ports.py" = ["S104"]
 # workspaces: includes subprocess (S603/S607) + S606 (no shell) + fail-graceful S110
 "src/n8n_launcher/workspaces/**" = ["S603", "S604", "S605", "S606", "S607", "S110"]
 "src/n8n_launcher/remote/**" = ["S603", "S604", "S607"]
@@ -85,7 +89,7 @@ ignore = []
 "src/n8n_launcher/gui/update_flow.py" = ["S110"]
 # tests: fake passwords, deliberate try/except/pass, subprocess, exec (meta-tests
 # of generated scripts), long fixture strings
-"tests/**" = ["S101", "ANN", "S102", "S603", "S604", "S605", "S607", "S105", "S106", "S110", "S108", "F841", "E501"]
+"tests/**" = ["S101", "ANN", "S102", "S603", "S604", "S605", "S607", "S105", "S106", "S110", "S108", "S104", "F841", "E501"]
 "scripts/**" = ["S603", "S604", "S605", "S607"]
 
 [tool.ruff.lint.pyupgrade]

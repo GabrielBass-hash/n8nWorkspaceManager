@@ -109,6 +109,20 @@ def _step_label(status: str) -> str:
     return _STEP_LABELS.get(status, status)
 
 
+def _format_timestamp(iso_timestamp: str | None) -> str:
+    """Render an ISO timestamp in local time; ``""`` when it is invalid."""
+    if not iso_timestamp:
+        return ""
+    try:
+        value = iso_timestamp[:-1] + "+00:00" if iso_timestamp.endswith("Z") else iso_timestamp
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%d/%m/%Y %H:%M")
+
+
 def _format_fetched_at(iso_timestamp: str) -> str:
     """Render an ISO timestamp as ``HH:MM:SS`` (local time); ``""`` when bad."""
     try:
@@ -125,21 +139,32 @@ def _row_of(
 
 
 def _run_badge(run: ci_runs.RunSummary) -> str:
-    """Short header describing one run row."""
-    return f"#{run.run_number} · {run.branch or run.head_sha[:8]}"
+    """Short header describing one run row, including its creation time."""
+    badge = f"#{run.run_number} · {run.branch or run.head_sha[:8]}"
+    created_at = _format_timestamp(run.created_at)
+    return f"{badge} · {created_at}" if created_at else badge
+
+
+def _snapshot_messages(snapshot: ci_runs.RunsSnapshot) -> tuple[str, ...]:
+    """Return partial and top-level messages in display order."""
+    return snapshot.messages
 
 
 def runs_summary_text(snapshot: ci_runs.RunsSnapshot) -> str:
-    """Short header describing the whole snapshot.
+    """Short header describing the whole snapshot and any partial failures.
 
     Counts finished and in-flight runs and, when the host populated
     ``fetched_at``, appends the time of the last successful poll so the
-    auto-refresh is visible without a button.
+    auto-refresh is visible without a button. Warnings and partial errors are
+    appended without suppressing the run tree.
     """
-    if snapshot.error:
+    if snapshot.error and not snapshot.runs:
         return f"GitHub Actions indisponible : {snapshot.error}"
     if not snapshot.runs:
-        return "Aucun run GitHub Actions pour ce workspace."
+        text = "Aucun run GitHub Actions pour ce workspace."
+        if snapshot.messages:
+            return f"{text}\n" + " · ".join(snapshot.messages)
+        return text
     completed = sum(1 for run in snapshot.runs if run.conclusion)
     active = sum(1 for run in snapshot.runs if ci_runs.run_status_is_active(run.status))
     parts = [f"{len(snapshot.runs)} run(s)", f"{completed} terminé(s)"]
@@ -148,6 +173,8 @@ def runs_summary_text(snapshot: ci_runs.RunsSnapshot) -> str:
     text = " · ".join(parts)
     if snapshot.fetched_at:
         text += f" — à jour {_format_fetched_at(snapshot.fetched_at)}"
+    if snapshot.messages:
+        text += " — " + " · ".join(f"Avertissement : {message}" for message in snapshot.messages)
     return text
 
 
@@ -186,6 +213,7 @@ class RunsPanel(tk.Frame):
         self.run_cb = run
         self._expanded: set[str] = set()
         self._active: set[str] = set()
+        self._row_runs: dict[str, ci_runs.RunSummary] = {}
         self._last: ci_runs.RunsSnapshot = ci_runs.RunsSnapshot("")
         RunsPanel.instances.add(self)
 
@@ -232,6 +260,8 @@ class RunsPanel(tk.Frame):
             self.tree.tag_configure(tag, background=color)
         self.tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
         self.tree.bind("<Double-1>", lambda _event: self._open_selected())
+        self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
+        self.tree.bind("<<TreeviewClose>>", self._on_tree_close)
 
         self._empty = tk.Label(
             self,
@@ -252,47 +282,55 @@ class RunsPanel(tk.Frame):
         return f"run-{run.id}"
 
     def apply(self, snapshot: ci_runs.RunsSnapshot) -> None:
-        """Render *snapshot*, preserving the user's job-level expansion.
+        """Render *snapshot*, preserving selection and expansion state.
 
-        The panel can be hosted in a CI dialog that is closed while a
-        background fetch is in flight; a stale snapshot landing after the
-        dialog's destruction must not touch Tk widgets belonging to a dead
-        interpreter path (``TclError: invalid command name …``). The ``apply``
-        is re-entered on the main thread only, so checking existence up front
-        is enough — no destroy can interleave mid-render.
+        A snapshot may contain usable runs together with enrichment failures.
+        Such a snapshot is rendered as a partial tree and its messages are
+        shown below the tree instead of replacing the data. A stale snapshot
+        landing after the dialog's destruction is ignored.
         """
         try:
             if not self.winfo_exists():
                 return
         except Exception:
             return
+        selected = self.tree.selection()
         self._last = snapshot
         self._summary.config(text=runs_summary_text(snapshot))
 
         for item in self.tree.get_children():
             self.tree.delete(item)
-
+        self._row_runs.clear()
         # While a run is in flight, launching a second one would cancel it
         # (the generated workflow carries ``concurrency: cancel-in-progress``),
         # so button state is derived straight from the snapshot.
         self.set_run_enabled(not self.has_active_run)
 
-        if snapshot.error or not snapshot.runs:
+        if not snapshot.runs:
             if snapshot.error:
                 self._empty.config(
                     text=f"GitHub Actions indisponible : {snapshot.error}\n"
                     "Le panneau s'actualise automatiquement dès que GitHub répond."
                 )
             else:
-                self._empty.config(text="Aucun run GitHub Actions pour ce workspace.")
+                text = "Aucun run GitHub Actions pour ce workspace."
+                if snapshot.messages:
+                    text += "\n" + " · ".join(snapshot.messages)
+                self._empty.config(text=text)
+            self._restore_selection(selected)
             return
-        self._empty.config(text="")
+
+        if snapshot.messages:
+            self._empty.config(text="\n".join(snapshot.messages))
+        else:
+            self._empty.config(text="")
 
         active_run_ids = {
             run.id for run in snapshot.runs if ci_runs.run_status_is_active(run.status)
         }
         for run, jobs in _row_of(snapshot):
             run_iid = self.layout_key(run)
+            self._row_runs[run_iid] = run
             active_run = run.id in active_run_ids
             conclusion = run.conclusion or run.status
             tag = {
@@ -312,6 +350,7 @@ class RunsPanel(tk.Frame):
             )
             for job in jobs:
                 job_iid = f"job-{run.id}-{job.id}"
+                self._row_runs[job_iid] = run
                 # A job of an in-flight run without a conclusion is the live
                 # one; everything else is over (or still queued behind it).
                 live_job = active_run and job.conclusion is None
@@ -326,6 +365,9 @@ class RunsPanel(tk.Frame):
                 detail = job.human_status
                 if live_job and job.current_step is not None:
                     detail += f" — étape : {job.current_step[0]}"
+                job_timestamp = _format_timestamp(job.completed_at or job.started_at)
+                if job_timestamp:
+                    detail += f" — {job_timestamp}"
                 self.tree.insert(
                     run_iid,
                     "end",
@@ -348,7 +390,9 @@ class RunsPanel(tk.Frame):
                             values=(_step_label(status),),
                             tags=(step_tag,),
                         )
-                for pipeline in snapshot.pipelines.get(job.id, ()):
+                for index, pipeline in enumerate(snapshot.pipelines.get(job.id, ())):
+                    pipeline_iid = f"pipeline-{run.id}-{job.id}-{index}"
+                    self._row_runs[pipeline_iid] = run
                     # Map the outcome to the panel's ASCII marks instead of
                     # echoing ``pipeline.mark`` (parsed from the runner log):
                     # that source glyph set (✔/◻/✘) is absent from Linux fonts.
@@ -357,14 +401,34 @@ class RunsPanel(tk.Frame):
                         "failure": _MARK_FAILURE,
                         "waiting": _MARK_WAITING,
                     }.get(pipeline.status, _MARK_SKIPPED)
+                    pipeline_text = f"        {pipeline_mark}  {pipeline.rel} ({pipeline.label})"
+                    pipeline_detail = pipeline.detail or pipeline.label
+                    pipeline_timestamp = _format_timestamp(pipeline.timestamp)
+                    if pipeline_timestamp:
+                        pipeline_detail = f"{pipeline_detail} · {pipeline_timestamp}"
+                    pipeline_tag = {
+                        "success": "success",
+                        "failure": "failure",
+                        "waiting": "muted",
+                    }.get(pipeline.status)
                     self.tree.insert(
                         job_iid,
                         "end",
-                        text=f"        {pipeline_mark}  {pipeline.rel}",
-                        values=(pipeline.detail or pipeline.status,),
-                        tags=("muted",) if pipeline.status == "waiting" else (),
+                        iid=pipeline_iid,
+                        text=pipeline_text,
+                        values=(pipeline_detail,),
+                        tags=(pipeline_tag,) if pipeline_tag else (),
                     )
             self.tree.item(run_iid, open=active_run or run_iid in self._expanded)
+        self._restore_selection(selected)
+
+    def _restore_selection(self, selected: tuple[str, ...] | list[str]) -> None:
+        """Restore a selected row when its stable id survived the refresh."""
+        iid = next((candidate for candidate in selected if candidate in self._row_runs), None)
+        if iid is None:
+            return
+        with contextlib.suppress(Exception):
+            self.tree.selection_set(iid)
 
     @property
     def expanded(self) -> set[str]:
@@ -384,10 +448,33 @@ class RunsPanel(tk.Frame):
 
     def remember_expansion(self, iid: str, is_open: bool) -> None:
         """Record an open/closed state so a later :meth:`apply` keeps it."""
+        if not iid:
+            return
         if is_open:
             self._expanded.add(iid)
         else:
             self._expanded.discard(iid)
+
+    def _focused_iid(self) -> str | None:
+        """Return the focused row id when the Tk tree provides one."""
+        with contextlib.suppress(Exception):
+            iid = self.tree.focus()
+            if isinstance(iid, str) and iid:
+                return iid
+        selection = self.tree.selection()
+        return selection[0] if selection else None
+
+    def _on_tree_open(self, _event: tk.Event) -> None:
+        """Remember a row opened by the user."""
+        iid = self._focused_iid()
+        if iid is not None:
+            self.remember_expansion(iid, True)
+
+    def _on_tree_close(self, _event: tk.Event) -> None:
+        """Remember a row closed by the user."""
+        iid = self._focused_iid()
+        if iid is not None:
+            self.remember_expansion(iid, False)
 
     def refresh(self) -> None:
         """Ask the host to fetch fresh data (the panel never fetches itself)."""
@@ -399,11 +486,16 @@ class RunsPanel(tk.Frame):
             self.run_cb()
 
     def _open_selected(self) -> None:
+        """Open the GitHub page for the run owning the selected row."""
         selection = self.tree.selection()
         if not selection:
             return
         iid = selection[0]
-        for run, _jobs in _row_of(self._last):
-            if iid == self.layout_key(run):
-                self.open_run_cb(run)
+        run = self._row_runs.get(iid)
+        if run is not None:
+            self.open_run_cb(run)
+            return
+        for candidate, _jobs in _row_of(self._last):
+            if iid == self.layout_key(candidate):
+                self.open_run_cb(candidate)
                 return

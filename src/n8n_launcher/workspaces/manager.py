@@ -67,11 +67,18 @@ from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
 from ..remote import (
+    RemoteExecutionStatus,
+    RemoteHealth,
     bare_dir,
     build_secrets_document,
     chmod_remote,
     marker_path,
     mkdir_remote,
+    read_remote_deploy_history,
+    read_remote_deploy_marker,
+    remote_execution_status,
+    remote_health,
+    remote_logs,
     render_deploy_script,
     render_hook,
     resolve_base,
@@ -83,6 +90,11 @@ from ..remote.ssh import ssh_run
 from . import ci
 
 logger = logging.getLogger(__name__)
+
+# A publish push runs the server's post-receive hook synchronously: Compose up
+# plus the workflow/credential import, which is far past the 30 s that every
+# other git call gets.
+_PUBLISH_PUSH_TIMEOUT = 300
 
 
 def _is_push_rejection(exc: GitError) -> bool:
@@ -982,7 +994,12 @@ class WorkspaceManager:
                     "server",
                     branch,
                     "main",
-                    env=git_ssh_env(server.key_path) if server.key_path else None,
+                    env=(
+                        git_ssh_env(server.key_path, server.ssh_port) if server.key_path else None
+                    ),
+                    # The server's post-receive hook deploys synchronously, so
+                    # the push outlasts the 30 s budget of a normal git call.
+                    timeout=_PUBLISH_PUSH_TIMEOUT,
                 )
             except GitError as exc:
                 detail = str(exc)
@@ -1000,13 +1017,77 @@ class WorkspaceManager:
         status, marker = self._poll_deploy(server, workspace.id, expected_sha=expected_sha)
         self._record_server_status(workspace, status, marker)
         if status == "error":
+            # Deployment failures are remote incidents: they are logged as
+            # errors with the server error text so the console surfaces them.
+            logger.error(
+                "Deployment failed on %s for %s: %s",
+                server.host,
+                workspace.name,
+                marker.get("error") or "unknown error",
+                extra={"workspace_id": workspace.id, "status": status},
+            )
             raise WorkspaceError(marker.get("error") or "Le déploiement a échoué sur le serveur.")
         if status == "timeout":
+            logger.error(
+                "Deployment confirmation timed out on %s for %s",
+                server.host,
+                workspace.name,
+                extra={"workspace_id": workspace.id, "status": status},
+            )
             raise WorkspaceError(
                 "Le serveur n'a pas confirmé le déploiement avant la limite de temps "
                 "(vérifiez le log serveur)."
             )
         logger.info("Published %s (%s) to %s", workspace.name, branch, server.host)
+
+    # ------------------------------------------------- server observability
+    def _server_config(self, workspace_id: str) -> tuple[Workspace, ServerConfig]:
+        """Return the workspace and its enabled server configuration."""
+        workspace = self._find(self.store.load(), workspace_id)
+        if not workspace.server.enabled:
+            raise WorkspaceError(
+                "Aucun serveur configuré pour ce workspace : configurez-le pour le superviser."
+            )
+        return workspace, workspace.server
+
+    def server_health(self, workspace_id: str, *, timeout: float = 30.0) -> RemoteHealth:
+        """Return the read-only Compose health snapshot of a deployed workspace."""
+        workspace, server = self._server_config(workspace_id)
+        health = remote_health(server, workspace.id, timeout=timeout)
+        if not health.healthy:
+            logger.warning(
+                "Server health degraded for %s on %s: %s",
+                workspace.name,
+                server.host,
+                health.error or health.status,
+            )
+        return health
+
+    def server_logs(self, workspace_id: str, *, lines: int = 200) -> str:
+        """Return bounded, redacted n8n container logs from the server."""
+        workspace, server = self._server_config(workspace_id)
+        return remote_logs(server, workspace.id, lines=lines)
+
+    def server_deploy_status(
+        self, workspace_id: str, *, timeout: float = 30.0
+    ) -> tuple[dict[str, object] | None, tuple[dict[str, object], ...]]:
+        """Return the last deploy marker and the bounded deploy history."""
+        workspace, server = self._server_config(workspace_id)
+        marker = read_remote_deploy_marker(server, workspace.id, timeout=timeout)
+        history = read_remote_deploy_history(server, workspace.id, timeout=timeout)
+        return marker, history
+
+    def server_execution_status(
+        self, workspace_id: str, *, limit: int = 20
+    ) -> RemoteExecutionStatus:
+        """Return the deployed n8n's most recent executions.
+
+        Read-only, like the other server observability calls: the remote script
+        is queried over SSH and returns redacted summaries, never execution data.
+        A server deployed before the status command answers ``supported=False``.
+        """
+        workspace, server = self._server_config(workspace_id)
+        return remote_execution_status(server, workspace.id, limit=limit)
 
     def _secrets_remote_path(self, workspace: Workspace) -> str:
         """Remote path of the workspace's secrets document."""
@@ -1109,6 +1190,7 @@ class WorkspaceManager:
         write_compose(workspace, compose)
         workspace.state = WorkspaceState.STARTING
         self.store.save(config)
+        logger.info("Starting %s on port %d", workspace.name, workspace.port)
         try:
             self.docker.up(workspace, compose)
             if workspace.db.mode is DbMode.MANAGED:
@@ -1118,7 +1200,16 @@ class WorkspaceManager:
                     workspace.workflows_dir / "db" / "migrations",
                     compose,
                 )
-        except Exception:
+        except Exception as exc:
+            # A failed start is the incident the user must see: the traceback
+            # lands in the journal, so the monitoring console raises itself.
+            logger.error(
+                "Start failed for %s: %s",
+                workspace.name,
+                exc,
+                exc_info=True,
+                extra={"workspace_id": workspace.id, "port": workspace.port},
+            )
 
             def mark_error(config: AppConfig) -> None:
                 self._find(config, workspace_id).state = WorkspaceState.ERROR
@@ -1132,6 +1223,7 @@ class WorkspaceManager:
             current.restart_required = False
 
         self.store.mutate(mark_running)
+        logger.info("Started %s on port %d", workspace.name, workspace.port)
         return self._find(self.store.load(), workspace_id)
 
     def _workspace_db_mode(self, workspace_id: str) -> DbMode:
@@ -1187,6 +1279,7 @@ class WorkspaceManager:
         # down a second time.
         if compose.exists():
             self.docker.down(workspace, compose, remove_orphans=True)
+        logger.info("Stopped %s", workspace.name)
 
         def mark_stopped(config: AppConfig) -> Workspace:
             current = self._find(config, workspace_id)

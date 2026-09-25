@@ -79,6 +79,38 @@ def parse_compose_status(raw: str) -> dict[str, str]:
     return services
 
 
+def parse_container_labels(raw: object) -> dict[str, str]:
+    """Return the label map of one ``docker ps --format json`` row.
+
+    The ``Labels`` field is shaped by the CLI version, and all three shapes
+    occur in the wild: a real object, a JSON string, and — with recent Docker
+    (Compose 2.35 on Docker Desktop) — a flat ``k=v,k=v`` string that is *not*
+    JSON. Reading only the first two silently dropped every container on such a
+    host, so the project map came back empty and no workspace ever looked
+    running. Values may contain ``=``, hence the partition on the first one.
+    """
+    if isinstance(raw, dict):
+        return {str(key): str(value) for key, value in raw.items()}
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return {str(key): str(value) for key, value in decoded.items()}
+    labels: dict[str, str] = {}
+    for pair in text.split(","):
+        key, separator, value = pair.partition("=")
+        if separator and key.strip():
+            labels[key.strip()] = value.strip()
+    return labels
+
+
 def parse_container_states(raw: str) -> dict[str, dict[str, str]]:
     """Map every Compose project to its container states from ``docker ps``.
 
@@ -96,20 +128,12 @@ def parse_container_states(raw: str) -> dict[str, dict[str, str]]:
             row = json.loads(line)
         except ValueError:
             continue
-        labels = row.get("Labels") or {}
-        if isinstance(labels, str):
-            # ``json`` template output can stringify the label map; recover it.
-            try:
-                labels = json.loads(labels)
-            except ValueError:
-                continue
-        if not isinstance(labels, dict):
-            continue
+        labels = parse_container_labels(row.get("Labels"))
         project = labels.get("com.docker.compose.project")
         service = labels.get("com.docker.compose.service")
         state = row.get("State")
         if project and service and isinstance(state, str):
-            projects.setdefault(str(project), {})[str(service)] = state
+            projects.setdefault(project, {})[service] = state
     return projects
 
 

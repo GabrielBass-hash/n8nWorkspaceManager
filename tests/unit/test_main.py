@@ -13,6 +13,7 @@ from n8n_launcher.__main__ import (
     _backup_unreadable_config,
     _center,
     _signal_shutdown,
+    _start_monitoring,
     main,
     stop_all,
 )
@@ -136,6 +137,53 @@ def test_signal_shutdown_stops_workspaces_then_exits() -> None:
 
     assert excinfo.value.code == 0
     stop.assert_called_once_with(store, docker)
+
+
+def test_start_monitoring_installs_the_event_store(tmp_path: Path) -> None:
+    from n8n_launcher.monitoring.store import EventStore
+
+    with patch("n8n_launcher.__main__.logs_dir", return_value=tmp_path):
+        monitor = _start_monitoring()
+
+    try:
+        assert isinstance(monitor, EventStore)
+        assert monitor.path == tmp_path / "events.db"
+        assert any(event.message == "Surveillance active" for event in monitor.read_events())
+    finally:
+        assert monitor is not None
+        monitor.close()
+
+
+def test_start_monitoring_degrades_to_stderr_when_unwritable() -> None:
+    with (
+        patch("n8n_launcher.__main__.bootstrap_logging", side_effect=OSError("read-only")),
+        patch("n8n_launcher.__main__.logging") as logging_module,
+    ):
+        assert _start_monitoring() is None
+
+    logging_module.basicConfig.assert_called_once()
+
+
+def test_main_passes_the_monitor_to_the_app(tmp_path: Path) -> None:
+    from n8n_launcher.core.models import AppConfig
+
+    store = ConfigStore(tmp_path / "launcher.db")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    ctx = _patch_main(store, wizard_value=None)
+    monitor = MagicMock()
+
+    with _enter(ctx) as stack:
+        launcher = stack.enter_context(
+            patch(
+                "n8n_launcher.__main__.LauncherApp",
+                return_value=SimpleNamespace(run=MagicMock()),
+            )
+        )
+        stack.enter_context(patch("n8n_launcher.__main__._start_monitoring", return_value=monitor))
+        main()
+
+    assert launcher.call_args.kwargs["monitor"] is monitor
+    monitor.close.assert_called_once()
 
 
 def test_main_missing_config_runs_wizard_without_backup(tmp_path: Path) -> None:

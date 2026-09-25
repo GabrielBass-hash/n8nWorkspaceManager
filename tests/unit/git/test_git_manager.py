@@ -774,6 +774,13 @@ def test_git_push_ref_forwards_env(tmp_path: Path) -> None:
     assert "PATH" in forwarded
 
 
+def test_git_push_ref_accepts_a_deployment_timeout(tmp_path: Path) -> None:
+    with patch("n8n_launcher.git.manager.subprocess.run", return_value=completed()) as run:
+        git_push_ref(tmp_path, "server", "dev", "main", timeout=300)
+
+    assert run.call_args.kwargs["timeout"] == 300
+
+
 def test_git_ssh_env_embeds_key_and_batch_mode(tmp_path: Path) -> None:
     from n8n_launcher.git.manager import git_ssh_env
 
@@ -783,6 +790,20 @@ def test_git_ssh_env_embeds_key_and_batch_mode(tmp_path: Path) -> None:
     assert "BatchMode=yes" in command
     assert "StrictHostKeyChecking=accept-new" in command
     assert "IdentitiesOnly=yes" in command
+
+
+def test_git_ssh_env_adds_a_non_default_ssh_port(tmp_path: Path) -> None:
+    """The scp-syntax server URL has no port slot, so ssh must be told.
+
+    ``git push server`` spawns system ssh with this command: without ``-p`` a
+    server configured on another port is dialled on 22 and the publish fails.
+    """
+    from n8n_launcher.git.manager import git_ssh_env
+
+    assert "-p 2222" in git_ssh_env("/home/me/.ssh/id_ed25519", 2222)["GIT_SSH_COMMAND"]
+    # The default port stays implicit: less noise in every command line.
+    assert "-p" not in git_ssh_env("/home/me/.ssh/id_ed25519", 22)["GIT_SSH_COMMAND"]
+    assert "-p" not in git_ssh_env("/home/me/.ssh/id_ed25519")["GIT_SSH_COMMAND"]
 
 
 def test_ensure_workspace_branch_noop_when_already_active(tmp_path: Path) -> None:

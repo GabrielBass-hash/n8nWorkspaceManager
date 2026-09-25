@@ -63,6 +63,11 @@ class FakeTk:
             self._options = dict(kwargs)
             self._bindings: dict[str, object] = {}
 
+        @property
+        def text(self):
+            """Mirror Tk: ``text`` is just the option set through ``config``."""
+            return self._options.get("text", "")
+
         def pack(self, *_args, **_kwargs) -> None:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
@@ -213,7 +218,10 @@ class FakeTk:
             pass
 
         def title(self, _value: str) -> None:
-            pass
+            self.title_text = _value
+
+        def minsize(self, *_args) -> None:
+            self._minsize = _args
 
         def configure(self, **kwargs) -> None:
             self._options.update(kwargs)
@@ -222,6 +230,12 @@ class FakeTk:
             pass
 
         def transient(self, _root) -> None:
+            pass
+
+        def lift(self) -> None:
+            self.lifted = True
+
+        def deiconify(self) -> None:
             pass
 
         def grab_set(self) -> None:
@@ -233,8 +247,15 @@ class FakeTk:
         def geometry(self, value: str) -> None:
             self._geometry = value
 
-        def bind(self, sequence: str, handler) -> None:
-            self._bindings[sequence] = handler
+        def bind(self, sequence: str, handler=None, add: bool | str | None = None) -> None:
+            if add:
+                # ``add="+"`` keeps every handler; the fake stores them as a list.
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
 
         def destroy(self) -> None:
             self.destroyed = True
@@ -276,6 +297,7 @@ class FakeTk:
             self._parent = parent
             self._options = dict(kwargs)
             self._bindings: dict[str, object] = {}
+            self._text = ""
 
         def pack(self, *_args, **_kwargs) -> None:
             if hasattr(self._parent, "children"):
@@ -286,6 +308,15 @@ class FakeTk:
 
         def focus_set(self) -> None:
             self._focused = True
+
+        def insert(self, _index: int, text: str) -> None:
+            self._text = f"{self._text}{text}"
+
+        def delete(self, _start: int, _end: int) -> None:
+            self._text = ""
+
+        def get(self) -> str:
+            return self._text
 
     class Radiobutton:
         def __init__(self, parent, **kwargs):
@@ -346,6 +377,29 @@ class FakeTtk:
                 if key in kwargs:
                     setattr(self, key, kwargs.pop(key))
             self._options.update(kwargs)
+
+    class Radiobutton:
+        instances: ClassVar[list["FakeTtk.Radiobutton"]] = []
+
+        def __init__(self, _parent, **kwargs):
+            self._parent = _parent
+            self.text = kwargs.pop("text", None)
+            self.value = kwargs.pop("value", None)
+            self.variable = kwargs.pop("variable", None)
+            self.command = kwargs.pop("command", None)
+            self._options = dict(kwargs)
+            self.packed = False
+            FakeTtk.Radiobutton.instances.append(self)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def select(self) -> None:
+            """Mirror ttk: point the shared variable at this button's value."""
+            if self.variable is not None:
+                self.variable.set(self.value)
 
     class Treeview:
         instances: ClassVar[list["FakeTtk.Treeview"]] = []
@@ -654,6 +708,52 @@ def row_action_button(app, workspace_id: str):
 
 def row_action_text(app, workspace_id: str) -> str:
     return row_action_button(app, workspace_id).text
+
+
+@contextmanager
+def _rebase(widget_class, base=FakeTk.Frame):
+    """Temporarily swap *widget_class*'s ``tk`` base for a fake one.
+
+    A panel captures ``tk.Frame`` at import time, so patching the module-level
+    ``tk``/``ttk`` is not enough to build one without a real Tk root.
+    """
+    original = widget_class.__bases__
+    widget_class.__bases__ = (base,)
+    try:
+        yield widget_class
+    finally:
+        widget_class.__bases__ = original
+
+
+@contextmanager
+def fake_monitoring_panel_bases():
+    """Rebind ``MonitoringPanel``'s ``tk.Frame`` base to :class:`FakeTk.Frame`.
+
+    Same trick as :func:`fake_runs_panel_bases`: the base class is swapped for
+    the test and restored after.
+    """
+    from n8n_launcher.gui.monitoring import MonitoringPanel
+
+    with _rebase(MonitoringPanel) as panel:
+        yield panel
+
+
+@contextmanager
+def fake_server_panel_bases():
+    """Rebind ``ServerPanel``'s ``tk.Frame`` base to :class:`FakeTk.Frame`."""
+    from n8n_launcher.gui.monitoring import ServerPanel
+
+    with _rebase(ServerPanel) as panel:
+        yield panel
+
+
+@contextmanager
+def fake_workspace_panel_bases():
+    """Rebind ``WorkspacePanel``'s ``tk.Frame`` base to :class:`FakeTk.Frame`."""
+    from n8n_launcher.gui.monitoring import WorkspacePanel
+
+    with _rebase(WorkspacePanel) as panel:
+        yield panel
 
 
 @contextmanager
