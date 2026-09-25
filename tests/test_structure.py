@@ -21,9 +21,7 @@ import contextlib
 import ctypes
 import json
 import sys
-import tkinter as tk
 from pathlib import Path
-from tkinter import ttk
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -31,6 +29,9 @@ from unittest.mock import patch
 import pytest
 
 pytest.importorskip("tkinter")
+
+import tkinter as tk
+from tkinter import ttk
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.gui.app import LauncherApp
