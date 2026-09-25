@@ -1027,7 +1027,9 @@ def test_ensure_workspace_branch_renames_legacy_main_to_dev(tmp_path: Path) -> N
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="main"),
-        patch("n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True) as rename,
+        patch(
+            "n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True
+        ) as rename,
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_push") as push,
         patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
@@ -1046,7 +1048,9 @@ def test_ensure_workspace_branch_renames_legacy_per_id_branch(tmp_path: Path) ->
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="n8n/abcd1234"),
-        patch("n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True) as rename,
+        patch(
+            "n8n_launcher.workspaces.manager.git_rename_current_branch", return_value=True
+        ) as rename,
         patch("n8n_launcher.workspaces.manager.git_has_remote", return_value=False),
         patch("n8n_launcher.workspaces.manager.git_push") as push,
         patch("n8n_launcher.workspaces.manager.ensure_workspace_branch", return_value="dev"),
@@ -1078,7 +1082,7 @@ def test_ensure_workspace_branch_does_not_rename_dev(tmp_path: Path) -> None:
 
 
 def test_ensure_workspace_branch_skipped_when_git_disabled(tmp_path: Path) -> None:
-    launcher, store, _, _ = manager(tmp_path)
+    launcher, _, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
     with (

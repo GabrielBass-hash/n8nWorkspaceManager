@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..core.models import (
-    DbMode,
-    Workspace,
     WORKSPACE_DATA_DB_NAME,
     WORKSPACE_DATA_DB_PASSWORD,
     WORKSPACE_DATA_DB_USER,
+    DbMode,
+    Workspace,
 )
 from ..n8n.api import N8nApiClient
 

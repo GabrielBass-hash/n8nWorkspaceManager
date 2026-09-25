@@ -8,9 +8,9 @@ from pathlib import Path
 
 from ..core.models import (
     MAINTENANCE_DATABASE,
-    DbMode,
     N8N_METADATA_DB_PASSWORD,
     N8N_METADATA_DB_USER,
+    DbMode,
     Workspace,
 )
 from ..docker.manager import DockerError, DockerManager

@@ -2017,9 +2017,7 @@ class LauncherApp:
                 if api_response is not None and _api_router_mounted(api_response):
                     return
             if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"n8n n'est pas devenu prêt sur {url} dans les {timeout:.0f}s"
-                )
+                raise RuntimeError(f"n8n n'est pas devenu prêt sur {url} dans les {timeout:.0f}s")
             time.sleep(interval)
 
     def _selected(self) -> Workspace:

@@ -41,7 +41,7 @@ DEFAULT_POSTGRES_IMAGE = "postgres:16"
 # (``database/migrations.py`` imports ``docker.manager``).
 WORKSPACE_DATA_DB_NAME = "data"
 WORKSPACE_DATA_DB_USER = "n8ndata"
-WORKSPACE_DATA_DB_PASSWORD = "launcher-managed-data"
+WORKSPACE_DATA_DB_PASSWORD = "launcher-managed-data"  # noqa: S105
 
 # Credentials of the maintenance role n8n itself uses for its own Postgres
 # database (``DB_POSTGRESDB_*`` in Compose) and that the migration runner uses
@@ -49,7 +49,7 @@ WORKSPACE_DATA_DB_PASSWORD = "launcher-managed-data"
 # Compose renderer and ``migrations.py``.
 N8N_METADATA_DB_NAME = "n8n"
 N8N_METADATA_DB_USER = "n8n"
-N8N_METADATA_DB_PASSWORD = "launcher-managed"
+N8N_METADATA_DB_PASSWORD = "launcher-managed"  # noqa: S105
 MAINTENANCE_DATABASE = "postgres"
 
 

@@ -16,13 +16,13 @@ from uuid import uuid4
 
 from ..core.config import ConfigStore
 from ..core.models import (
+    WORKSPACE_DATA_DB_NAME,
+    WORKSPACE_DATA_DB_USER,
     AppConfig,
     DbConfig,
     DbMode,
     GitConfig,
     ServerConfig,
-    WORKSPACE_DATA_DB_NAME,
-    WORKSPACE_DATA_DB_USER,
     Workspace,
     WorkspaceState,
 )
@@ -35,8 +35,6 @@ from ..database import (
 )
 from ..docker.compose import compose_project_name, render_remote_compose, write_compose
 from ..docker.manager import DockerManager, parse_compose_status
-from ..github import auth
-from ..github.api import GitHubClient, GitHubError
 from ..git import (
     GitError,
     ensure_local_excludes,
@@ -62,6 +60,8 @@ from ..git import (
     workspace_branch,
     workspace_git_lock,
 )
+from ..github import auth
+from ..github.api import GitHubClient, GitHubError
 from ..n8n.api import N8nApiClient, N8nApiError
 from ..n8n.owner import OwnerSetup
 from ..n8n.workflows import SyncRunner

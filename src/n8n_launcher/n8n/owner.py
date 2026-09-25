@@ -118,9 +118,13 @@ class OwnerSetup:
                     raise
                 last_error = exc
             except requests.RequestException as exc:
-                last_error = OwnerSetupError(f"La requête de configuration du compte n8n a échoué : {exc}")
+                last_error = OwnerSetupError(
+                    f"La requête de configuration du compte n8n a échoué : {exc}"
+                )
             time.sleep(2.0)
-        raise last_error or OwnerSetupError("n8n n'est pas devenu prêt pour la configuration du compte propriétaire")
+        raise last_error or OwnerSetupError(
+            "n8n n'est pas devenu prêt pour la configuration du compte propriétaire"
+        )
 
     def _request(self, method: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = self.session.request(method, url, json=payload, timeout=self.timeout)

@@ -6,10 +6,10 @@ from pathlib import Path
 
 from ..core.models import (
     DEFAULT_POSTGRES_IMAGE,
-    DbMode,
     N8N_METADATA_DB_NAME,
     N8N_METADATA_DB_PASSWORD,
     N8N_METADATA_DB_USER,
+    DbMode,
     Workspace,
 )
 
