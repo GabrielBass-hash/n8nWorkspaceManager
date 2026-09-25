@@ -232,6 +232,8 @@ class DockerManager:
             database,
             "-v",
             "ON_ERROR_STOP=1",
+            "-A",
+            "-t",
         ]
         return self._run(command, input=stdin, check=check)
 

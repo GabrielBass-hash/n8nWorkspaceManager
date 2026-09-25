@@ -110,8 +110,8 @@ PY
 
 # Serialize the whole listener under an exclusive flock on .deploy.lock:
 # two pushes arriving together (or a push colliding with the tail of a
-# previous deploy) must not race on the Compose project or the migration
-# SQL. The lock is *blocking* — the later deploy waits its turn instead of
+# previous deploy) must not race on the Compose project or workflow sync.
+# The lock is *blocking* — the later deploy waits its turn instead of
 # failing the push, and its marker is only ever written once the earlier
 # one has finished.
 (
@@ -132,7 +132,7 @@ PY
             marker "$new" "error" "docker compose up -d a échoué"
             exit 0
         fi
-        DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" DEPLOY_PROJECT="$PROJECT" \
+        DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" \
             DEPLOY_N8N_PORT=__N8N_PORT__ \
             python3 "$BASE/deploy.py" "$new" >> "$LOG" 2>&1
     done
@@ -164,12 +164,11 @@ TEMPLATE_DEPLOY = r"""#!/usr/bin/env python3
 # __MARKER__
 #
 # Autonomously deploys one n8n workspace: owner bootstrap, credentials import,
-# workflow upsert + activation, and SQL migrations. Runs on the server from the
-# post-receive hook. Stdlib only.
+# workflow upsert + activation. Runs on the server from the post-receive hook.
+# Stdlib only.
 
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -179,13 +178,11 @@ from urllib.request import HTTPCookieProcessor, build_opener
 
 CHECKOUT = os.environ.get("DEPLOY_CHECKOUT", ".")
 DEPLOY_BASE = os.environ.get("DEPLOY_BASE", ".")
-PROJECT = os.environ.get("DEPLOY_PROJECT", "n8n-ws-deploy") or "n8n-ws-deploy"
 N8N_PORT = int(os.environ.get("DEPLOY_N8N_PORT", "5678"))
 ROOT = "http://127.0.0.1:%d" % N8N_PORT
 SHA = sys.argv[1] if len(sys.argv) > 1 else "unknown"
 SECRETS = os.path.join(DEPLOY_BASE, "secrets.json")
 MARKER = os.path.join(DEPLOY_BASE, "last-deploy.json")
-COMPOSE_CMD = ["docker", "compose", "-p", PROJECT]
 
 WORKFLOW_KEYS = (
     "name",
@@ -277,17 +274,6 @@ def rewrite_credential_ids(nodes, id_map):
             if key in id_map:
                 entry["id"] = id_map[key]
     return nodes
-
-
-def migration_files(checkout):
-    base = os.path.join(checkout, "db", "migrations")
-    if not os.path.isdir(base):
-        return []
-    return sorted(
-        name
-        for name in os.listdir(base)
-        if name.endswith(".sql") and os.path.isfile(os.path.join(base, name))
-    )
 
 
 # --- HTTP plumbing ----------------------------------------------------------
@@ -437,52 +423,6 @@ def sync_workflows(http, id_map):
         progress("workflow %s actif" % name)
 
 
-def run_migrations():
-    # Runs on the server's data database (the postgres volume backing the
-    # workspace), addressed by the pinned ``-p`` project so the container is
-    # the one started by the hook, whatever the checkout directory is named.
-    migrations = migration_files(CHECKOUT)
-    if not migrations:
-        return
-    services = subprocess.run(
-        COMPOSE_CMD + ["config", "--services"],
-        capture_output=True,
-        text=True,
-        cwd=CHECKOUT,
-    ).stdout.split()
-    if "postgres" not in services:
-        progress("db/migrations présentes mais pas de service postgres — ignorées")
-        return
-    for name in migrations:
-        path = os.path.join(CHECKOUT, "db", "migrations", name)
-        with open(path, encoding="utf-8") as fh:
-            sql = fh.read()
-        result = subprocess.run(
-            COMPOSE_CMD
-            + [
-                "exec",
-                "-T",
-                "postgres",
-                "psql",
-                "-U",
-                "n8n",
-                "-d",
-                "n8n",
-                "--set",
-                "ON_ERROR_STOP=1",
-            ],
-            input=sql,
-            capture_output=True,
-            text=True,
-            cwd=CHECKOUT,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "migration %s: %s" % (name, result.stderr.strip() or result.stdout.strip())
-            )
-        progress("migration %s appliquée" % name)
-
-
 def main():
     progress("déploiement de %s" % SHA)
     try:
@@ -496,7 +436,6 @@ def main():
     ensure_api_key(http)
     id_map = sync_credentials(http, secrets)
     sync_workflows(http, id_map)
-    run_migrations()
     write_marker("ok")
     progress("déploiement terminé")
 

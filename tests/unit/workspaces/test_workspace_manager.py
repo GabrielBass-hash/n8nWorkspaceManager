@@ -1,5 +1,7 @@
 import json
+from dataclasses import replace
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -55,6 +57,17 @@ def test_create_managed_workspace_when_migrations_exist(tmp_path: Path) -> None:
     assert workspace.db.password
     assert workspace.port == 5680
     assert store.load().workspaces == [workspace]
+
+
+def test_create_managed_workspace_when_schema_only(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workflows"
+    (workspace_dir / "db").mkdir(parents=True)
+    (workspace_dir / "db" / "schema.sql").write_text("select 1;", encoding="utf-8")
+    launcher, _, _, _ = manager(tmp_path)
+
+    workspace = launcher.create("Demo", workspace_dir)
+
+    assert workspace.db.mode is DbMode.MANAGED
 
 
 def test_create_preserves_provided_managed_db_fields(tmp_path: Path) -> None:
@@ -271,6 +284,7 @@ def test_start_managed_applies_migrations(tmp_path: Path) -> None:
     (workflows_dir / "db" / "migrations").mkdir(parents=True)
     (workflows_dir / "db" / "migrations" / "001-init.sql").write_text("select 1;", encoding="utf-8")
     workspace = launcher.create("Demo", workflows_dir, db=DbConfig(DbMode.MANAGED))
+    docker.exec_psql.return_value = CompletedProcess([], 0, "001-init.sql\n")
 
     with patch(
         "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
@@ -1587,6 +1601,25 @@ def test_update_accepts_server_without_restart(tmp_path: Path) -> None:
     assert store.load().workspaces[0].server.host == "prod.example.test"
 
 
+def test_update_clears_stale_deploy_status_when_server_changes(tmp_path: Path) -> None:
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    current = store.load().workspaces[0]
+    current.server = server_cfg()
+    current.server_last_deploy = '{"status":"ok"}'
+    current.server_last_error = None
+    config = store.load()
+    config.workspaces[0] = current
+    store.save(config)
+
+    replacement = replace(server_cfg(), host="new.example.test")
+    updated = launcher.update(workspace.id, server=replacement)
+
+    assert updated.server_last_deploy is None
+    assert updated.server_last_error is None
+    assert store.load().workspaces[0].server.host == "new.example.test"
+
+
 def test_update_refuses_server_port_used_by_another_workspace(tmp_path: Path) -> None:
     launcher, _, _, _ = manager(tmp_path)
     first = create_none(launcher, tmp_path, port=5681)
@@ -1667,6 +1700,33 @@ def test_install_server_pushes_hook_and_deploy_script(tmp_path: Path) -> None:
     write.assert_any_call(server_cfg(), "n8n-launcher/demo/deploy.py", "#deploy#")
     assert chmod.call_count == 2
     add_remote.assert_called_once()
+
+
+def test_install_server_repoints_existing_server_remote(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    workspace.git = GitConfig(enabled=True)
+    expected = "deploy@new.example.test:n8n-launcher/demo.git"
+
+    with (
+        patch("n8n_launcher.workspaces.manager.test_connection"),
+        patch("n8n_launcher.workspaces.manager.ssh_run"),
+        patch("n8n_launcher.workspaces.manager.mkdir_remote"),
+        patch("n8n_launcher.workspaces.manager.write_remote_file"),
+        patch("n8n_launcher.workspaces.manager.chmod_remote"),
+        patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
+        patch(
+            "n8n_launcher.workspaces.manager.git_remote_url",
+            return_value="deploy@old.example.test:n8n-launcher/demo.git",
+        ),
+        patch("n8n_launcher.workspaces.manager.git_add_remote") as add_remote,
+        patch("n8n_launcher.workspaces.manager.git_set_remote_url") as set_remote,
+    ):
+        replacement = replace(server_cfg(), host="new.example.test")
+        launcher.install_server(workspace, replacement)
+
+    add_remote.assert_not_called()
+    set_remote.assert_called_once_with(workspace.workflows_dir, "server", expected)
 
 
 def test_install_server_failure_raises_without_persisting(tmp_path: Path) -> None:
@@ -1777,11 +1837,12 @@ def test_publish_exports_pushes_main_and_records_status(tmp_path: Path) -> None:
         patch("n8n_launcher.workspaces.manager.git_commit", return_value=True) as commit,
         patch("n8n_launcher.workspaces.manager.git_push_ref") as push_ref,
         patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_head", return_value="abc123"),
         patch(
             "n8n_launcher.workspaces.manager.git_ssh_env",
             return_value={"GIT_SSH_COMMAND": "ssh -i k"},
         ),
-        patch.object(WorkspaceManager, "_poll_deploy", return_value=("ok", marker)),
+        patch.object(WorkspaceManager, "_poll_deploy", return_value=("ok", marker)) as poll,
     ):
         launcher.publish(workspace)
 
@@ -1800,6 +1861,7 @@ def test_publish_exports_pushes_main_and_records_status(tmp_path: Path) -> None:
     assert args[2] == "dev"
     assert args[3] == "main"
     assert kwargs["env"] == {"GIT_SSH_COMMAND": "ssh -i k"}
+    poll.assert_called_once_with(workspace.server, workspace.id, expected_sha="abc123")
     stored = store.load().workspaces[0]
     assert stored.server_last_error is None
     assert stored.server_last_deploy is not None and stored.server_last_deploy != ""
@@ -1818,7 +1880,7 @@ def test_publish_records_error_status_and_raises(tmp_path: Path) -> None:
 
     workspace = launcher.store.mutate(apply)
 
-    marker = {"sha": "abc123", "status": "error", "at": 1700000000, "error": "migration 001: boom"}
+    marker = {"sha": "abc123", "status": "error", "at": 1700000000, "error": "workflow 001: boom"}
 
     with (
         patch("n8n_launcher.workspaces.manager.git_is_repo", return_value=True),
@@ -1834,6 +1896,7 @@ def test_publish_records_error_status_and_raises(tmp_path: Path) -> None:
         patch("n8n_launcher.workspaces.manager.git_commit", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_push_ref"),
         patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_head", return_value="abc123"),
         patch("n8n_launcher.workspaces.manager.git_ssh_env", return_value={}),
         patch.object(WorkspaceManager, "_poll_deploy", return_value=("error", marker)),
         pytest.raises(WorkspaceError, match="boom"),
@@ -1841,7 +1904,7 @@ def test_publish_records_error_status_and_raises(tmp_path: Path) -> None:
         launcher.publish(workspace)
 
     stored = store.load().workspaces[0]
-    assert stored.server_last_error == "migration 001: boom"
+    assert stored.server_last_error == "workflow 001: boom"
 
 
 def test_publish_timeout_raises(tmp_path: Path) -> None:
@@ -1871,6 +1934,7 @@ def test_publish_timeout_raises(tmp_path: Path) -> None:
         patch("n8n_launcher.workspaces.manager.git_commit", return_value=True),
         patch("n8n_launcher.workspaces.manager.git_push_ref"),
         patch("n8n_launcher.workspaces.manager.git_current_branch", return_value="dev"),
+        patch("n8n_launcher.workspaces.manager.git_head", return_value="abc123"),
         patch("n8n_launcher.workspaces.manager.git_ssh_env", return_value={}),
         patch.object(WorkspaceManager, "_poll_deploy", return_value=("timeout", {})),
         pytest.raises(WorkspaceError, match=r"limite de temps|timed out|expir"),
@@ -1917,7 +1981,9 @@ def test_poll_deploy_returns_ok_marker(tmp_path: Path) -> None:
     ):
         result = ssh.return_value
         result.stdout = _json.dumps(marker)
-        status, payload = launcher._poll_deploy(server_cfg(), "demo", timeout=1.0, interval=0.01)
+        status, payload = launcher._poll_deploy(
+            server_cfg(), "demo", expected_sha="abc", timeout=1.0, interval=0.01
+        )
 
     assert status == "ok"
     assert payload["status"] == "ok"
@@ -1930,10 +1996,30 @@ def test_poll_deploy_returns_error_marker(tmp_path: Path) -> None:
 
     with patch("n8n_launcher.workspaces.manager.ssh_run") as ssh:
         ssh.return_value.stdout = json.dumps(marker)
-        status, payload = launcher._poll_deploy(server_cfg(), "demo", timeout=1.0, interval=0.01)
+        status, payload = launcher._poll_deploy(
+            server_cfg(), "demo", expected_sha="abc", timeout=1.0, interval=0.01
+        )
 
     assert status == "error"
     assert payload["error"] == "boom"
+
+
+def test_poll_deploy_ignores_marker_from_previous_sha(tmp_path: Path) -> None:
+    launcher, _, _, _ = manager(tmp_path)
+    stale = MagicMock(stdout=json.dumps({"sha": "old", "status": "error", "error": "old boom"}))
+    current = MagicMock(stdout=json.dumps({"sha": "abc", "status": "ok"}))
+
+    with (
+        patch("n8n_launcher.workspaces.manager.ssh_run", side_effect=[stale, current]) as ssh,
+        patch("n8n_launcher.workspaces.manager.time.sleep"),
+    ):
+        status, payload = launcher._poll_deploy(
+            server_cfg(), "demo", expected_sha="abc", timeout=1.0, interval=0.01
+        )
+
+    assert status == "ok"
+    assert payload["sha"] == "abc"
+    assert ssh.call_count == 2
 
 
 def test_poll_deploy_times_out_when_marker_absent(tmp_path: Path) -> None:
@@ -1944,7 +2030,9 @@ def test_poll_deploy_times_out_when_marker_absent(tmp_path: Path) -> None:
         patch("n8n_launcher.workspaces.manager.time.monotonic", side_effect=[0.0, 99.0]) as mono,
     ):
         ssh.return_value.stdout = ""
-        status, payload = launcher._poll_deploy(server_cfg(), "demo", timeout=1.0, interval=0.01)
+        status, payload = launcher._poll_deploy(
+            server_cfg(), "demo", expected_sha="abc", timeout=1.0, interval=0.01
+        )
 
     assert status == "timeout"
     assert payload == {}
@@ -1965,7 +2053,9 @@ def test_poll_deploy_intervals_back_off_geometrically(tmp_path: Path) -> None:
         patch("n8n_launcher.workspaces.manager.time.sleep", side_effect=sleeps.append),
     ):
         ssh.return_value.stdout = ""
-        status, _ = launcher._poll_deploy(server_cfg(), "demo", timeout=0.5, interval=0.3)
+        status, _ = launcher._poll_deploy(
+            server_cfg(), "demo", expected_sha="abc", timeout=0.5, interval=0.3
+        )
 
     assert status == "timeout"
     assert sleeps[0] == 0.3

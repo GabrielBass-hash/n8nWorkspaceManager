@@ -46,9 +46,9 @@ from n8n_launcher.core.models import (
     Workspace,
     WorkspaceState,
 )
-from n8n_launcher.docker.compose import write_compose
-from n8n_launcher.docker.manager import DockerManager
-from n8n_launcher.git import git_init, git_remote_url, workspace_branch
+from n8n_launcher.docker.compose import render_remote_compose, write_compose
+from n8n_launcher.docker.manager import DockerManager, resolve_docker_command
+from n8n_launcher.git import git_head, git_init, git_remote_url, workspace_branch
 from n8n_launcher.n8n.api import N8nApiClient
 from n8n_launcher.n8n.owner import OwnerSetup
 from n8n_launcher.platform.ports import is_port_available, suggest_port
@@ -65,6 +65,10 @@ _DOCKERFILE = Path(__file__).with_name("ssh_server.Dockerfile")
 # would trip "REMOTE HOST IDENTIFICATION HAS CHANGED" against a known_hosts
 # that was accepted on a previous run. A named volume pins the keys.
 _SSHD_KEYS_VOLUME = "n8n-launcher-sshd-hostkeys"
+# mac-GUI/apps and Linux runners can expose docker outside PATH; reuse the same
+# resolver the launcher itself uses so integration never depends on a bare
+# ``docker`` being on PATH.
+_DOCKER_COMMAND = resolve_docker_command()
 # Docker Desktop/Colima keep the daemon socket off /var/run/docker.sock; the
 # env override lets a local dev run the full publish leg on such hosts.
 _DOCKER_SOCKET = os.environ.get("N8N_LAUNCHER_TEST_DOCKER_SOCKET", "/var/run/docker.sock")
@@ -133,7 +137,7 @@ def _build_sshd_image() -> None:
     # builder used by `docker build` reaches the active daemon.
     subprocess.run(
         [
-            "docker",
+            _DOCKER_COMMAND,
             "build",
             "-q",
             "-t",
@@ -156,7 +160,7 @@ def ssh_server(docker_manager, tmp_path_factory: pytest.TempPathFactory) -> SshS
 
     _build_sshd_image()
     subprocess.run(
-        ["docker", "volume", "create", _SSHD_KEYS_VOLUME],
+        [_DOCKER_COMMAND, "volume", "create", _SSHD_KEYS_VOLUME],
         check=True,
         capture_output=True,
         timeout=30.0,
@@ -174,7 +178,7 @@ def ssh_server(docker_manager, tmp_path_factory: pytest.TempPathFactory) -> SshS
     host_port = 22 if publish_capable else _random_host_port()
 
     run_args = [
-        "docker",
+        _DOCKER_COMMAND,
         "run",
         "-d",
         "--name",
@@ -219,7 +223,7 @@ def ssh_server(docker_manager, tmp_path_factory: pytest.TempPathFactory) -> SshS
     finally:
         # The sshd host keys persist in _SSHD_KEYS_VOLUME (deliberately not
         # removed); only the container goes away.
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=60.0)
+        subprocess.run([_DOCKER_COMMAND, "rm", "-f", container], capture_output=True, timeout=60.0)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -236,7 +240,7 @@ def _isolate_ssh_home(tmp_path_factory: pytest.TempPathFactory) -> None:
     if previous_home:
         probe_env["HOME"] = previous_home
     docker_host = subprocess.run(
-        ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+        [_DOCKER_COMMAND, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
         env=probe_env,
         capture_output=True,
         text=True,
@@ -343,7 +347,24 @@ def test_publish_deploys_to_the_server(ssh_server: SshServer, tmp_path_factory) 
     )
     y = _workspace(y_id, y_wf, x_port)  # Y.port mirrors X so the API factory reaches it
     y.server = server
+    y.db = DbConfig(
+        mode=DbMode.MANAGED,
+        database_name="data",
+        username="n8ndata",
+        password="RemotePass123",
+    )
     git_init(y_wf, branch=workspace_branch(y_id))
+    # A local-only migration file rides along in the pushed tree. The real
+    # integration assertion below is that deploy.py *never* runs it: the
+    # ``data`` database must not exist after a successful publish, because
+    # migrations stay on the launcher-managed local stack.
+    migrations_dir = y_wf / "db" / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (migrations_dir / "001-remote.sql").write_text(
+        "CREATE TABLE remote_only (id int);\n", encoding="utf-8"
+    )
+    remote_compose = work / "compose-remote.yml"
+    remote_compose.write_text(render_remote_compose(y), encoding="utf-8")
 
     try:
         ssh_server.docker.pull([f"n8nio/n8n:{x.n8n_version}"])
@@ -371,6 +392,20 @@ def test_publish_deploys_to_the_server(ssh_server: SshServer, tmp_path_factory) 
         assert deployed.server_last_error is None
         marker = json.loads(deployed.server_last_deploy or "{}")
         assert marker.get("status") == "ok"  # deploy.py wrote it after compose + import
+        assert marker.get("sha") == git_head(y_wf)  # the poller matched *this* push
+        # No remote database was created: migrations are launcher-local. If the
+        # generated deploy ever tried to run db/migrations, the ensure() step
+        # would have created ``data`` and the pushed migration would show up.
+        psql = ssh_server.docker.exec_psql(
+            y,
+            remote_compose,
+            database="postgres",
+            user="n8n",
+            check=False,
+            stdin="SELECT datname FROM pg_database WHERE datname = 'data';\n",
+        )
+        assert psql.returncode == 0
+        assert "data" not in psql.stdout
 
         _wait_for_n8n(f"http://127.0.0.1:{server.n8n_port}")
         states = ssh_server.docker.list_project_states()
@@ -381,13 +416,23 @@ def test_publish_deploys_to_the_server(ssh_server: SshServer, tmp_path_factory) 
         assert list((y_wf / "n8nPipelines").glob("*.json"))
     finally:
         subprocess.run(
-            ["docker", "compose", "-p", f"n8n-ws-{y_id}", "down", "-v"],
+            [
+                _DOCKER_COMMAND,
+                "compose",
+                "-p",
+                f"n8n-ws-{y_id}",
+                "-f",
+                str(remote_compose),
+                "down",
+                "--volumes",
+                "--remove-orphans",
+            ],
             capture_output=True,
             timeout=120.0,
         )
         ssh_server.docker.down(x, compose_x, remove_orphans=True)
         subprocess.run(
-            ["docker", "volume", "rm", "-f", f"n8ndata-{x_id}"],
+            [_DOCKER_COMMAND, "volume", "rm", "-f", f"n8ndata-{x_id}"],
             capture_output=True,
             timeout=60.0,
         )

@@ -126,8 +126,9 @@ def configure_fonts(root: tk.Misc) -> bool:
     re-creating them, while a *fresh* root — e.g. the ``tk.Tk()`` the first
     launch wizard owns before ``LauncherApp`` exists — still receives them, so
     the same runtime family detection applies to every interface of the app. If
-    no preferred family is available, ``TkDefaultFont`` keeps every widget
-    resolvable instead of crashing on a missing font name. Fake/headless roots
+    no preferred family is available, the family resolved from
+    ``TkDefaultFont`` keeps every widget resolvable instead of passing a Tk font
+    name where a family is expected. Fake/headless roots
     (unit tests) leave the names unregistered — widgets still carry the
     ``FONT_*`` strings and the fakes ignore them.
     """
@@ -139,17 +140,25 @@ def configure_fonts(root: tk.Misc) -> bool:
         return False
     family = next(
         (known[preferred.lower()] for preferred in FONT_FAMILY_ORDER if preferred.lower() in known),
-        "TkDefaultFont",
+        None,
     )
+    if family is None:
+        try:
+            family = str(tkfont.nametofont("TkDefaultFont", root=root).actual("family"))
+        except Exception:
+            return False
     registered = _registered_font_names(root)
     if all(name in registered for name, _, _ in _FONT_SPECS):
         return True
     try:
         for name, size, weight in _FONT_SPECS:
+            if name in registered:
+                continue
             spec: list[object] = ["font", "create", name, "-family", family, "-size", size]
             if weight is not None:
                 spec += ["-weight", weight]
             root.tk.call(*spec)
+            registered.add(name)
         return True
     except Exception:
         return False

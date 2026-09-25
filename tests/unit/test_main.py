@@ -3,13 +3,19 @@
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 pytest.importorskip("tkinter")
 
-from n8n_launcher.__main__ import _backup_unreadable_config, _center, main
+from n8n_launcher.__main__ import (
+    _backup_unreadable_config,
+    _center,
+    _signal_shutdown,
+    main,
+    stop_all,
+)
 from n8n_launcher.core.config import ConfigStore
 
 
@@ -89,6 +95,47 @@ def _enter(ctx) -> ExitStack:
     for patch_call in ctx.patches:
         stack.enter_context(patch_call)
     return stack
+
+
+def test_stop_all_continues_after_one_workspace_fails() -> None:
+    store = MagicMock()
+    store.load.return_value = SimpleNamespace(
+        workspaces=[SimpleNamespace(id="first"), SimpleNamespace(id="second")]
+    )
+    docker = MagicMock()
+    manager = MagicMock()
+    manager.stop.side_effect = [RuntimeError("stop failed"), None]
+
+    with patch("n8n_launcher.__main__.WorkspaceManager", return_value=manager) as manager_type:
+        stop_all(store, docker)
+
+    manager_type.assert_called_once_with(store, docker)
+    assert manager.stop.call_args_list == [call("first"), call("second")]
+
+
+def test_stop_all_does_nothing_when_config_cannot_be_loaded() -> None:
+    store = MagicMock()
+    store.load.side_effect = RuntimeError("unreadable")
+    manager = MagicMock()
+
+    with patch("n8n_launcher.__main__.WorkspaceManager", return_value=manager):
+        stop_all(store, MagicMock())
+
+    manager.stop.assert_not_called()
+
+
+def test_signal_shutdown_stops_workspaces_then_exits() -> None:
+    store = MagicMock()
+    docker = MagicMock()
+
+    with (
+        patch("n8n_launcher.__main__.stop_all") as stop,
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        _signal_shutdown(store, docker, 15, None)
+
+    assert excinfo.value.code == 0
+    stop.assert_called_once_with(store, docker)
 
 
 def test_main_missing_config_runs_wizard_without_backup(tmp_path: Path) -> None:

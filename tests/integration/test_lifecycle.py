@@ -10,11 +10,15 @@ import pytest
 import requests
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
+from n8n_launcher.database import MigrationError, MigrationRunner, data_db_target, has_db_layout
 from n8n_launcher.docker.compose import write_compose
+from n8n_launcher.docker.manager import resolve_docker_command
 from n8n_launcher.n8n.api import N8nApiClient
 from n8n_launcher.n8n.owner import OwnerSetup
 from n8n_launcher.n8n.workflows import SyncRunner
 from n8n_launcher.platform.ports import suggest_port
+
+_DOCKER_COMMAND = resolve_docker_command()
 
 pytestmark = pytest.mark.integration
 
@@ -30,6 +34,24 @@ def wait_for_n8n(base_url: str, timeout: float = 180.0) -> None:
             pass
         time.sleep(2.0)
     raise AssertionError(f"n8n did not become healthy at {base_url}")
+
+
+def _appraisal_table_count(docker_manager, workspace: Workspace, compose_file: Path) -> int:
+    result = docker_manager.exec_psql(
+        workspace,
+        compose_file,
+        database=data_db_target(workspace).database,
+        user=data_db_target(workspace).user,
+        password=data_db_target(workspace).password,
+        check=False,
+        stdin=(
+            "SELECT COUNT(*) FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'appraisal' AND c.relkind = 'r';\n"
+        ),
+    )
+    assert result.returncode == 0
+    return int(next(line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()))
 
 
 @pytest.fixture(scope="module")
@@ -54,12 +76,21 @@ def running_workspace(docker_manager, tmp_path_factory: Path):
         wait_for_n8n(base_url)
         yield workspace, compose_file, base_url
     finally:
-        docker_manager.down(workspace, compose_file, remove_orphans=True)
         subprocess.run(
-            ["docker", "volume", "rm", "-f", f"n8ndata-{workspace_id}", f"pgdata-{workspace_id}"],
+            [
+                _DOCKER_COMMAND,
+                "compose",
+                "-p",
+                f"n8n-ws-{workspace_id}",
+                "-f",
+                str(compose_file),
+                "down",
+                "--volumes",
+                "--remove-orphans",
+            ],
             capture_output=True,
             text=True,
-            timeout=60.0,
+            timeout=120.0,
             check=False,
         )
 
@@ -102,3 +133,51 @@ def test_compose_ps_output_is_parseable_json(running_workspace, docker_manager) 
     serialized = [json.dumps(row) for row in rows]
     assert any("n8n" in payload for payload in serialized)
     assert any("postgres" in payload for payload in serialized)
+
+
+@pytest.mark.timeout(240)
+def test_local_migrations_are_idempotent_and_rollback(running_workspace, docker_manager) -> None:
+    workspace, compose_file, _base_url = running_workspace
+    migrations_dir = workspace.workflows_dir / "db" / "migrations"
+    migrations_dir.mkdir(parents=True)
+    (workspace.workflows_dir / "db" / "schema.sql").write_text("select 1;", encoding="utf-8")
+    runner = MigrationRunner(docker_manager)
+
+    assert has_db_layout(workspace.workflows_dir) is True
+    target = data_db_target(workspace)
+    assert target is not None
+
+    # ensure() is idempotent: run twice, the second run cannot step on the
+    # role/database it created itself a moment ago.
+    runner.ensure(workspace, compose_file)
+    runner.ensure(workspace, compose_file)
+    assert runner.apply(workspace, migrations_dir, compose_file) == []
+
+    (migrations_dir / "001-init.sql").write_text(
+        "CREATE SCHEMA IF NOT EXISTS appraisal;\n"
+        "CREATE TABLE appraisal.events (id int PRIMARY KEY);\n",
+        encoding="utf-8",
+    )
+    assert runner.apply(workspace, migrations_dir, compose_file) == ["001-init.sql"]
+    assert _appraisal_table_count(docker_manager, workspace, compose_file) == 1
+    # A completed migration is not re-applied.
+    assert runner.apply(workspace, migrations_dir, compose_file) == []
+
+    (migrations_dir / "002-failing.sql").write_text(
+        "CREATE TABLE appraisal.failing (id int);\n"
+        "INSERT INTO appraisal.does_not_exist VALUES (1);\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(MigrationError):
+        runner.apply(workspace, migrations_dir, compose_file)
+    # Transactional rollback: the statement that succeeded inside the failed
+    # migration is undone and the filename is never recorded.
+    assert _appraisal_table_count(docker_manager, workspace, compose_file) == 1
+    assert runner.applied(workspace, compose_file) == {"001-init.sql"}
+
+    (migrations_dir / "002-failing.sql").write_text(
+        "CREATE TABLE appraisal.rollback (id int);\n", encoding="utf-8"
+    )
+    assert runner.apply(workspace, migrations_dir, compose_file) == ["002-failing.sql"]
+    assert _appraisal_table_count(docker_manager, workspace, compose_file) == 2
+    assert runner.applied(workspace, compose_file) == {"001-init.sql", "002-failing.sql"}
