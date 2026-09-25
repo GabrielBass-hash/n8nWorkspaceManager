@@ -26,11 +26,15 @@ from n8n_launcher.gui.dialogs import (
     _int_or,
     _repo_name_from,
     default_creation_db,
+    fresh_managed_db_config,
     prompt_ask_string,
     prompt_clone_dest,
     prompt_clone_plan,
+    prompt_create_dir,
     prompt_create_source,
     prompt_db_config,
+    prompt_git_config,
+    prompt_git_remote,
     prompt_github_create,
     prompt_github_repo_picker,
     prompt_github_token,
@@ -47,6 +51,134 @@ def test_finish_dialog_setup_registers_fonts_on_root() -> None:
         _finish_dialog_setup(dialog, root)
 
     fonts.assert_called_once_with(root)
+
+
+def test_prompt_create_dir_creates_selected_nested_directory(tmp_path) -> None:
+    selected = tmp_path / "parent" / "workspace"
+    root = FakeRoot()
+
+    with patch(
+        "n8n_launcher.gui.dialogs.filedialog.askdirectory",
+        return_value=str(selected),
+    ) as askdirectory:
+        result = prompt_create_dir(root)
+
+    assert result == selected
+    assert selected.is_dir()
+    assert askdirectory.call_args.kwargs["parent"] is root
+
+
+def test_prompt_create_dir_returns_none_when_cancelled() -> None:
+    root = FakeRoot()
+
+    with patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=""):
+        assert prompt_create_dir(root) is None
+
+
+def test_fresh_managed_db_config_uses_generated_password() -> None:
+    with patch("n8n_launcher.gui.dialogs.secrets.token_hex", return_value="a" * 32):
+        db = fresh_managed_db_config()
+
+    assert db == DbConfig(
+        DbMode.MANAGED,
+        database_name="data",
+        username="n8ndata",
+        password="a" * 32,
+    )
+
+
+def test_prompt_git_remote_forwards_current_remote() -> None:
+    root = FakeRoot()
+
+    with patch(
+        "n8n_launcher.gui.dialogs.prompt_ask_string",
+        return_value="https://example.test/new.git",
+    ) as prompt:
+        result = prompt_git_remote(
+            root,
+            "Demo",
+            "https://example.test/current.git",
+        )
+
+    assert result == "https://example.test/new.git"
+    assert prompt.call_args.kwargs["initial"] == "https://example.test/current.git"
+    assert "actuelle : https://example.test/current.git" in prompt.call_args.args[2]
+
+
+def test_prompt_git_config_returns_entered_remote(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.ttk.Button.instances.clear()
+
+    def drive(dialog) -> None:
+        entry = next(child for child in dialog.children if isinstance(child, gui_mocks.tk.Entry))
+        entry._options["textvariable"].set("  https://example.test/repo.git  ")
+        next(
+            button for button in gui_mocks.ttk.Button.instances if button.text == "Valider"
+        ).command()
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_git_config(FakeRoot(), "Demo")
+
+    assert result == GitConfigChoice(remote_url="https://example.test/repo.git")
+
+
+def test_prompt_git_config_can_create_github_repository(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.ttk.Button.instances.clear()
+
+    def drive(_dialog) -> None:
+        next(
+            button
+            for button in gui_mocks.ttk.Button.instances
+            if button.text == "Créer sur GitHub…"
+        ).command()
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_git_config(FakeRoot(), "Demo")
+
+    assert result == GitConfigChoice(create_github=True)
+
+
+def test_prompt_git_config_blank_url_keeps_local_repository(gui_mocks) -> None:
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.ttk.Button.instances.clear()
+
+    def drive(_dialog) -> None:
+        next(
+            button for button in gui_mocks.ttk.Button.instances if button.text == "Valider"
+        ).command()
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", drive),
+    ):
+        result = prompt_git_config(FakeRoot(), "Demo")
+
+    assert result == GitConfigChoice(remote_url=None)
+
+
+def test_prompt_git_config_escape_returns_none(gui_mocks) -> None:
+    saved = gui_mocks.tk.Toplevel.cancel_on_wait
+    gui_mocks.tk.Toplevel.cancel_on_wait = True
+    try:
+        with (
+            patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+            patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        ):
+            result = prompt_git_config(FakeRoot(), "Demo")
+    finally:
+        gui_mocks.tk.Toplevel.cancel_on_wait = saved
+
+    assert result is None
 
 
 def test_prompt_create_uses_plan_name_and_db(app, tmp_path) -> None:

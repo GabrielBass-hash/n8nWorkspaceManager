@@ -1,5 +1,13 @@
 from n8n_launcher.core.models import DbConfig, DbMode, ServerConfig, Workspace
-from n8n_launcher.docker.compose import render_compose, render_remote_compose
+from n8n_launcher.docker.compose import (
+    compose_project_name,
+    render_compose,
+    render_remote_compose,
+)
+
+
+def test_compose_project_name_isolates_workspace(managed_workspace) -> None:
+    assert compose_project_name(managed_workspace) == "n8n-ws-demo123"
 
 
 def test_managed_compose_is_isolated(managed_workspace) -> None:

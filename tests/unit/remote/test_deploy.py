@@ -6,9 +6,7 @@ generated ``deploy.py`` are exercised by ``exec``-ing its source, so the code
 that actually runs in production is the code under test.
 """
 
-import os
 from pathlib import Path
-from unittest.mock import patch
 
 from n8n_launcher.core.models import DbConfig, DbMode, ServerConfig, Workspace
 from n8n_launcher.remote import deploy
@@ -88,6 +86,7 @@ def test_render_deploy_script_contains_marker_and_stdlib_only() -> None:
         "import paramiko",
         "docker.client",
         "requests.",
+        "import subprocess",
     ):
         assert forbidden not in source
 
@@ -130,7 +129,7 @@ def test_render_hook_pins_the_compose_project() -> None:
     assert "docker compose -f" in hook
     assert '"$WORKFLOW/compose.yml"' in hook
     assert 'docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d' in hook
-    assert 'DEPLOY_PROJECT="$PROJECT"' in hook
+    assert "DEPLOY_PROJECT" not in hook
 
 
 def test_render_hook_writes_marker_atomically() -> None:
@@ -260,17 +259,13 @@ def test_deploy_rewrite_credential_ids_leaves_unknown() -> None:
     assert rewritten[0]["credentials"]["httpRequest"]["id"] == "x"
 
 
-def test_deploy_migration_files_sorted(tmp_path: Path) -> None:
-    ns = _exec_deploy()
-    migrations = tmp_path / "db" / "migrations"
-    migrations.mkdir(parents=True)
-    (migrations / "003_x.sql").write_text("", encoding="utf-8")
-    (migrations / "001_y.sql").write_text("", encoding="utf-8")
-    (migrations / "002_a.md").write_text("", encoding="utf-8")
+def test_deploy_does_not_execute_local_data_migrations() -> None:
+    source = deploy.render_deploy_script()
 
-    files = ns["migration_files"](str(tmp_path))
-
-    assert files == ["001_y.sql", "003_x.sql"]  # sorted, non-SQL ignored
+    assert "db/migrations" not in source
+    assert "run_migrations" not in source
+    assert "migration_files" not in source
+    assert "psql" not in source
 
 
 def test_deploy_load_secrets(tmp_path: Path) -> None:
@@ -285,46 +280,6 @@ def test_deploy_load_secrets(tmp_path: Path) -> None:
 
     assert data["owner_email"] == "o@test"
     assert data["credentials"] == []
-
-
-def test_deploy_pins_project_and_uses_it_for_compose(tmp_path: Path) -> None:
-    migrations = tmp_path / "db" / "migrations"
-    migrations.mkdir(parents=True)
-    (migrations / "001_x.sql").write_text("SELECT 1;\n", encoding="utf-8")
-    os.environ["DEPLOY_PROJECT"] = "n8n-ws-abc123"
-    os.environ["DEPLOY_CHECKOUT"] = str(tmp_path)
-    try:
-        ns = _exec_deploy()
-
-        assert ns["PROJECT"] == "n8n-ws-abc123"
-        assert ns["COMPOSE_CMD"] == ["docker", "compose", "-p", "n8n-ws-abc123"]
-
-        # run_migrations resolves the postgres service via the pinned project.
-        with patch.object(ns["subprocess"], "run") as run:
-            run.side_effect = [
-                CompletedProcessStub(["docker", "compose"], 0, "postgres\nn8n\n", ""),
-                CompletedProcessStub(["docker", "compose"], 0, "", ""),
-            ]
-            ns["run_migrations"]()
-
-        first, second = run.call_args_list
-        assert first.args[0][:4] == ["docker", "compose", "-p", "n8n-ws-abc123"]
-        assert first.args[0][4:] == ["config", "--services"]
-        assert second.args[0][:4] == ["docker", "compose", "-p", "n8n-ws-abc123"]
-        assert "postgres" in second.args[0]
-    finally:
-        os.environ.pop("DEPLOY_PROJECT", None)
-        os.environ.pop("DEPLOY_CHECKOUT", None)
-
-
-class CompletedProcessStub:
-    """Minimal stand-in for the subprocess result used by exec-based tests."""
-
-    def __init__(self, argv, returncode, stdout, stderr):
-        self.argv = argv
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
 
 
 def test_deploy_write_marker_is_atomic(tmp_path: Path) -> None:

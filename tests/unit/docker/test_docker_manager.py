@@ -81,6 +81,29 @@ def test_up_uses_isolated_compose_project(tmp_path: Path) -> None:
     assert run.call_args.kwargs.get("shell") is not True
 
 
+def test_exec_psql_requests_tuples_only_output(tmp_path: Path) -> None:
+    manager = DockerManager()
+    compose_file = tmp_path / "compose.yml"
+
+    with patch("n8n_launcher.docker.manager.subprocess.run", return_value=completed()) as run:
+        manager.exec_psql(
+            workspace(tmp_path),
+            compose_file,
+            database="data",
+            user="n8n",
+            password="secret",
+            stdin="SELECT 1;\n",
+        )
+
+    command = run.call_args.args[0]
+    assert "psql" in command
+    assert "-A" in command
+    assert "-t" in command
+    assert "-v" in command
+    assert "ON_ERROR_STOP=1" in command
+    assert run.call_args.kwargs["input"] == "SELECT 1;\n"
+
+
 def test_resolve_docker_command_returns_docker_on_linux() -> None:
     with (
         patch("n8n_launcher.docker.manager.platform.system", return_value="Linux"),

@@ -22,6 +22,13 @@ class MigrationError(RuntimeError):
     """Raised when local data-database migrations cannot be applied."""
 
 
+_BOOKKEEPING_DDL = (
+    "CREATE TABLE IF NOT EXISTS public.schema_migrations ("
+    "filename text PRIMARY KEY,\n"
+    "applied_at timestamptz NOT NULL DEFAULT now());\n"
+)
+
+
 class MigrationRunner:
     """Create the data database and apply pending migrations idempotently."""
 
@@ -34,7 +41,7 @@ class MigrationRunner:
             return
         target = data_db_target(workspace)
         if target is None:
-            raise RuntimeError("cannot run migrations without a managed database target")
+            raise MigrationError("cannot run migrations without a managed database target")
         # A plain LOGIN role owning its database is enough for schema/migration
         # work. TimescaleDB nevertheless requires a SUPERUSER to run
         # ``CREATE EXTENSION timescaledb``, so keep the privilege in that case.
@@ -48,6 +55,15 @@ class MigrationRunner:
             + _sql_literal(target.password)
             + ") WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname="
             + _sql_literal(target.user)
+            + ");\n\\gexec\n"
+        )
+        reconcile_role_module = (
+            "SELECT format('ALTER ROLE %I WITH "
+            + privileges
+            + " PASSWORD %L', "
+            + _sql_literal(target.user)
+            + ", "
+            + _sql_literal(target.password)
             + ");\n\\gexec\n"
         )
         database_module = (
@@ -65,7 +81,7 @@ class MigrationRunner:
             database=MAINTENANCE_DATABASE,
             user=N8N_METADATA_DB_USER,
             password=N8N_METADATA_DB_PASSWORD,
-            stdin=role_module + database_module,
+            stdin=role_module + reconcile_role_module + database_module,
         )
 
     def apply(self, workspace: Workspace, migrations_dir: Path, compose_file: Path) -> list[str]:
@@ -75,18 +91,17 @@ class MigrationRunner:
             return []
         target = data_db_target(workspace)
         if target is None:
-            raise RuntimeError("cannot run migrations without a managed database target")
+            raise MigrationError("cannot run migrations without a managed database target")
         applied_names = self.applied(workspace, compose_file)
         pending = [migration for migration in migrations if migration.name not in applied_names]
         for migration in pending:
             body = (
-                "CREATE TABLE IF NOT EXISTS public.schema_migrations ("
-                "filename text PRIMARY KEY,\n"
-                "applied_at timestamptz NOT NULL DEFAULT now());\n"
+                "BEGIN;\n"
+                + _BOOKKEEPING_DDL
                 + migration.read_text(encoding="utf-8")
                 + "\nINSERT INTO public.schema_migrations(filename) VALUES ("
                 + _sql_literal(migration.name)
-                + ");\n"
+                + ");\nCOMMIT;\n"
             )
             self._run_with_retries(
                 workspace,
@@ -102,29 +117,27 @@ class MigrationRunner:
         """Return the set of migration filenames already recorded as applied."""
         target = data_db_target(workspace)
         if target is None:
-            raise RuntimeError("cannot list applied migrations without a managed database target")
-        try:
-            result = self._run_with_retries(
-                workspace,
-                compose_file,
-                database=target.database,
-                user=target.user,
-                password=target.password,
-                stdin=("SELECT filename FROM public.schema_migrations ORDER BY filename;\n"),
-                check=False,
-            )
-        except DockerError:
-            return set()
-        # With ``check=False`` the retry helper returns the last error object
-        # instead of raising it when PostgreSQL stays unreachable.
-        if isinstance(result, DockerError):
-            return set()
+            raise MigrationError("cannot list applied migrations without a managed database target")
+        self._run_with_retries(
+            workspace,
+            compose_file,
+            database=target.database,
+            user=target.user,
+            password=target.password,
+            stdin=_BOOKKEEPING_DDL,
+        )
+        result = self._run_with_retries(
+            workspace,
+            compose_file,
+            database=target.database,
+            user=target.user,
+            password=target.password,
+            stdin="SELECT filename FROM public.schema_migrations ORDER BY filename;\n",
+        )
         if result.returncode != 0:
-            return set()
-        output = result.stdout or ""
-        if not isinstance(output, str):
-            return set()
-        return {line.strip() for line in output.splitlines() if line.strip()}
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise MigrationError(f"cannot list applied migrations: {detail}")
+        return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
     def _run_with_retries(
         self,
@@ -135,10 +148,9 @@ class MigrationRunner:
         user: str,
         password: str,
         stdin: str,
-        check: bool = True,
         attempts: int = 12,
         interval: float = 2.0,
-    ) -> subprocess.CompletedProcess[str] | DockerError:
+    ) -> subprocess.CompletedProcess[str]:
         last_error: Exception | None = None
         for _ in range(attempts):
             try:
@@ -149,7 +161,7 @@ class MigrationRunner:
                     user=user,
                     password=password,
                     stdin=stdin,
-                    check=check,
+                    check=True,
                 )
             except DockerError as exc:
                 last_error = exc
@@ -157,15 +169,10 @@ class MigrationRunner:
                 if "starting up" in detail or "refused" in detail or "not reachable" in detail:
                     time.sleep(interval)
                     continue
-                if check:
-                    raise
-                time.sleep(interval)
-                continue
+                raise MigrationError(str(exc)) from exc
         if last_error is None:
-            raise DockerError("PostgreSQL n'est pas devenu joignable pour les migrations")
-        if check:
-            raise last_error
-        return last_error
+            raise MigrationError("PostgreSQL n'est pas devenu joignable pour les migrations")
+        raise MigrationError(str(last_error)) from last_error
 
 
 def _sql_literal(value: str) -> str:

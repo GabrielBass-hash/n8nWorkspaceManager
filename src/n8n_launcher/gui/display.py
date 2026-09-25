@@ -23,7 +23,7 @@ def git_repo_status(workflows_dir: Path) -> bool:
 
 
 def db_connected(workspace: Workspace) -> bool:
-    """Return True when the workspace has a managed DB with migration files."""
+    """Return True when a managed workspace declares a local database layout."""
     if workspace.db.mode is DbMode.MANAGED:
         return has_db_layout(workspace.workflows_dir)
     return False
@@ -76,6 +76,8 @@ class GitRowStatus:
             lines.append("Le dernier push a échoué")
         if self.ci_enabled:
             lines.append("Tests GitHub Actions activés")
+        if not self.is_repo:
+            return "Aucun dépôt Git initialisé"
         return "\n".join(lines) if lines else "Dépôt Git initialisé (aucun dépôt distant)"
 
 
@@ -180,8 +182,10 @@ def server_tooltip(workspace: Workspace) -> str:
     lines = [f"Serveur de production : {workspace.server.user}@{workspace.server.host}"]
     if workspace.server_last_error:
         lines.append(f"Dernier déploiement en échec : {workspace.server_last_error}")
-    else:
+    elif workspace.server_last_deploy:
         lines.append("Dernier déploiement réussi")
+    else:
+        lines.append("Aucun déploiement enregistré")
     return "\n".join(lines)
 
 

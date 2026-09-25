@@ -146,6 +146,21 @@ _SCHEDULE = [
 ]
 
 
+def test_generated_collectors_prefer_pipeline_copy(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    write_export(root, "n8nPipelines/shared.json", _MANUAL, name="Canonical")
+    write_export(root, "shared.json", _MANUAL, name="Mirror")
+    write_selection(root, ["n8nPipelines/shared.json"])
+
+    result = subprocess.run(
+        [sys.executable, str(root / ci.VALIDATE_FILE)], capture_output=True, text=True
+    )
+    runner = load_runner(root)
+
+    assert result.returncode == 0
+    assert runner.collect_workflows() == ["n8nPipelines/shared.json"]
+
+
 def test_generated_runner_run_payload_variants(tmp_path: Path) -> None:
     root = render_harness_at(tmp_path)
     runner = load_runner(root)
@@ -229,6 +244,31 @@ def test_generated_runner_missing_secret_is_non_fatal(
 
     assert runner.configure_credentials(http, "api-key") == 0
     assert http.calls == []
+
+
+def test_generated_runner_empty_credentials_secret_is_non_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    monkeypatch.setenv("N8N_CI_CREDENTIALS", "[]")
+    http = FakeHttp({})
+
+    assert runner.configure_credentials(http, "api-key") == 0
+    assert http.calls == []
+
+
+def test_generated_runner_api_key_requests_credential_list_scope(tmp_path: Path) -> None:
+    root = render_harness_at(tmp_path)
+    runner = load_runner(root)
+    http = FakeHttp({("POST", "/rest/api-keys"): (200, {"data": {"rawApiKey": "n8n_key_1"}})})
+
+    runner.create_api_key(http)
+
+    payload = http.calls[0][2]
+    assert "credential:list" in payload["scopes"]
+    assert "credential:read" in payload["scopes"]
+    assert "credential:create" in payload["scopes"]
 
 
 def test_generated_runner_wait_execution_polls_to_finish(tmp_path: Path) -> None:

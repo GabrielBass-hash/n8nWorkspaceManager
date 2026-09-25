@@ -426,15 +426,21 @@ BLOCKLIST_ROOT = {
 
 def collect_workflows():
     found = []
+    pipeline_names = set()
     pipelines = ROOT / "n8nPipelines"
     if pipelines.is_dir():
         for path in sorted(pipelines.glob("*.json")):
             if path.is_file():
                 found.append(f"n8nPipelines/{path.name}")
+                pipeline_names.add(path.name)
     for path in sorted(ROOT.glob("*.json")):
-        if path.is_file() and path.name not in BLOCKLIST_ROOT:
+        if (
+            path.is_file()
+            and path.name not in BLOCKLIST_ROOT
+            and path.name not in pipeline_names
+        ):
             found.append(path.name)
-    return sorted(set(found))
+    return sorted(found)
 
 
 def main():
@@ -606,15 +612,21 @@ class Http:
 
 def collect_workflows():
     found = []
+    pipeline_names = set()
     pipelines = ROOT / "n8nPipelines"
     if pipelines.is_dir():
         for path in sorted(pipelines.glob("*.json")):
             if path.is_file():
                 found.append(f"n8nPipelines/{path.name}")
+                pipeline_names.add(path.name)
     for path in sorted(ROOT.glob("*.json")):
-        if path.is_file() and path.name not in BLOCKLIST_ROOT:
+        if (
+            path.is_file()
+            and path.name not in BLOCKLIST_ROOT
+            and path.name not in pipeline_names
+        ):
             found.append(path.name)
-    return sorted(set(found))
+    return sorted(found)
 
 
 def read_selection():
@@ -675,6 +687,7 @@ def create_api_key(http: Http) -> str:
                 "workflow:list",
                 "workflow:create",
                 "workflow:read",
+                "credential:list",
                 "credential:read",
                 "credential:create",
             ],
@@ -752,6 +765,9 @@ def configure_credentials(http: Http, api_key: str) -> int:
         raise RuntimeError(f"le secret {SECRET_NAME} n'est pas un JSON valide") from exc
     if not isinstance(items, list):
         raise RuntimeError(f"le secret {SECRET_NAME} doit être une liste de credentials")
+    if not items:
+        _verbose(f"secret {SECRET_NAME} vide — aucun credential à recréer")
+        return 0
     existing = _public_get(http, api_key, "/api/v1/credentials")
     known = {
         (str(item.get("name")), str(item.get("type")))

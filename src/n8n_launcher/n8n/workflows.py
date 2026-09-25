@@ -127,7 +127,7 @@ class SyncRunner:
                 live_mirror.add(filename)
             pulled += 1
         for stale in self.workflows_dir.glob("*.json"):
-            if stale.name not in exported:
+            if stale.name not in exported and EXPORT_NAME_RE.match(stale.name) and stale.is_file():
                 stale.unlink()
         if mirror is not None and live_mirror is not None:
             self._clean_mirror(mirror, live_mirror)

@@ -23,6 +23,7 @@ from n8n_launcher.gui.display import (
     git_row_status,
     invalidate_git_status,
     pipelines_count,
+    server_enabled,
     server_label,
     server_tooltip,
 )
@@ -102,6 +103,13 @@ def test_db_connected_managed_requires_layout(tmp_path) -> None:
     assert db_connected(workspace) is True
 
 
+def test_db_connected_is_false_without_managed_mode(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    add_migration(tmp_path)
+
+    assert db_connected(workspace) is False
+
+
 def test_format_row_shows_running_state_and_pipeline_count(tmp_path) -> None:
     add_migration(tmp_path)
     add_pipelines(tmp_path)
@@ -140,19 +148,40 @@ def test_pipelines_count_counts_json_files(tmp_path) -> None:
     assert pipelines_count(tmp_path) == 1
 
 
+def test_pipelines_count_ignores_json_directories(tmp_path) -> None:
+    (tmp_path / "n8nPipelines" / "folder.json").mkdir(parents=True)
+
+    assert pipelines_count(tmp_path) == 0
+
+
 def test_server_label_off_when_disabled(tmp_path) -> None:
     workspace = make_workspace(tmp_path)
     assert server_label(workspace) == "serv"
     assert "désactivé" in server_tooltip(workspace)
 
 
+def test_server_tooltip_reports_never_deployed(tmp_path) -> None:
+    workspace = make_workspace(tmp_path)
+    workspace.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+
+    assert "Aucun déploiement enregistré" in server_tooltip(workspace)
+
+
 def test_server_label_ok_when_deployed(tmp_path) -> None:
     workspace = make_workspace(tmp_path)
     workspace.server = ServerConfig(enabled=True, host="prod.example.test", user="deploy")
+    workspace.server_last_deploy = '{"sha":"abc","status":"ok"}'
     assert server_label(workspace) == "serv"
     tooltip = server_tooltip(workspace)
     assert "prod.example.test" in tooltip
     assert "réussi" in tooltip
+
+
+def test_server_enabled_reflects_server_config(tmp_path) -> None:
+    workspace = make_workspace(tmp_path)
+    assert server_enabled(workspace) is False
+    workspace.server = ServerConfig(enabled=True, host="h", user="u")
+    assert server_enabled(workspace) is True
 
 
 def test_server_label_ko_on_last_error(tmp_path) -> None:
@@ -180,11 +209,19 @@ def test_git_row_status_flat_when_not_a_repo(tmp_path) -> None:
 def test_git_row_status_clean_repo(tmp_path) -> None:
     workspace = make_workspace(tmp_path, mode=DbMode.NONE)
 
-    with patch(
-        "n8n_launcher.gui.display.git_probe_status",
-        return_value=GitProbeStatus(is_repo=True),
+    with (
+        patch(
+            "n8n_launcher.gui.display.git_probe_status",
+            return_value=GitProbeStatus(is_repo=True),
+        ),
+        patch(
+            "n8n_launcher.gui.display.git_has_unpushed_commits",
+            return_value=False,
+        ) as unpushed,
     ):
         status = git_row_status(workspace)
+
+    unpushed.assert_called_once_with(tmp_path)
 
     assert status == GitRowStatus(is_repo=True)
 
@@ -232,12 +269,16 @@ def test_git_row_status_reads_workspace_fields_live_through_cache(tmp_path) -> N
     with patch("n8n_launcher.gui.display.git_probe_status", return_value=probe) as probed:
         first = git_row_status(workspace)
         workspace.git_push_failed = False
+        workspace.git = GitConfig(ci_enabled=True)
         second = git_row_status(workspace)
 
     assert probed.call_count == 1  # probe cached; workspace fields read live
     assert first.push_failed is True
+    assert first.ci_enabled is False
     assert second.push_failed is False
+    assert second.ci_enabled is True
     assert second.dirty is True
+    assert "Tests GitHub Actions activés" in second.tooltip
 
 
 def test_git_row_status_cache_expires_after_ttl(tmp_path) -> None:
@@ -301,6 +342,7 @@ def test_git_row_status_tooltip() -> None:
     assert "non commités" in status.tooltip
     assert "pousser" in status.tooltip
     assert "push a échoué" in status.tooltip
+    assert "Aucun dépôt Git initialisé" in GitRowStatus().tooltip
     assert "Dépôt Git initialisé" in GitRowStatus(is_repo=True).tooltip
 
 
@@ -328,6 +370,18 @@ def test_ci_tooltip_reports_selection_counts(tmp_path) -> None:
 
     assert "activés" in tooltip
     assert "1 pipeline(s) sélectionnée(s) sur 1 testable(s)" in tooltip
+
+
+def test_ci_tooltip_reports_no_eligible_pipelines(tmp_path) -> None:
+    workspace = make_workspace(tmp_path, mode=DbMode.NONE)
+    workspace.git = GitConfig(ci_enabled=True)
+    selection = tmp_path / ".n8n-tests" / "tests.json"
+    selection.parent.mkdir(parents=True)
+    selection.write_text('{"selected": []}', encoding="utf-8")
+
+    tooltip = ci_tooltip(workspace)
+
+    assert "Aucune pipeline testable" in tooltip
 
 
 def test_ci_tooltip_warns_when_selected_no_longer_testable(tmp_path) -> None:
