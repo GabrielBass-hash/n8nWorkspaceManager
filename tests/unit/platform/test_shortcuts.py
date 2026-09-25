@@ -41,7 +41,8 @@ def test_macos_shortcut_writes_executable_command(tmp_path) -> None:
 
     assert shortcut == tmp_path / "n8n-launcher.command"
     assert shortcut.read_text(encoding="utf-8") == (f'#!/bin/sh\nexec "{target.as_posix()}"\n')
-    assert shortcut.stat().st_mode & 0o111
+    if os.name != "nt":
+        assert shortcut.stat().st_mode & 0o111
 
 
 def test_desktop_dir_is_home_desktop() -> None:

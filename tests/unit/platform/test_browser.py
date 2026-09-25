@@ -96,7 +96,11 @@ def test_mac_candidate_returns_browser_for_existing_bundle(
     name: str, executable: str, app_mode: bool
 ) -> None:
     with patch.object(Path, "exists", return_value=True):
-        assert _mac_candidate(name) == Browser(name, executable, app_mode)
+        # `Path` renders absolute POSIX-style bundles with native separators
+        # (Windows would rewrite them with `\`), so build the expectation the
+        # same way the implementation does.
+        expected = Browser(name, str(Path(executable)), app_mode)
+        assert _mac_candidate(name) == expected
 
 
 def test_mac_candidate_returns_none_for_missing_bundle() -> None:
