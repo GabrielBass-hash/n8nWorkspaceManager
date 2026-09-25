@@ -21,6 +21,7 @@ from helpers import (
     SyncThread,
     SyncThreadPoolExecutor,
     _safe_git_row_status,
+    fake_monitoring_panel_bases,
     make_workspace,
 )
 
@@ -36,8 +37,11 @@ def gui_mocks():
     FakeTtk.Button.instances.clear()
 
     with (
+        fake_monitoring_panel_bases(),
         patch("n8n_launcher.gui.app.tk", mocks.tk),
         patch("n8n_launcher.gui.app.ttk", mocks.ttk),
+        patch("n8n_launcher.gui.monitoring.tk", mocks.tk),
+        patch("n8n_launcher.gui.monitoring.ttk", mocks.ttk),
         patch("n8n_launcher.gui.app.messagebox", mocks.messagebox),
         patch("n8n_launcher.gui.close.messagebox", mocks.messagebox),
         patch("n8n_launcher.gui.update_flow.messagebox", mocks.messagebox),

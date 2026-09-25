@@ -136,6 +136,19 @@ class EventStore:
         _add_time_filters(clauses, parameters, since, until)
         return self._query(clauses, parameters, limit)
 
+    def latest_events(self, limit: int) -> list[Event]:
+        """Read the newest events first, bounded by *limit*."""
+        _validate_limit(limit)
+        self.prune_old_events()
+        sql = (
+            "SELECT id, timestamp, name, level, message, context, exception "
+            "FROM events ORDER BY timestamp DESC, id DESC LIMIT ?"
+        )
+        with self._lock:
+            connection = self._require_connection()
+            rows = connection.execute(sql, (limit,)).fetchall()
+        return [_row_to_event(row) for row in rows]
+
     def search_events(
         self,
         query: str | None = None,

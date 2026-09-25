@@ -353,6 +353,25 @@ class FakeTtk:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
+    class PanedWindow:
+        instances: ClassVar[list["FakeTtk.PanedWindow"]] = []
+
+        def __init__(self, _parent, **_kwargs):
+            self._parent = _parent
+            self.children: list[object] = []
+            self._items: list[object] = []
+            self.packed = False
+            FakeTtk.PanedWindow.instances.append(self)
+
+        def pack(self, *_args, **_kwargs) -> None:
+            self.packed = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def add(self, child, **_kwargs) -> None:
+            self.children.append(child)
+            self._items.append((child, dict(_kwargs)))
+
     class Button:
         instances: ClassVar[list["FakeTtk.Button"]] = []
 
@@ -537,11 +556,25 @@ class FakeTtk:
 class FakeRoot:
     def __init__(self):
         self.after_callbacks: list[tuple[int, object]] = []
+        self._after_ids: list[int] = []
+        self._next_after_id = 0
         self._protocol_handlers: dict[str, object] = {}
         self.destroyed = False
 
-    def after(self, delay: int, callback) -> None:
+    def after(self, delay: int, callback) -> int:
+        after_id = self._next_after_id
+        self._next_after_id += 1
+        self._after_ids.append(after_id)
         self.after_callbacks.append((delay, callback))
+        return after_id
+
+    def after_cancel(self, after_id: int) -> None:
+        try:
+            index = self._after_ids.index(after_id)
+        except ValueError:
+            return
+        self._after_ids.pop(index)
+        self.after_callbacks.pop(index)
 
     def mainloop(self) -> None:
         pass
@@ -744,15 +777,6 @@ def fake_server_panel_bases():
     from n8n_launcher.gui.monitoring import ServerPanel
 
     with _rebase(ServerPanel) as panel:
-        yield panel
-
-
-@contextmanager
-def fake_workspace_panel_bases():
-    """Rebind ``WorkspacePanel``'s ``tk.Frame`` base to :class:`FakeTk.Frame`."""
-    from n8n_launcher.gui.monitoring import WorkspacePanel
-
-    with _rebase(WorkspacePanel) as panel:
         yield panel
 
 

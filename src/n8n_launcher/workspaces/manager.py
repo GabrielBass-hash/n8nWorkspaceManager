@@ -1018,7 +1018,7 @@ class WorkspaceManager:
         self._record_server_status(workspace, status, marker)
         if status == "error":
             # Deployment failures are remote incidents: they are logged as
-            # errors with the server error text so the console surfaces them.
+            # errors with the server error text so the journal panel surfaces them.
             logger.error(
                 "Deployment failed on %s for %s: %s",
                 server.host,
@@ -1202,7 +1202,7 @@ class WorkspaceManager:
                 )
         except Exception as exc:
             # A failed start is the incident the user must see: the traceback
-            # lands in the journal, so the monitoring console raises itself.
+            # lands in the journal, so the monitoring panel surfaces it in the status bar.
             logger.error(
                 "Start failed for %s: %s",
                 workspace.name,

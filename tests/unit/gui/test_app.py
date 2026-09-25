@@ -19,7 +19,6 @@ from helpers import (
     fake_monitoring_panel_bases,
     fake_runs_panel_bases,
     fake_server_panel_bases,
-    fake_workspace_panel_bases,
     make_workspace,
     row_action_button,
     row_action_text,
@@ -517,7 +516,6 @@ def test_context_menu_has_launch_folder_and_delete(app) -> None:
     assert labels == [
         "Ouvrir n8n",
         "Ouvrir le dossier",
-        "Journal du workspace…",
         "Configurer Git…",
         "Configurer les tests GitHub Actions…",
         "Gérer les credentials CI…",
@@ -1249,11 +1247,10 @@ def test_prompt_github_and_configure_prefills_resolved_token(app) -> None:
 # ------------------------------------------------------------- monitoring
 @contextmanager
 def _fake_monitoring_gui():
-    """Build the console/server views on the Tk fakes, like the console tests."""
+    """Build the integrated journal/server views on the Tk fakes."""
     with (
         fake_monitoring_panel_bases(),
         fake_server_panel_bases(),
-        fake_workspace_panel_bases(),
         patch("n8n_launcher.gui.monitoring.tk", FakeTk()),
         patch("n8n_launcher.gui.monitoring.ttk", FakeTtk()),
     ):
@@ -1274,8 +1271,15 @@ def _monitor_app(app, tmp_path, events=()):
     return store
 
 
-def _event(id_: int, *, level: str = "INFO", name: str = "workspace.start") -> Event:
-    return Event(id=None, name=name, message="boom", level=level)
+def _event(
+    id_: int,
+    *,
+    level: str = "INFO",
+    name: str = "workspace.start",
+    message: str = "boom",
+    context: dict | None = None,
+) -> Event:
+    return Event(id=id_, name=name, message=message, level=level, context=context or {})
 
 
 def _monitor_scheduled(app) -> list[object]:
@@ -1283,16 +1287,9 @@ def _monitor_scheduled(app) -> list[object]:
     return [cb for _delay, cb in app.app.root.after_callbacks if cb == app.app._monitor_tick]
 
 
-def test_show_monitoring_opens_the_console(app, tmp_path) -> None:
-    _monitor_app(app, tmp_path, [_event(1)])
-    with _fake_monitoring_gui():
-        app.app.show_monitoring()
-        assert app.app._monitor_window is not None
-        assert app.app._monitor_events()
-        # A second click focuses the existing window instead of stacking a new one.
-        first = app.app._monitor_window
-        app.app.show_monitoring()
-    assert app.app._monitor_window is first
+def test_main_window_embeds_the_monitoring_panel(app) -> None:
+    assert app.app._monitor_panel is not None
+    assert any(button.text == "Tous les workspaces" for button in FakeTtk.Button.instances)
 
 
 def test_monitor_events_are_bounded_and_absent_without_a_store(app, tmp_path) -> None:
@@ -1302,67 +1299,109 @@ def test_monitor_events_are_bounded_and_absent_without_a_store(app, tmp_path) ->
     assert app.app._monitor_events() == []
 
 
-def test_apply_monitor_snapshot_opens_the_console_on_a_new_critical(app, tmp_path) -> None:
+def test_selecting_a_workspace_scopes_the_journal(app, tmp_path) -> None:
+    workspace = next(item for item in app.manager.list.return_value if item.id == "ws-running")
+    app.app._select_row(workspace.id)
+    app.app._apply_monitor_snapshot(
+        [
+            _event(1, name="start", context={"workspace_id": workspace.id}),
+            _event(2, name="other", context={"workspace_id": "ws-other"}),
+        ]
+    )
+    assert app.app._monitor_panel is not None
+    assert app.app._monitor_panel.tree.get_children() == ["event-1"]
+    assert app.app._monitor_panel._scope.text == workspace.name
+
+
+def test_clear_workspace_scope_returns_to_global_logs(app) -> None:
+    app.app._select_row("ws-running")
+    clear = next(
+        button for button in FakeTtk.Button.instances if button.text == "Tous les workspaces"
+    )
+    clear.command()
+    assert app.app._selected_id is None
+    assert app.app._monitor_panel._scope.text == ""
+    assert "Tous les workspaces" in app.app._monitor_panel._summary.text
+
+
+def test_apply_monitor_snapshot_reports_critical_events_without_a_window(app, tmp_path) -> None:
     _monitor_app(app, tmp_path)
-    with _fake_monitoring_gui():
-        app.app._apply_monitor_snapshot([_event(1, level="CRITICAL")])
-    assert app.app._monitor_window is not None
+    before = len(FakeTk.Toplevel.instances)
+    app.app._apply_monitor_snapshot([_event(1, level="CRITICAL")])
     assert "Incident critique" in app.app._status_label._options["text"]
+    assert len(FakeTk.Toplevel.instances) == before
 
 
 def test_apply_monitor_snapshot_groups_repeated_criticals(app, tmp_path) -> None:
     _monitor_app(app, tmp_path)
-    with _fake_monitoring_gui():
-        app.app._apply_monitor_snapshot([_event(1, level="ERROR", name="docker.up")])
-        window = app.app._monitor_window
-        window.destroy()
-        app.app._close_monitoring()
-        # The same failure again inside the grouping window stays quiet.
-        app.app._apply_monitor_snapshot([_event(2, level="ERROR", name="docker.up")])
-    assert app.app._monitor_window is None
+    before = len(FakeTk.Toplevel.instances)
+    app.app._apply_monitor_snapshot([_event(1, level="ERROR", name="docker.up")])
+    first_status = app.app._status_label._options["text"]
+    app.app._apply_monitor_snapshot([_event(2, level="ERROR", name="docker.up")])
+    assert app.app._status_label._options["text"] == first_status
+    assert len(FakeTk.Toplevel.instances) == before
 
 
 def test_apply_monitor_snapshot_ignores_non_critical_events(app, tmp_path) -> None:
     _monitor_app(app, tmp_path)
-    with _fake_monitoring_gui():
-        app.app._apply_monitor_snapshot([_event(1, level="WARNING")])
-    assert app.app._monitor_window is None
+    app.app.set_status("unchanged")
+    app.app._apply_monitor_snapshot([_event(1, level="WARNING")])
+    assert app.app._status_label._options["text"] == "unchanged"
 
 
 def test_apply_monitor_snapshot_ignores_already_seen_events(app, tmp_path) -> None:
     _monitor_app(app, tmp_path)
     seen = replace(_event(1, level="CRITICAL"), id=1)
-    with _fake_monitoring_gui():
-        app.app._apply_monitor_snapshot([seen], initial=True)
-        app.app._apply_monitor_snapshot([seen])
-    assert app.app._monitor_window is None
+    app.app._apply_monitor_snapshot([seen], initial=True)
+    app.app.set_status("unchanged")
+    app.app._apply_monitor_snapshot([seen])
+    assert app.app._status_label._options["text"] == "unchanged"
 
 
-def test_apply_monitor_snapshot_initial_pass_never_raises_the_console(app, tmp_path) -> None:
+def test_apply_monitor_snapshot_initial_pass_never_reports_critical(app, tmp_path) -> None:
     _monitor_app(app, tmp_path)
-    with _fake_monitoring_gui():
-        app.app._apply_monitor_snapshot([_event(1, level="CRITICAL")], initial=True)
-    assert app.app._monitor_window is None
+    app.app.set_status("unchanged")
+    app.app._apply_monitor_snapshot([_event(1, level="CRITICAL")], initial=True)
+    assert app.app._status_label._options["text"] == "unchanged"
+
+
+def test_export_monitor_reports_count_and_path(app, tmp_path) -> None:
+    store = _monitor_app(app, tmp_path, [_event(1)])
+    app.app._export_monitor()
+    app.app._drain_events()
+    target = store.path.with_name("events-export.json")
+    assert target.exists()
+    assert app.app._status_label._options["text"] == f"1 événement(s) exportés vers {target}"
+
+
+def test_monitor_tick_keeps_last_snapshot_when_read_fails(app, tmp_path) -> None:
+    _monitor_app(app, tmp_path, [_event(1)])
+    app.app._drain_events()
+    app.app._apply_monitor_snapshot([_event(1)], initial=True)
+    cached = app.app._monitor_events_cache[0]
+    with patch.object(app.app, "_monitor_events", side_effect=OSError("disk unavailable")):
+        app.app._monitor_tick()
+        app.app._drain_events()
+    assert app.app._monitor_events_cache == [cached]
+    assert "Journal indisponible" in app.app._status_label._options["text"]
 
 
 def test_monitor_tick_reads_in_the_background_and_reschedules(app, tmp_path) -> None:
     _monitor_app(app, tmp_path, [_event(1)])
     app.app._set_monitor_in_flight(False)
     app.app._monitor_tick()
-    # Run the snapshot the background worker queued, through the real drain loop.
     app.app._drain_events()
     assert app.app.monitor_in_flight() is False
-    assert any(
-        callback == app.app._monitor_tick for _delay, callback in app.app.root.after_callbacks
-    )
+    assert len(_monitor_scheduled(app)) == 1
 
 
-def test_monitor_tick_skips_while_a_read_is_in_flight(app, tmp_path) -> None:
+def test_monitor_tick_reschedules_while_a_read_is_in_flight(app, tmp_path) -> None:
     _monitor_app(app, tmp_path, [_event(1)])
     app.app._set_monitor_in_flight(True)
     before = _monitor_scheduled(app)
     app.app._monitor_tick()
-    assert _monitor_scheduled(app) == before
+    assert len(_monitor_scheduled(app)) == len(before)
+    assert app.app._monitor_after_id is not None
 
 
 def test_monitor_tick_is_skipped_once_the_app_is_closed(app, tmp_path) -> None:
@@ -1371,14 +1410,6 @@ def test_monitor_tick_is_skipped_once_the_app_is_closed(app, tmp_path) -> None:
     before = _monitor_scheduled(app)
     app.app._monitor_tick()
     assert _monitor_scheduled(app) == before
-
-
-def test_close_monitoring_forgets_the_window(app, tmp_path) -> None:
-    _monitor_app(app, tmp_path)
-    with _fake_monitoring_gui():
-        app.app.show_monitoring()
-        app.app._close_monitoring()
-    assert app.app._monitor_window is None
 
 
 # -------------------------------------------------- server supervision entry
@@ -1496,75 +1527,9 @@ def test_supervise_server_reports_a_failed_read(app, tmp_path) -> None:
     assert "Santé : inconnue." in window_text()
 
 
-# ------------------------------------------------- workspace monitoring page
-def test_context_menu_offers_the_workspace_journal(app, tmp_path) -> None:
+# ---------------------------------------------------------- context menu
+def test_context_menu_no_longer_offers_a_workspace_journal(app, tmp_path) -> None:
     workspace = make_workspace(tmp_path, "Running", 5678)
     app.app._build_context_menu(workspace)
     labels = [label for label, _command in app.app._menu._items if label]
-    assert "Journal du workspace…" in labels
-
-
-def test_show_workspace_monitoring_renders_the_workspace_events(app, tmp_path) -> None:
-    workspace = make_workspace(tmp_path, "Running", 5678)
-    app.manager.list.return_value = [workspace]
-    app.app.refresh()
-    app.app._select_row(workspace.id)
-    _monitor_app(
-        app,
-        tmp_path,
-        [
-            Event(
-                id=None, name="workspace.start", message="Start failed for Running", level="ERROR"
-            ),
-            Event(id=None, name="other", message="unrelated", level="INFO"),
-        ],
-    )
-
-    with _fake_monitoring_gui():
-        app.app.show_workspace_monitoring()
-
-    panel = app.app._workspace_window.workspace_panel
-    assert [panel.tree.item(row)["values"][2] for row in panel.tree.get_children()] == [
-        "Start failed for Running"
-    ]
-    assert "1 erreur(s)" in panel._summary.text
-
-
-def test_show_workspace_monitoring_pushes_worker_updates(app, tmp_path) -> None:
-    workspace = make_workspace(tmp_path, "Running", 5678)
-    app.manager.list.return_value = [workspace]
-    app.app.refresh()
-    app.app._select_row(workspace.id)
-    store = _monitor_app(app, tmp_path)
-
-    with _fake_monitoring_gui():
-        app.app.show_workspace_monitoring()
-        app.app._drain_events()
-        store.append(Event(id=None, name="workspace.stop", message="Stopped Running"))
-        # A refresh queues the fresh read; the worker callback is applied by the
-        # Tk drain loop, not on the calling thread.
-        button = next(b for b in FakeTtk.Button.instances if b.text == "Actualiser")
-        button.command()
-        app.app._drain_events()
-
-    panel = app.app._workspace_window.workspace_panel
-    messages = [panel.tree.item(row)["values"][2] for row in panel.tree.get_children()]
-    assert "Stopped Running" in messages
-
-
-def test_show_workspace_monitoring_links_server_supervision(app, tmp_path) -> None:
-    workspace = _server_workspace(app, tmp_path)
-    _monitor_app(app, tmp_path)
-
-    with _fake_monitoring_gui():
-        app.app.show_workspace_monitoring()
-        button = next(b for b in FakeTtk.Button.instances if b.text == "Superviser le serveur…")
-        button.command()
-
-    assert app.app._monitor_window is None
-    assert workspace.server.enabled is True
-
-
-def test_show_workspace_monitoring_without_selection_does_nothing(app) -> None:
-    app.app.show_workspace_monitoring()
-    assert app.app._workspace_window is None
+    assert "Journal du workspace…" not in labels

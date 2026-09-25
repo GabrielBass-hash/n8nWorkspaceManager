@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from helpers import FakeTk, FakeTtk, fake_runs_panel_bases
@@ -91,6 +92,11 @@ def _build(refresh=None, open_run=None, run=None):
     open_run = open_run or MagicMock()
     panel = RunsPanel(FakeTk.Frame(None), refresh=refresh, open_run=open_run, run=run)
     return panel, refresh, open_run
+
+
+def _local_timestamp(iso_timestamp: str) -> str:
+    """Return the machine-local timestamp rendered by the runs panel."""
+    return datetime.fromisoformat(iso_timestamp).astimezone().strftime("%d/%m/%Y %H:%M")
 
 
 def test_apply_renders_runs_jobs_and_pipelines() -> None:
@@ -437,14 +443,17 @@ def test_apply_renders_partial_snapshot_without_dropping_runs() -> None:
 
 
 def test_apply_renders_pipeline_label_timestamp_and_failure_detail() -> None:
+    run_created_at = "2026-09-18T14:03:05+02:00"
+    job_completed_at = "2026-09-18T14:05:05+02:00"
+    pipeline_timestamp = "2026-09-18T14:05:00+02:00"
     snapshot = _snapshot(
-        runs=[_run(11, created_at="2026-09-18T14:03:05+02:00")],
+        runs=[_run(11, created_at=run_created_at)],
         jobs={
             11: (
                 _job(
                     21,
                     conclusion="failure",
-                    completed_at="2026-09-18T14:05:05+02:00",
+                    completed_at=job_completed_at,
                 ),
             )
         },
@@ -453,7 +462,7 @@ def test_apply_renders_pipeline_label_timestamp_and_failure_detail() -> None:
                 _pipeline(
                     status="failure",
                     detail="HTTP 500",
-                    timestamp="2026-09-18T14:05:00+02:00",
+                    timestamp=pipeline_timestamp,
                 ),
             )
         },
@@ -468,14 +477,14 @@ def test_apply_renders_pipeline_label_timestamp_and_failure_detail() -> None:
         panel.apply(snapshot)
 
     run_row = panel.tree.item("run-11")
-    assert "18/09/2026 14:03" in run_row["text"]
+    assert _local_timestamp(run_created_at) in run_row["text"]
     job_row = panel.tree.item("job-11-21")
-    assert "18/09/2026 14:05" in job_row["values"][0]
+    assert _local_timestamp(job_completed_at) in job_row["values"][0]
     pipeline_id = panel.tree.get_children("job-11-21")[0]
     pipeline_row = panel.tree.item(pipeline_id)
     assert "en échec" in pipeline_row["text"]
     assert "HTTP 500" in pipeline_row["values"][0]
-    assert "18/09/2026 14:05" in pipeline_row["values"][0]
+    assert _local_timestamp(pipeline_timestamp) in pipeline_row["values"][0]
     assert pipeline_row["tags"] == ["failure"]
 
 

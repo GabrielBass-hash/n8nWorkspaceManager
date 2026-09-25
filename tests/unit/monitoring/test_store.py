@@ -105,6 +105,19 @@ def test_read_events_applies_limit_and_time_bounds(tmp_path: Path) -> None:
         assert [event.name for event in bounded] == ["e2", "e1"]
 
 
+def test_latest_events_returns_newest_first_and_honors_limit(tmp_path: Path) -> None:
+    with make_store(tmp_path) as store:
+        for offset in range(4):
+            store.append(Event(name=f"e{offset}", timestamp=NOW - timedelta(hours=offset)))
+
+        assert [event.name for event in store.latest_events(2)] == ["e0", "e1"]
+
+
+def test_latest_events_rejects_invalid_limit(tmp_path: Path) -> None:
+    with make_store(tmp_path) as store, pytest.raises(ValueError, match="limit"):
+        store.latest_events(0)
+
+
 def test_read_events_rejects_invalid_limit_or_interval(tmp_path: Path) -> None:
     with make_store(tmp_path) as store:
         with pytest.raises(ValueError, match="limit"):

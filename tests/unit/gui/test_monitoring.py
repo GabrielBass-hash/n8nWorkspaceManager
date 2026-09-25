@@ -1,4 +1,4 @@
-"""Unit tests for the monitoring console (:mod:`n8n_launcher.gui.monitoring`)."""
+"""Unit tests for the monitoring panel (:mod:`n8n_launcher.gui.monitoring`)."""
 
 from __future__ import annotations
 
@@ -13,10 +13,9 @@ from helpers import (
     FakeTtk,
     fake_monitoring_panel_bases,
     fake_server_panel_bases,
-    fake_workspace_panel_bases,
 )
 
-from n8n_launcher.core.models import DbConfig, DbMode, ServerConfig, Workspace, WorkspaceState
+from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 from n8n_launcher.gui import monitoring
 from n8n_launcher.gui.monitoring import ServerSnapshot
 from n8n_launcher.monitoring.events import Event
@@ -30,7 +29,6 @@ def fake_gui():
     with (
         fake_monitoring_panel_bases(),
         fake_server_panel_bases(),
-        fake_workspace_panel_bases(),
         patch("n8n_launcher.gui.monitoring.tk", FakeTk()),
         patch("n8n_launcher.gui.monitoring.ttk", FakeTtk()),
     ):
@@ -74,14 +72,6 @@ class FakeClock:
     def advance(self, seconds: float) -> None:
         """Move the clock forward."""
         self.now += seconds
-
-
-def _entry_text(root: FakeTk.Toplevel) -> str:
-    """Return the console's search entry text (it is the only entry created)."""
-    for widget in _walk(root):
-        if isinstance(widget, FakeTk.Entry):
-            return widget.get()
-    raise AssertionError("no search entry was created")
 
 
 def _walk(node: object) -> list[object]:
@@ -156,11 +146,12 @@ def test_is_critical_only_errors_and_criticals():
 
 
 # ------------------------------------------------------------------ summary
-def test_summary_text_reports_empty_journal_and_location(tmp_path):
+def test_summary_text_reports_an_empty_journal(tmp_path):
     store = EventStore(tmp_path)
-    summary = monitoring.summary_text([], store)
-    assert "Aucun événement" in summary
-    assert str(store.path) in summary
+    summary = monitoring.summary_text([], store=store)
+    assert "Tous les workspaces" in summary
+    assert "aucun événement" in summary
+    assert f"conservation {monitoring.RETENTION_DAYS} j" in summary
 
 
 def test_summary_text_counts_severities(tmp_path):
@@ -171,15 +162,15 @@ def test_summary_text_counts_severities(tmp_path):
         make_event(level="ERROR"),
         make_event(level="CRITICAL"),
     ]
-    summary = monitoring.summary_text(events, store)
-    assert "4 événement(s)" in summary
+    summary = monitoring.summary_text(events, store=store, scope="Demo")
+    assert "Demo · 4 événement(s)" in summary
     assert "1 critique(s)" in summary
     assert "1 erreur(s)" in summary
     assert "1 avertissement(s)" in summary
 
 
 def test_summary_text_without_store():
-    assert "journal indisponible" in monitoring.summary_text([make_event()], None)
+    assert "journal indisponible" in monitoring.summary_text([make_event()], store=None)
 
 
 # ------------------------------------------------------------------ filters
@@ -339,13 +330,19 @@ def test_panel_apply_filters_rows():
     assert panel.tree.get_children() == ["event-2"]
 
 
-def test_panel_refresh_summary_uses_the_current_store(tmp_path):
+def test_panel_summary_reports_the_store_retention(tmp_path):
     store = EventStore(tmp_path)
     with fake_gui():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
         panel.apply([make_event(id=1)], store=store)
-        panel.refresh_summary()
-    assert str(store.path) in panel._summary.text
+    assert "conservation 30 j" in panel._summary.text
+
+
+def test_panel_summary_reports_a_missing_store():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1)], store=None)
+    assert "journal indisponible" in panel._summary.text
 
 
 def test_panel_summary_describes_the_visible_rows(tmp_path):
@@ -356,89 +353,7 @@ def test_panel_summary_describes_the_visible_rows(tmp_path):
     assert "1 erreur(s)" in panel._summary.text
 
 
-# ------------------------------------------------------------------- window
-def test_prompt_monitoring_opens_a_window_with_the_host_reader():
-    statuses: list[str] = []
-    with fake_gui():
-        window = monitoring.prompt_monitoring(
-            FakeRoot(),
-            None,
-            read=lambda: [make_event()],
-            set_status=statuses.append,
-        )
-    assert window._geometry == "1180x720"
-    assert any("1 événement(s)" in status for status in statuses)
-
-
-def test_prompt_monitoring_reads_the_store_when_no_reader_is_given(tmp_path):
-    store = EventStore(tmp_path)
-    store.append(make_event(id=None))
-    with fake_gui():
-        monitoring.prompt_monitoring(FakeRoot(), store)
-    assert store.search_events()
-
-
-def test_prompt_monitoring_exports_the_journal(tmp_path):
-    store = EventStore(tmp_path)
-    store.append(make_event(id=None))
-    statuses: list[str] = []
-    with fake_gui():
-        monitoring.prompt_monitoring(
-            FakeRoot(),
-            store,
-            read=lambda: store.search_events(),
-            set_status=statuses.append,
-        )
-        export = next(b for b in FakeTtk.Button.instances if b.text == "Exporter (JSON)")
-        export.command()
-    assert any("exportés vers" in status for status in statuses)
-    assert (tmp_path / "events-export.json").exists()
-
-
-def test_prompt_monitoring_export_is_a_noop_without_a_store():
-    with fake_gui():
-        monitoring.prompt_monitoring(FakeRoot(), None, read=lambda: [])
-        export = next(b for b in FakeTtk.Button.instances if b.text == "Exporter (JSON)")
-        export.command()
-    assert not FakeTtk.Button.instances[-1].command()
-
-
-def test_prompt_monitoring_level_buttons_reload_with_the_filter():
-    with fake_gui():
-        monitoring.prompt_monitoring(FakeRoot(), None, read=lambda: [make_event(level="ERROR")])
-        error = next(
-            b for b in FakeTtk.Radiobutton.instances if b.text == "Erreur" and b.value == "ERROR"
-        )
-        error.select()
-        error.command()
-    assert error.packed
-
-
-def test_prompt_monitoring_search_entry_drives_the_filter():
-    with fake_gui():
-        window = monitoring.prompt_monitoring(FakeRoot(), None, read=lambda: [make_event()])
-        entry = next(w for w in _walk(window) if isinstance(w, FakeTk.Entry))
-        entry.insert(0, "docker")
-        refresh = next(b for b in FakeTtk.Button.instances if b.text == "Actualiser")
-        refresh.command()
-    assert _entry_text(window) == "docker"
-
-
-def test_prompt_monitoring_without_store_reports_no_journal():
-    with fake_gui():
-        window = monitoring.prompt_monitoring(FakeRoot(), None, read=lambda: [])
-    assert "Aucun événement" in window.children[1]._summary.text
-
-
-def test_prompt_monitoring_binds_escape_to_close():
-    with fake_gui():
-        window = monitoring.prompt_monitoring(FakeRoot(), None, read=lambda: [])
-        handler = window._bindings["<Escape>"]
-        handler(None)
-    assert window.destroyed
-
-
-# ------------------------------------------------------ server supervision
+# ------------------------------------------------------------------ server supervision
 def _health(*, available: bool = True, healthy: bool = True) -> RemoteHealth:
     return RemoteHealth(
         available=available,
@@ -657,13 +572,13 @@ def test_workspace_events_ignores_a_prefixed_workspace_name(tmp_path):
     assert monitoring.workspace_events(workspace, [other]) == []
 
 
-def test_workspace_events_are_newest_first(tmp_path):
+def test_workspace_events_preserve_input_order(tmp_path):
     workspace = _workspace(tmp_path)
     first = make_event(id=1, message="Starting Demo")
     second = make_event(id=2, message="Stopped Demo")
     assert [event.id for event in monitoring.workspace_events(workspace, [first, second])] == [
-        2,
         1,
+        2,
     ]
 
 
@@ -673,151 +588,70 @@ def test_workspace_events_are_case_insensitive(tmp_path):
     assert monitoring.workspace_events(workspace, [event]) == [event]
 
 
-def test_workspace_summary_lists_facts_and_counts(tmp_path):
-    workspace = _workspace(
-        tmp_path,
-        name="Demo",
-        state=WorkspaceState.RUNNING,
-        server=ServerConfig(
-            enabled=True,
-            host="prod.example.test",
-            ssh_port=22,
-            user="deploy",
-            key_path="/home/me/.ssh/id_ed25519",
-            base_dir="n8n-launcher/demo",
-            n8n_port=5689,
-        ),
-    )
-    events = [
-        make_event(id=1, level="ERROR", message="Demo"),
-        make_event(id=2, level="CRITICAL", message="Demo"),
-        make_event(id=3, level="WARNING", message="Demo"),
-    ]
-    summary = monitoring.workspace_summary(workspace, events)
-    assert "Demo · état running · port 5678" in summary
-    assert "CI désactivée" in summary
-    assert "deploy@prod.example.test" in summary
-    assert "aucun déploiement enregistré" in summary
-    assert "3 événement(s) · 1 critique(s) · 1 erreur(s) · 1 avertissement(s)" in summary
-
-
-def test_workspace_summary_reports_a_failed_deploy(tmp_path):
-    workspace = _workspace(
-        tmp_path,
-        server=ServerConfig(
-            enabled=True,
-            host="prod.example.test",
-            ssh_port=22,
-            user="deploy",
-            key_path="/k",
-            base_dir="b",
-            n8n_port=5689,
-        ),
-        server_last_error="compose failed",
-    )
-    assert "dernier déploiement en échec : compose failed" in monitoring.workspace_summary(
-        workspace, []
-    )
-
-
-def test_workspace_summary_reports_a_successful_deploy(tmp_path):
-    workspace = _workspace(
-        tmp_path,
-        server=ServerConfig(
-            enabled=True,
-            host="h",
-            ssh_port=22,
-            user="u",
-            key_path="/k",
-            base_dir="b",
-            n8n_port=1,
-        ),
-        server_last_deploy='{"sha":"abc","status":"ok"}',
-    )
-    assert "dernier déploiement réussi" in monitoring.workspace_summary(workspace, [])
-
-
-def test_workspace_summary_without_a_server(tmp_path):
-    assert "Serveur : non configuré" in monitoring.workspace_summary(_workspace(tmp_path), [])
-
-
-def test_workspace_summary_without_events_says_so(tmp_path):
-    summary = monitoring.workspace_summary(_workspace(tmp_path), [])
-    assert "Aucun événement enregistré" in summary
-
-
-def test_workspace_panel_renders_only_its_events(tmp_path):
+def test_monitoring_panel_filters_to_the_selected_workspace(tmp_path):
     workspace = _workspace(tmp_path)
     with fake_gui():
-        panel = monitoring.WorkspacePanel(FakeTk.Frame(None), workspace)
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
         panel.apply(
-            monitoring.workspace_events(
-                workspace,
-                [
-                    make_event(id=1, message="Starting Demo", level="ERROR"),
-                    make_event(id=2, message="unrelated"),
-                ],
-            )
+            [
+                make_event(id=1, name="start", context={"workspace_id": workspace.id}),
+                make_event(id=2, name="other", context={"workspace_id": "ws-other"}),
+            ],
+            workspace=workspace,
         )
     assert panel.tree.get_children() == ["event-1"]
-    assert "1 erreur(s)" in panel._summary.text
+    assert panel._scope.text == "Demo"
+    assert "Demo · 1 événement(s)" in panel._summary.text
+    assert "1 erreur(s)" not in panel._summary.text
 
 
-def test_workspace_panel_shows_the_selected_event_detail(tmp_path):
+def test_monitoring_panel_can_return_to_global_scope(tmp_path):
     workspace = _workspace(tmp_path)
     with fake_gui():
-        panel = monitoring.WorkspacePanel(FakeTk.Frame(None), workspace)
-        panel.apply([make_event(id=1, message="Demo", exception="boom")])
-        panel.tree.selection_set("event-1")
-        panel._on_select()
-    assert "boom" in panel._detail.text
-
-
-def test_workspace_panel_ignores_a_snapshot_after_destroy(tmp_path):
-    workspace = _workspace(tmp_path)
-    with fake_gui():
-        panel = monitoring.WorkspacePanel(FakeTk.Frame(None), workspace)
-        panel.winfo_exists = lambda: 0  # type: ignore[method-assign]
-        panel.apply([make_event(id=1)])
-    assert panel.tree.get_children() == []
-
-
-def test_workspace_panel_offers_a_server_action(tmp_path):
-    workspace = _workspace(tmp_path)
-    calls: list[int] = []
-    with fake_gui():
-        monitoring.WorkspacePanel(
-            FakeTk.Frame(None), workspace, on_open_server=lambda: calls.append(1)
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply(
+            [make_event(id=1, context={"workspace_id": workspace.id})],
+            workspace=workspace,
         )
-        button = next(b for b in FakeTtk.Button.instances if b.text == "Superviser le serveur…")
-        button.command()
-    assert calls == [1]
-
-
-def test_prompt_workspace_monitoring_filters_and_refreshes(tmp_path):
-    workspace = _workspace(tmp_path)
-    statuses: list[str] = []
-    events = [make_event(id=1, message="Demo cassé"), make_event(id=2, message="autre chose")]
-    with fake_gui():
-        window = monitoring.prompt_workspace_monitoring(
-            FakeRoot(),
-            workspace,
-            lambda: list(events),
-            set_status=statuses.append,
+        panel.apply(
+            [
+                make_event(id=1, context={"workspace_id": workspace.id}),
+                make_event(id=2, context={"workspace_id": "ws-other"}),
+            ],
+            workspace=None,
         )
-        assert window.title_text == "Supervision — Demo"
-        panel = window.workspace_panel
-        assert panel.tree.get_children() == ["event-1"]
-        button = next(b for b in FakeTtk.Button.instances if b.text == "Actualiser")
-        button.command()
-    assert any("1 événement(s)" in status for status in statuses)
-    assert window.workspace_panel is panel
+    assert panel.tree.get_children() == ["event-1", "event-2"]
+    # Back to the global scope: the header label is emptied because the
+    # "Tous les workspaces" button already names that scope.
+    assert panel._scope.text == ""
+    assert "Tous les workspaces · 2 événement(s)" in panel._summary.text
 
 
-def test_prompt_workspace_monitoring_binds_escape(tmp_path):
+def test_monitoring_panel_radio_filter_reuses_cached_events(tmp_path):
     with fake_gui():
-        window = monitoring.prompt_workspace_monitoring(
-            FakeRoot(), _workspace(tmp_path), lambda: []
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")])
+        error = next(
+            button
+            for button in FakeTtk.Radiobutton.instances
+            if button.text == "Erreur" and button.value == "ERROR"
         )
-        window._bindings["<Escape>"](None)
-    assert window.destroyed
+        error.select()
+        error.command()
+    assert panel.tree.get_children() == ["event-2"]
+
+
+def test_monitoring_panel_search_reuses_cached_events():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1, message="docker up"), make_event(id=2, message="git push")])
+        entry = next(widget for widget in _walk(panel) if isinstance(widget, FakeTk.Entry))
+        entry.insert(0, "git")
+        entry._bindings["<KeyRelease>"](None)
+    assert panel.tree.get_children() == ["event-2"]
+
+
+def test_monitoring_panel_clear_callback_is_optional():
+    with fake_gui():
+        monitoring.MonitoringPanel(FakeTk.Frame(None))
+    assert all(button.text != "Tous les workspaces" for button in FakeTtk.Button.instances)

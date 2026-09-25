@@ -1,6 +1,6 @@
-"""Monitoring console: one window over the persisted application events.
+"""Monitoring panel: an inline view over the persisted application events.
 
-The console is a *pure renderer* over the events already stored by
+The panel is a *pure renderer* over the events already stored by
 :mod:`n8n_launcher.monitoring`. It performs no I/O of its own: the host reads
 the store (in a background worker, since the store is a SQLite file) and hands
 the rows to :meth:`MonitoringPanel.apply`. That keeps the Tk main thread free
@@ -11,9 +11,8 @@ Two behaviours deserve their own home here because they are pure logic:
 * :func:`level_tag` / :func:`event_row` decide how an event is drawn, and
   :func:`event_detail` renders the context of the selected row.
 * :class:`CriticalGate` implements the "surface critical incidents" rule: an
-  ``ERROR``/``CRITICAL`` event re-opens (or raises) the console, but repeating
-  failures of the same operation are grouped so a retry loop cannot flood the
-  user with a hundred identical windows.
+  ``ERROR``/``CRITICAL`` event updates the status bar, while repeating failures
+  of the same operation are grouped so a retry loop cannot flood the user.
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ from ..core.models import Workspace
 from ..monitoring.events import Event
 from ..monitoring.store import RETENTION_DAYS, EventStore
 from ..remote import RemoteExecutionStatus, RemoteHealth
-from .display import db_label, git_label
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -53,7 +51,7 @@ _TAG_CRITICAL = "#450a0a"
 
 CRITICAL_LEVELS = frozenset({"ERROR", "CRITICAL"})
 
-# One console window must not be raised more than once per this many seconds
+# One incident status must not be raised more than once per this many seconds
 # for the same failure signature; the very first occurrence always surfaces.
 DEFAULT_GROUP_WINDOW_SECONDS = 60.0
 
@@ -105,22 +103,31 @@ def event_detail(event: Event | None) -> str:
     return "\n".join(lines)
 
 
-def summary_text(events: Sequence[Event], store: EventStore | None) -> str:
-    """Return the header describing the visible rows and the journal location."""
-    location = str(store.path) if store is not None else "journal indisponible"
-    if not events:
-        return f"Aucun événement sur les {RETENTION_DAYS} derniers jours — {location}"
-    errors = sum(1 for event in events if event.level.upper() == "ERROR")
+def summary_text(
+    events: Sequence[Event],
+    *,
+    store: EventStore | None,
+    scope: str = "Tous les workspaces",
+) -> str:
+    """Return the line describing *scope*, the visible rows and the retention.
+
+    ``store`` is only used to know whether a journal exists at all: the panel is
+    embedded in a narrow pane, so the line stays short and the full path lives in
+    the "Exporter" target instead.
+    """
+    parts = [scope, f"{len(events)} événement(s)" if events else "aucun événement"]
     criticals = sum(1 for event in events if event.level.upper() == "CRITICAL")
+    errors = sum(1 for event in events if event.level.upper() == "ERROR")
     warnings = sum(1 for event in events if event.level.upper() in ("WARNING", "WARN"))
-    parts = [f"{len(events)} événement(s)"]
     if criticals:
         parts.append(f"{criticals} critique(s)")
     if errors:
         parts.append(f"{errors} erreur(s)")
     if warnings:
         parts.append(f"{warnings} avertissement(s)")
-    parts.append(f"conservation {RETENTION_DAYS} j — {location}")
+    parts.append(
+        f"conservation {RETENTION_DAYS} j" if store is not None else "journal indisponible"
+    )
     return " · ".join(parts)
 
 
@@ -132,7 +139,7 @@ def filter_events(
 ) -> list[Event]:
     """Return the events matching a level filter and a case-insensitive *query*.
 
-    The text filter runs here rather than in SQL so the console and the
+    The text filter runs here rather than in SQL so the panel and the
     in-memory snapshot can never disagree about what a query means.
     """
     selected = level.upper() if level else None
@@ -174,8 +181,8 @@ class CriticalGate:
     The first ``ERROR``/``CRITICAL`` event always surfaces. The same signature
     (``name`` + ``level``) then stays quiet for
     :attr:`window_seconds`, which keeps one failing operation — retried by a
-    timer — from raising a window per attempt while a *different* failure still
-    gets through immediately.
+    timer — from replacing the status message per attempt while a *different*
+    failure still gets through immediately.
     """
 
     def __init__(
@@ -190,7 +197,7 @@ class CriticalGate:
         self._last_surfaced: dict[str, float] = {}
 
     def accept(self, event: Event) -> bool:
-        """Return whether *event* should open/raise the console now."""
+        """Return whether *event* should surface in the status bar now."""
         if not is_critical(event):
             return False
         signature = f"{event.level.upper()}|{event.name}"
@@ -202,63 +209,129 @@ class CriticalGate:
         return True
 
     def forget(self, signature: str) -> None:
-        """Drop the grouping state of *signature* (used when a window closes)."""
+        """Drop the grouping state of *signature*."""
         self._last_surfaced.pop(signature, None)
 
 
 class MonitoringPanel(tk.Frame):
-    """Read-only event table with a detail pane, fed by :meth:`apply`.
-
-    The panel holds no store and starts no thread: the host reads the events
-    and applies them, exactly like :class:`~n8n_launcher.gui.ci_runs.RunsPanel`.
-    Selection survives refreshes, and the detail pane always describes the
-    currently selected row.
-    """
+    """Read-only event table with a detail pane and compact inline filters."""
 
     instances: ClassVar[weakref.WeakSet[MonitoringPanel]] = weakref.WeakSet()
 
-    def __init__(self, parent: tk.Misc, *, on_refresh: Callable[[], None] | None = None) -> None:
-        """Build the table, the detail pane and the optional refresh button."""
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        on_refresh: Callable[[], None] | None = None,
+        on_export: Callable[[], None] | None = None,
+        on_clear_workspace: Callable[[], None] | None = None,
+    ) -> None:
+        """Build the integrated journal view and its optional host actions."""
         super().__init__(parent, bg=APP_BACKGROUND)
-        self.on_refresh = on_refresh
-        self._events: dict[str, Event] = {}
+        self._events: list[Event] = []
+        self._visible: dict[str, Event] = {}
         self._order: list[str] = []
         self._store: EventStore | None = None
+        self._workspace: Workspace | None = None
+        self._level_var = tk.StringVar()
         MonitoringPanel.instances.add(self)
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
-        header.pack(fill="x", padx=14, pady=(10, 4))
-        self._summary = tk.Label(
+        header.pack(fill="x", padx=12, pady=(10, 4))
+        title = tk.Label(
+            header,
+            text="Journal",
+            bg=APP_BACKGROUND,
+            fg=TEXT_PRIMARY,
+            font=FONT_ROWS,
+            anchor="w",
+        )
+        title.pack(side="left")
+        # Current scope, shown only when narrowed to a workspace: the "Tous les
+        # workspaces" button already states the global scope, so repeating it
+        # here would just duplicate the same words side by side.
+        self._scope = tk.Label(
             header,
             text="",
             bg=APP_BACKGROUND,
             fg=TEXT_MUTED,
             font=FONT_META,
-            anchor="w",
+            anchor="e",
         )
-        self._summary.pack(side="left", expand=True, fill="x")
+        self._scope.pack(side="left", fill="x", expand=True, padx=(10, 6))
+        if on_clear_workspace is not None:
+            ttk.Button(
+                header,
+                text="Tous les workspaces",
+                style="Secondary.TButton",
+                command=on_clear_workspace,
+            ).pack(side="right", padx=(4, 0))
+        if on_export is not None:
+            ttk.Button(
+                header,
+                text="Exporter",
+                style="Secondary.TButton",
+                command=on_export,
+            ).pack(side="right", padx=(4, 0))
         if on_refresh is not None:
             ttk.Button(
                 header,
                 text="Actualiser",
                 style="Secondary.TButton",
                 command=on_refresh,
-            ).pack(side="right", padx=(6, 0))
+            ).pack(side="right")
+
+        filters = tk.Frame(self, bg=APP_BACKGROUND)
+        filters.pack(fill="x", padx=12, pady=(0, 4))
+        search_row = tk.Frame(filters, bg=APP_BACKGROUND)
+        search_row.pack(fill="x")
+        tk.Label(
+            search_row,
+            text="Recherche",
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+        ).pack(side="left")
+        self._entry = tk.Entry(search_row, width=20)
+        self._entry.bind("<Return>", lambda _event: self._render())
+        self._entry.bind("<KeyRelease>", lambda _event: self._render())
+        self._entry.pack(side="left", padx=(6, 10))
+        for options in (filter_options()[:3], filter_options()[3:]):
+            level_row = tk.Frame(filters, bg=APP_BACKGROUND)
+            level_row.pack(fill="x")
+            for label, value in options:
+                ttk.Radiobutton(
+                    level_row,
+                    text=label,
+                    value=value,
+                    variable=self._level_var,
+                    command=self._render,
+                ).pack(side="left", padx=(0, 6))
+
+        self._summary = tk.Label(
+            self,
+            text="",
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+            anchor="w",
+        )
+        self._summary.pack(fill="x", padx=12, pady=(0, 4))
 
         self.tree = ttk.Treeview(
             self,
             columns=("time", "level", "name", "message"),
             show="headings",
-            height=16,
+            height=14,
         )
         self.tree.heading("time", text="Heure")
         self.tree.heading("level", text="Niveau")
         self.tree.heading("name", text="Source")
         self.tree.heading("message", text="Message")
-        self.tree.column("time", width=140, stretch=False, anchor="w")
-        self.tree.column("level", width=90, stretch=False, anchor="w")
-        self.tree.column("name", width=220, stretch=False, anchor="w")
-        self.tree.column("message", width=620, stretch=True, anchor="w")
+        self.tree.column("time", width=90, stretch=False, anchor="w")
+        self.tree.column("level", width=60, stretch=False, anchor="w")
+        self.tree.column("name", width=120, stretch=False, anchor="w")
+        self.tree.column("message", width=320, stretch=True, anchor="w")
         for tag, color in (
             ("info", _TAG_INFO),
             ("warning", _TAG_WARNING),
@@ -266,7 +339,7 @@ class MonitoringPanel(tk.Frame):
             ("critical", _TAG_CRITICAL),
         ):
             self.tree.tag_configure(tag, background=color)
-        self.tree.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self.tree.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
         self._detail = tk.Label(
@@ -275,11 +348,12 @@ class MonitoringPanel(tk.Frame):
             bg=APP_BACKGROUND,
             fg=TEXT_MUTED,
             font=FONT_ROWS,
+            height=6,
             anchor="nw",
             justify="left",
-            wraplength=980,
+            wraplength=520,
         )
-        self._detail.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        self._detail.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
     def layout_key(self, event: Event) -> str:
         """Return the stable row id for *event* (``id`` when stored)."""
@@ -290,32 +364,48 @@ class MonitoringPanel(tk.Frame):
         events: Sequence[Event],
         *,
         store: EventStore | None = None,
+        workspace: Workspace | None = None,
         level: str | None = None,
         query: str | None = None,
     ) -> None:
-        """Render the events matching the filters, keeping the selection.
-
-        A snapshot landing after the window closed is ignored instead of
-        raising against a destroyed widget.
-        """
+        """Cache and render events for the current workspace scope."""
         try:
             if not self.winfo_exists():
                 return
         except Exception:
             return
-        selected = set(self.tree.selection())
+        self._events = list(events)
         self._store = store
-        self._events.clear()
+        self._workspace = workspace
+        self._render(level=level, query=query)
+
+    def selected_event(self) -> Event | None:
+        """Return the event backing the selected row, if any."""
+        selection = self.tree.selection()
+        return self._visible.get(selection[0]) if selection else None
+
+    def _render(self, *, level: str | None = None, query: str | None = None) -> None:
+        """Render the cached events using the current filters."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        chosen_level = (self._level_var.get() or None) if level is None else level
+        chosen_query = self._entry.get() if query is None else query
+        visible = filter_events(self._events, level=chosen_level, query=chosen_query)
+        if self._workspace is not None:
+            visible = workspace_events(self._workspace, visible)
+        selected = set(self.tree.selection())
+        self._visible.clear()
         self._order.clear()
         for item in self.tree.get_children():
             self.tree.delete(item)
-
-        visible = filter_events(events, level=level, query=query)
         for event in visible:
             row_id = self.layout_key(event)
-            if row_id in self._events:
+            if row_id in self._visible:
                 continue
-            self._events[row_id] = event
+            self._visible[row_id] = event
             self._order.append(row_id)
             self.tree.insert(
                 "",
@@ -324,17 +414,13 @@ class MonitoringPanel(tk.Frame):
                 values=event_row(event),
                 tags=(level_tag(event),),
             )
-
-        self._summary.config(text=summary_text(visible, store))
+        scope = self._workspace.name if self._workspace is not None else "Tous les workspaces"
+        self._scope.config(text="" if self._workspace is None else scope)
+        self._summary.config(text=summary_text(visible, store=self._store, scope=scope))
         restored = next((row_id for row_id in self._order if row_id in selected), None)
         if restored is not None:
             self.tree.selection_set(restored)
-        self._show_detail(self._events.get(restored) if restored is not None else None)
-
-    def selected_event(self) -> Event | None:
-        """Return the event backing the selected row, if any."""
-        selection = self.tree.selection()
-        return self._events.get(selection[0]) if selection else None
+        self._show_detail(self._visible.get(restored) if restored is not None else None)
 
     def _on_select(self, _event: object = None) -> None:
         """Refresh the detail pane when the selection changes."""
@@ -343,104 +429,6 @@ class MonitoringPanel(tk.Frame):
     def _show_detail(self, event: Event | None) -> None:
         """Render *event* (or the hint line) in the detail pane."""
         self._detail.config(text=event_detail(event))
-
-    def refresh_summary(self) -> None:
-        """Recompute the header without touching the rows."""
-        self._summary.config(
-            text=summary_text([self._events[row_id] for row_id in self._order], self._store)
-        )
-
-
-def prompt_monitoring(
-    root: tk.Tk,
-    store: EventStore | None,
-    *,
-    level: str | None = None,
-    query: str | None = None,
-    read: Callable[[], list[Event]] | None = None,
-    set_status: Callable[[str], None] | None = None,
-) -> tk.Toplevel:
-    """Open the monitoring console and return its window.
-
-    ``read`` supplies the events (the host calls it in a background worker and
-    re-applies through :meth:`MonitoringPanel.apply`); when it is omitted the
-    console reads the store inline, which is only acceptable for the small,
-    bounded queries this window issues. ``store`` may be ``None`` when the log
-    directory is unwritable — the console then explains the situation instead of
-    failing to open.
-    """
-
-    def load() -> list[Event]:
-        if read is not None:
-            return read()
-        if store is None:
-            return []
-        return store.search_events(query, level=level, limit=500)
-
-    window = tk.Toplevel(root)
-    window.title("Journal de bord")
-    window.geometry("1180x720")
-    window.minsize(900, 560)
-    window.transient(root)
-    window.configure(bg=APP_BACKGROUND)
-
-    filters = tk.Frame(window, bg=APP_BACKGROUND)
-    filters.pack(fill="x", padx=14, pady=(10, 0))
-    tk.Label(
-        filters,
-        text="Recherche",
-        bg=APP_BACKGROUND,
-        fg=TEXT_MUTED,
-        font=FONT_META,
-    ).pack(side="left")
-    entry = tk.Entry(filters, width=32)
-    entry.insert(0, query or "")
-    entry.pack(side="left", padx=(6, 12))
-
-    level_var = tk.StringVar(value=level or "")
-
-    def chosen_level() -> str | None:
-        """Return the selected level filter, or ``None`` for every level."""
-        return level_var.get() or None
-
-    for label, value in filter_options():
-        ttk.Radiobutton(
-            filters,
-            text=label,
-            value=value,
-            variable=level_var,
-            command=lambda: panel.apply(load(), store=store, level=chosen_level()),
-        ).pack(side="left", padx=(0, 8))
-
-    def refresh() -> None:
-        """Re-read the events with the current filters and note the outcome."""
-        text = entry.get()
-        events = load()
-        panel.apply(events, store=store, level=chosen_level(), query=text)
-        if set_status is not None:
-            set_status(f"Journal de bord — {len(events)} événement(s)")
-
-    def export() -> None:
-        """Write the visible events next to the journal as JSON."""
-        if store is None:
-            return
-        target = store.path.with_name("events-export.json")
-        count = store.export_events(target)
-        if set_status is not None:
-            set_status(f"{count} événement(s) exportés vers {target}")
-
-    ttk.Button(filters, text="Actualiser", style="Secondary.TButton", command=refresh).pack(
-        side="right", padx=(6, 0)
-    )
-    ttk.Button(filters, text="Exporter (JSON)", style="Secondary.TButton", command=export).pack(
-        side="right"
-    )
-
-    panel = MonitoringPanel(window)
-    panel.pack(fill="both", expand=True)
-    window.bind("<Escape>", lambda _event: window.destroy())
-    refresh()
-    return window
 
 
 # ------------------------------------------------------ server supervision
@@ -639,7 +627,7 @@ def prompt_server_supervision(
 
 # ------------------------------------------------------ workspace detail
 def workspace_events(workspace: Workspace, events: Sequence[Event]) -> list[Event]:
-    """Return the events that belong to *workspace*, newest first.
+    """Return the events that belong to *workspace*, preserving input order.
 
     Two signals are used because not every call site tags its records with a
     structured ``workspace_id``: the exact context field when present, and the
@@ -657,181 +645,7 @@ def workspace_events(workspace: Workspace, events: Sequence[Event]) -> list[Even
             continue
         if pattern.search(f"{event.name} {event.message}".casefold()):
             selected.append(event)
-    return list(reversed(selected))
-
-
-def workspace_summary(workspace: Workspace, events: Sequence[Event]) -> str:
-    """Render the workspace facts a triage session needs, plus incident counts."""
-    lines = [
-        f"{workspace.name} · état {workspace.state.value} · port {workspace.port}",
-        f"DB {db_label(workspace)} · git {git_label(workspace)}",
-        f"CI {'activée' if workspace.git.ci_enabled else 'désactivée'}",
-    ]
-    if workspace.server.enabled:
-        deploy = "aucun déploiement enregistré"
-        if workspace.server_last_error:
-            deploy = f"dernier déploiement en échec : {workspace.server_last_error}"
-        elif workspace.server_last_deploy:
-            deploy = "dernier déploiement réussi"
-        lines.append(f"Serveur {workspace.server.user}@{workspace.server.host} — {deploy}")
-    else:
-        lines.append("Serveur : non configuré")
-    criticals = sum(1 for event in events if event.level.upper() == "CRITICAL")
-    errors = sum(1 for event in events if event.level.upper() == "ERROR")
-    warnings = sum(1 for event in events if event.level.upper() in ("WARNING", "WARN"))
-    lines.append(
-        f"Journal : {len(events)} événement(s) · {criticals} critique(s) · "
-        f"{errors} erreur(s) · {warnings} avertissement(s)"
-    )
-    if not events:
-        lines.append("Aucun événement enregistré pour ce workspace sur la période.")
-    return "\n".join(lines)
-
-
-class WorkspacePanel(tk.Frame):
-    """Per-workspace triage view: facts on top, matching events below."""
-
-    def __init__(
-        self,
-        parent: tk.Misc,
-        workspace: Workspace,
-        *,
-        on_open_server: Callable[[], None] | None = None,
-    ) -> None:
-        """Build the summary block, the event table and the optional server action."""
-        super().__init__(parent, bg=APP_BACKGROUND)
-        self._workspace = workspace
-        self._summary = tk.Label(
-            self,
-            text=workspace_summary(workspace, []),
-            bg=APP_BACKGROUND,
-            fg=TEXT_MUTED,
-            font=FONT_META,
-            anchor="w",
-            justify="left",
-        )
-        self._summary.pack(fill="x", padx=14, pady=(8, 6))
-        if on_open_server is not None:
-            ttk.Button(
-                self,
-                text="Superviser le serveur…",
-                style="Secondary.TButton",
-                command=on_open_server,
-            ).pack(anchor="w", padx=14, pady=(0, 6))
-        self.tree = ttk.Treeview(
-            self,
-            columns=("time", "level", "message"),
-            show="headings",
-            height=12,
-        )
-        self.tree.heading("time", text="Heure")
-        self.tree.heading("level", text="Niveau")
-        self.tree.heading("message", text="Message")
-        self.tree.column("time", width=140, stretch=False, anchor="w")
-        self.tree.column("level", width=90, stretch=False, anchor="w")
-        self.tree.column("message", width=760, stretch=True, anchor="w")
-        for tag, color in (
-            ("info", _TAG_INFO),
-            ("warning", _TAG_WARNING),
-            ("error", _TAG_ERROR),
-            ("critical", _TAG_CRITICAL),
-        ):
-            self.tree.tag_configure(tag, background=color)
-        self.tree.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-        self._detail = tk.Label(
-            self,
-            text=event_detail(None),
-            bg=APP_BACKGROUND,
-            fg=TEXT_MUTED,
-            font=FONT_ROWS,
-            anchor="nw",
-            justify="left",
-            wraplength=980,
-        )
-        self._detail.pack(fill="both", expand=True, padx=14, pady=(0, 10))
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
-        self._events: dict[str, Event] = {}
-
-    def apply(self, events: Sequence[Event]) -> None:
-        """Render *events*, keeping the selection.
-
-        The caller filters with :func:`workspace_events` first: the panel is a
-        pure renderer, so both the window refresh and the host's worker push
-        exactly the rows that belong to this workspace.
-        """
-        try:
-            if not self.winfo_exists():
-                return
-        except Exception:
-            return
-        selected = set(self.tree.selection())
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self._events.clear()
-        for event in events:
-            row_id = f"event-{event.id}" if event.id is not None else f"event-unsaved-{event.name}"
-            if row_id in self._events:
-                continue
-            self._events[row_id] = event
-            time_text, level, _source, message = event_row(event)
-            self.tree.insert(
-                "",
-                "end",
-                iid=row_id,
-                values=(time_text, level, message),
-                tags=(level_tag(event),),
-            )
-        self._summary.config(text=workspace_summary(self._workspace, events))
-        restored = next((row for row in self._events if row in selected), None)
-        if restored is not None:
-            self.tree.selection_set(restored)
-        self._detail.config(text=event_detail(self._events.get(restored) if restored else None))
-
-    def _on_select(self, _event: object = None) -> None:
-        """Show the selected event's context and traceback."""
-        selection = self.tree.selection()
-        event = self._events.get(selection[0]) if selection else None
-        self._detail.config(text=event_detail(event))
-
-
-def prompt_workspace_monitoring(
-    root: tk.Tk,
-    workspace: Workspace,
-    read: Callable[[], list[Event]],
-    *,
-    on_open_server: Callable[[], None] | None = None,
-    set_status: Callable[[str], None] | None = None,
-) -> tk.Toplevel:
-    """Open the per-workspace monitoring window and fill it from *read*.
-
-    ``read`` returns the journal rows; the window keeps only the ones belonging
-    to *workspace*, so the caller can hand over a single bounded snapshot.
-    """
-    window = tk.Toplevel(root)
-    window.title(f"Supervision — {workspace.name}")
-    window.geometry("1060x700")
-    window.minsize(860, 560)
-    window.transient(root)
-    window.configure(bg=APP_BACKGROUND)
-
-    panel = WorkspacePanel(window, workspace, on_open_server=on_open_server)
-    panel.pack(fill="both", expand=True)
-    # Same hook as ``server_panel``: the host pushes fresh rows from its worker.
-    window.workspace_panel = panel  # type: ignore[attr-defined]
-
-    def refresh() -> None:
-        """Re-read the journal and render this workspace's events."""
-        events = workspace_events(workspace, read())
-        panel.apply(events)
-        if set_status is not None:
-            set_status(f"Supervision « {workspace.name} » — {len(events)} événement(s)")
-
-    ttk.Button(window, text="Actualiser", style="Secondary.TButton", command=refresh).pack(
-        anchor="e", padx=14, pady=(0, 8)
-    )
-    window.bind("<Escape>", lambda _event: window.destroy())
-    refresh()
-    return window
+    return selected
 
 
 __all__ = [
@@ -841,18 +655,14 @@ __all__ = [
     "MonitoringPanel",
     "ServerPanel",
     "ServerSnapshot",
-    "WorkspacePanel",
     "event_detail",
     "event_row",
     "filter_events",
     "filter_options",
     "is_critical",
     "level_tag",
-    "prompt_monitoring",
     "prompt_server_supervision",
-    "prompt_workspace_monitoring",
     "server_snapshot_text",
     "summary_text",
     "workspace_events",
-    "workspace_summary",
 ]
