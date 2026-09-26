@@ -294,6 +294,21 @@ def test_runs_snapshot_without_runs_has_no_data() -> None:
     assert ci_runs.RunsSnapshot("octo/repo").has_data is False
 
 
+def test_compose_snapshot_carries_a_note_without_an_error() -> None:
+    # A note explains an intentionally empty read (no GitHub remote); it must
+    # never read as a failure.
+    snapshot = ci_runs.compose_snapshot(repo_path="", runs=[], note="  pas de dépôt  ")
+
+    assert snapshot.note == "pas de dépôt"
+    assert snapshot.error is None
+    assert snapshot.has_data is False
+
+
+def test_runs_snapshot_normalises_a_blank_note_to_none() -> None:
+    assert ci_runs.RunsSnapshot("octo/repo", note="   ").note is None
+    assert ci_runs.RunsSnapshot("octo/repo").note is None
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [("success", "réussie"), ("waiting", "en attente"), ("failure", "en échec")],
@@ -302,3 +317,96 @@ def test_pipeline_label_matches_status(status, expected) -> None:
     result = ci_runs.PipelineResult(rel="a.json", status=status, detail="", mark="?")
 
     assert result.label == expected
+
+
+def test_parse_summary_merges_progress_failure_detail() -> None:
+    log = "\n".join(
+        [
+            "[runner] n8nPipelines/a.json : failure (HTTP 500 sur l'API)",
+            "Résultats des pipelines :",
+            "  - ✘ n8nPipelines/a.json (en échec)",
+        ]
+    )
+
+    result = ci_runs.parse_pipeline_lines(log)[0]
+
+    assert result.status == ci_runs.PIPELINE_FAILURE
+    assert result.detail == "HTTP 500 sur l'API"
+    assert result.failure_detail == "HTTP 500 sur l'API"
+
+
+def test_parse_normalises_failure_aliases_and_keeps_log_timestamp() -> None:
+    log = "2026-01-01T12:34:56Z [runner] n8nPipelines/a.json : error (timeout)"
+
+    result = ci_runs.parse_pipeline_lines(log)[0]
+
+    assert result.status == ci_runs.PIPELINE_FAILURE
+    assert result.detail == "timeout"
+    assert result.timestamp == "2026-01-01T12:34:56Z"
+
+
+def test_parse_failure_detail_line_survives_without_progress() -> None:
+    log = "échec : n8nPipelines/a.json (nœud HTTP : connexion refusée)"
+
+    result = ci_runs.parse_pipeline_lines(log)[0]
+
+    assert result.rel == "n8nPipelines/a.json"
+    assert result.status == ci_runs.PIPELINE_FAILURE
+    assert result.detail == "nœud HTTP : connexion refusée"
+
+
+def test_run_and_job_timestamps_are_normalised() -> None:
+    run = ci_runs.run_summary(
+        run_payload(
+            updated_at="2026-01-01T00:01:00Z",
+            run_started_at="2026-01-01T00:00:30Z",
+        )
+    )
+    job = ci_runs.job_summary(
+        {
+            "id": 21,
+            "name": "test",
+            "run_id": 11,
+            "started_at": "2026-01-01T00:02:00Z",
+            "completed_at": "2026-01-01T00:03:00Z",
+        }
+    )
+
+    assert run.updated_at == "2026-01-01T00:01:00Z"
+    assert run.started_at == "2026-01-01T00:00:30Z"
+    assert job.run_id == 11
+    assert job.started_at == "2026-01-01T00:02:00Z"
+    assert job.completed_at == "2026-01-01T00:03:00Z"
+
+
+def test_compose_snapshot_retains_runs_and_exposes_partial_messages() -> None:
+    snapshot = ci_runs.compose_snapshot(
+        repo_path="octo/repo",
+        runs=[run_payload()],
+        warnings=["Les jobs n'ont pas pu être récupérés."],
+        partial_errors=["Le log du job 21 est indisponible."],
+    )
+
+    assert snapshot.has_data is True
+    assert snapshot.is_partial is True
+    assert snapshot.messages == (
+        "Les jobs n'ont pas pu être récupérés.",
+        "Le log du job 21 est indisponible.",
+    )
+
+
+def test_compose_snapshot_keeps_runs_with_top_level_error() -> None:
+    snapshot = ci_runs.compose_snapshot(
+        repo_path="octo/repo",
+        runs=[run_payload()],
+        error="La liste est partiellement obsolète.",
+    )
+
+    assert snapshot.has_data is True
+    assert snapshot.messages == ("La liste est partiellement obsolète.",)
+
+
+def test_pipeline_display_detail_contains_label_and_detail() -> None:
+    result = ci_runs.PipelineResult(rel="a.json", status="failure", detail="HTTP 500", mark="!")
+
+    assert result.display_detail == "en échec — HTTP 500"

@@ -9,19 +9,9 @@ from typing import Any
 import bcrypt
 import requests
 
-REQUIRED_WORKFLOW_SCOPES = [
-    "workflow:list",
-    "workflow:read",
-    "workflow:create",
-    "workflow:update",
-    "workflow:delete",
-    "workflow:activate",
-    "credential:list",
-    "credential:read",
-    "credential:create",
-    "credential:update",
-    "credential:delete",
-]
+from .scopes import REQUIRED_WORKFLOW_SCOPES
+
+__all__ = ["REQUIRED_WORKFLOW_SCOPES", "ApiCredentials", "OwnerSetup", "OwnerSetupError"]
 
 
 class OwnerSetupError(RuntimeError):

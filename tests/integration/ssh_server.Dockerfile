@@ -12,12 +12,17 @@
 FROM alpine:3.21
 
 # The generated post-receive hook is a bash script (`#!/usr/bin/env bash`),
-# so the fixture ships bash like any real production server would.
-RUN apk add --no-cache openssh docker-cli docker-cli-compose git python3 bash \
+# so the fixture ships bash like any real production server would. Port
+# forwarding is re-enabled because Alpine's sshd_config ships
+# "AllowTcpForwarding no": the generated deploy code talks to the n8n Compose
+# published on the host through http://127.0.0.1:<port>, and the test reaches
+# that port from inside the sandbox with a reverse tunnel opened by the host.
+RUN apk add --no-cache openssh docker-cli docker-cli-compose git python3 bash socat \
     && mkdir -p /run/sshd /root/.ssh /etc/ssh/hostkeys \
     && chmod 700 /root/.ssh \
     && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
     && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config \
     && echo 'AuthorizedKeysFile .ssh/authorized_keys' >> /etc/ssh/sshd_config
 
 EXPOSE 22

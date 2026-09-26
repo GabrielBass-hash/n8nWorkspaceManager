@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from helpers import FakeTk, FakeTtk, fake_runs_panel_bases
 
+from n8n_launcher.gui import ci_runs as ci_runs_panel
+from n8n_launcher.gui import theme
 from n8n_launcher.gui.ci_runs import RunsPanel, _format_fetched_at, runs_summary_text
 from n8n_launcher.workspaces import ci_runs
 
 
-def _run(run_id: int = 11, *, conclusion: str | None = "success", status: str = "completed"):
+def _run(
+    run_id: int = 11,
+    *,
+    conclusion: str | None = "success",
+    status: str = "completed",
+    created_at: str | None = "2026-01-01T00:00:00Z",
+):
     return ci_runs.RunSummary(
         id=run_id,
         run_number=run_id,
@@ -18,7 +28,7 @@ def _run(run_id: int = 11, *, conclusion: str | None = "success", status: str = 
         head_sha="a" * 40,
         status=status,
         conclusion=conclusion,
-        created_at="2026-01-01T00:00:00Z",
+        created_at=created_at,
         url=f"https://github.com/octo/repo/actions/runs/{run_id}",
     )
 
@@ -30,6 +40,8 @@ def _job(
     conclusion: str | None = "success",
     status: str = "completed",
     steps=(),
+    started_at: str | None = None,
+    completed_at: str | None = None,
 ):
     return ci_runs.JobSummary(
         id=job_id,
@@ -38,15 +50,34 @@ def _job(
         conclusion=conclusion,
         url=f"https://github.com/octo/repo/actions/jobs/{job_id}",
         steps=tuple(steps),
+        started_at=started_at,
+        completed_at=completed_at,
     )
 
 
-def _pipeline(rel: str = "n8nPipelines/a.json", status: str = "success", detail: str = ""):
+def _pipeline(
+    rel: str = "n8nPipelines/a.json",
+    status: str = "success",
+    detail: str = "",
+    timestamp: str | None = None,
+):
     mark = {"success": "+", "failure": "!", "waiting": "*"}[status]
-    return ci_runs.PipelineResult(rel=rel, status=status, detail=detail, mark=mark)
+    return ci_runs.PipelineResult(
+        rel=rel, status=status, detail=detail, mark=mark, timestamp=timestamp
+    )
 
 
-def _snapshot(*, runs=(), jobs=None, pipelines=None, error=None, fetched_at=None):
+def _snapshot(
+    *,
+    runs=(),
+    jobs=None,
+    pipelines=None,
+    error=None,
+    fetched_at=None,
+    warnings=(),
+    partial_errors=(),
+    note=None,
+):
     return ci_runs.RunsSnapshot(
         repo_path="octo/repo",
         runs=tuple(runs),
@@ -54,6 +85,9 @@ def _snapshot(*, runs=(), jobs=None, pipelines=None, error=None, fetched_at=None
         pipelines=dict(pipelines or {}),
         error=error,
         fetched_at=fetched_at,
+        warnings=tuple(warnings),
+        partial_errors=tuple(partial_errors),
+        note=note,
     )
 
 
@@ -63,6 +97,55 @@ def _build(refresh=None, open_run=None, run=None):
     open_run = open_run or MagicMock()
     panel = RunsPanel(FakeTk.Frame(None), refresh=refresh, open_run=open_run, run=run)
     return panel, refresh, open_run
+
+
+def test_the_table_is_packed_unfilled_and_the_panel_follows_its_width() -> None:
+    # A tree packed with a horizontal fill is stretched to its pane, so its
+    # heading row no longer sits over the cells of the very same table.
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(
+            _snapshot(runs=[_run(11)], jobs={11: (_job(21),)}, pipelines={21: (_pipeline(),)})
+        )
+
+    assert "x" not in str(panel.tree._pack_options.get("fill", ""))
+    assert panel._options["width"] == sum(panel._fitter.widths().values())
+
+
+def test_the_header_and_the_note_never_out_request_the_table() -> None:
+    # A container's request is the largest of its children's: a header caption
+    # or a note wider than the table would leave the table clipped inside a panel
+    # wider than itself. The caption is cut to the table's width and the note
+    # re-wraps at it.
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(
+            _snapshot(runs=[_run(11)], jobs={11: (_job(21),)}, pipelines={21: (_pipeline(),)})
+        )
+        total = sum(panel._fitter.widths().values())
+        measure = theme.text_measure(panel, ci_runs_panel.FONT_META)
+
+        assert measure(panel._summary._options["text"]) <= total
+        assert panel._empty._options["wraplength"] == max(total - 28, 200)
+
+        # A caption far longer than the table is cut with a trailing ellipsis.
+        panel._summary_text = " · ".join(["un run terminé"] * 30)
+        panel._refit()
+        assert panel._summary._options["text"].endswith("…")
+        assert measure(panel._summary._options["text"]) <= total
+
+
+def _local_timestamp(iso_timestamp: str) -> str:
+    """Return the machine-local timestamp rendered by the runs panel."""
+    return datetime.fromisoformat(iso_timestamp).astimezone().strftime("%d/%m/%Y %H:%M")
 
 
 def test_apply_renders_runs_jobs_and_pipelines() -> None:
@@ -131,7 +214,7 @@ def test_apply_empty_snapshot_shows_placeholder() -> None:
 
     assert panel.tree.get_children() == []
     assert panel._empty._options["text"] == "Aucun run GitHub Actions pour ce workspace."
-    assert panel._summary._options["text"] == "Aucun run GitHub Actions pour ce workspace."
+    assert panel._summary_text == "Aucun run GitHub Actions pour ce workspace."
 
 
 def test_apply_error_snapshot_shows_message() -> None:
@@ -273,6 +356,9 @@ def test_open_without_selection_does_nothing() -> None:
 def test_runs_summary_text_variants() -> None:
     assert runs_summary_text(_snapshot(error="boom")) == "GitHub Actions indisponible : boom"
     assert runs_summary_text(_snapshot()) == "Aucun run GitHub Actions pour ce workspace."
+    # A note replaces the header: the empty tab is a configuration, not a failure.
+    assert runs_summary_text(_snapshot(note="pas de dépôt")) == "pas de dépôt"
+    assert runs_summary_text(_snapshot(error="boom", note="pas de dépôt")) == "pas de dépôt"
     summary = runs_summary_text(
         _snapshot(
             runs=[
@@ -384,3 +470,186 @@ def test_format_fetched_at_helpers() -> None:
     assert _format_fetched_at("2026-09-18T14:03:05+02:00") == "14:03:05"
     assert _format_fetched_at("garbage") == ""
     assert _format_fetched_at("") == ""
+
+
+def test_apply_renders_partial_snapshot_without_dropping_runs() -> None:
+    snapshot = _snapshot(
+        runs=[_run(11)],
+        jobs={11: (_job(21),)},
+        warnings=["Les logs de certains jobs sont indisponibles."],
+        partial_errors=["Le job 21 n'a pas pu être détaillé."],
+    )
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+
+    assert panel.tree.get_children() == ["run-11"]
+    assert "Les logs de certains jobs sont indisponibles." in panel._empty._options["text"]
+    assert "Le job 21 n'a pas pu être détaillé." in panel._empty._options["text"]
+    assert "Avertissement" in panel._summary._options["text"]
+
+
+def test_apply_renders_pipeline_label_timestamp_and_failure_detail() -> None:
+    run_created_at = "2026-09-18T14:03:05+02:00"
+    job_completed_at = "2026-09-18T14:05:05+02:00"
+    pipeline_timestamp = "2026-09-18T14:05:00+02:00"
+    snapshot = _snapshot(
+        runs=[_run(11, created_at=run_created_at)],
+        jobs={
+            11: (
+                _job(
+                    21,
+                    conclusion="failure",
+                    completed_at=job_completed_at,
+                ),
+            )
+        },
+        pipelines={
+            21: (
+                _pipeline(
+                    status="failure",
+                    detail="HTTP 500",
+                    timestamp=pipeline_timestamp,
+                ),
+            )
+        },
+    )
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+
+    run_row = panel.tree.item("run-11")
+    assert _local_timestamp(run_created_at) in run_row["text"]
+    job_row = panel.tree.item("job-11-21")
+    assert _local_timestamp(job_completed_at) in job_row["values"][0]
+    pipeline_id = panel.tree.get_children("job-11-21")[0]
+    pipeline_row = panel.tree.item(pipeline_id)
+    assert "en échec" in pipeline_row["text"]
+    assert "HTTP 500" in pipeline_row["values"][0]
+    assert _local_timestamp(pipeline_timestamp) in pipeline_row["values"][0]
+    assert pipeline_row["tags"] == ["failure"]
+
+
+def test_double_click_on_pipeline_opens_its_run() -> None:
+    snapshot = _snapshot(runs=[_run(11)], jobs={11: (_job(21),)}, pipelines={21: (_pipeline(),)})
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, open_run = _build()
+        panel.apply(snapshot)
+        pipeline_id = panel.tree.get_children("job-11-21")[0]
+        panel.tree.selection_set(pipeline_id)
+        panel.tree._bindings["<Double-1>"](None)
+
+    open_run.assert_called_once()
+    assert open_run.call_args.args[0].id == 11
+
+
+def test_apply_restores_selection_and_event_expansion() -> None:
+    snapshot = _snapshot(runs=[_run(11)], jobs={11: (_job(21),)})
+
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+        panel.tree.selection_set("job-11-21")
+        panel.tree._bindings["<<TreeviewOpen>>"](None)
+        assert "job-11-21" in panel.expanded
+
+        panel.apply(snapshot)
+        assert panel.tree.selection() == ["job-11-21"]
+        assert panel.tree.item("job-11-21")["open"] is True
+
+        panel.tree._bindings["<<TreeviewClose>>"](None)
+        assert "job-11-21" not in panel.expanded
+
+
+# --- column sizing ------------------------------------------------------------
+
+
+def test_runs_tree_is_requested_at_its_minimum_widths() -> None:
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+
+    # The runs tree opens on the room its columns really need: the labels hold
+    # run, job and pipeline names, and the details column carries the status.
+    assert panel.tree.column_widths() == dict(ci_runs_panel._RUNS_MINIMUMS)
+    for name, width in panel.tree.column_widths().items():
+        assert width == ci_runs_panel._RUNS_MINIMUMS[name]
+
+
+def test_runs_tree_columns_follow_the_nested_labels() -> None:
+    snapshot = _snapshot(
+        runs=[_run(11)],
+        jobs={11: (_job(21),)},
+        pipelines={21: (_pipeline(detail="3 nœuds — terminé en 4,2 s le 12 mars"),)},
+    )
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+
+    widths = panel.tree.column_widths()
+    # Every column took the width of what it holds, whatever the pane is: the
+    # indented pipeline names are what the table was unreadable without.
+    assert widths["#0"] > ci_runs_panel._RUNS_MINIMUMS["#0"]
+    assert widths["detail"] > ci_runs_panel._RUNS_MINIMUMS["detail"]
+    # Nothing is elastic, so the two widths are independent of each other.
+    assert all(request["stretch"] is False for request in panel.tree.column_requests().values())
+
+
+def test_runs_tree_columns_do_not_depend_on_the_pane_width() -> None:
+    # The defect this fixes: a wide pane used to hand its room to the flexible
+    # column, so the same snapshot was laid out differently in two windows.
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(_snapshot(runs=[_run(11)]))
+        narrow = panel.tree.column_widths()
+
+        panel.tree._width = 1400
+        panel.apply(_snapshot(runs=[_run(11)]))
+
+    assert panel.tree.column_widths() == narrow
+
+
+def test_runs_empty_state_wraps_at_its_own_width() -> None:
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(_snapshot())
+        panel._empty._width = 824
+
+    panel._empty._bindings["<Configure>"](SimpleNamespace(width=824))
+
+    # 796 = 824 - the 14px padding on each side of the panel.
+    assert panel._empty._options["wraplength"] == 796

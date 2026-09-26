@@ -116,6 +116,7 @@ def _run_git(
     *,
     check: bool = True,
     env: dict[str, str] | None = None,
+    timeout: int = 30,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the result."""
     cmd = ["git", *args]
@@ -126,7 +127,7 @@ def _run_git(
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout,
             env=full_env,
         )
     except FileNotFoundError:
@@ -331,20 +332,21 @@ def git_has_unpushed_commits(path: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def git_ssh_env(key_path: str) -> dict[str, str]:
+def git_ssh_env(key_path: str, port: int | None = None) -> dict[str, str]:
     """Return an env dict making git authenticate with *key_path* over SSH.
 
     Used for the launcher's own ``server`` remote: git spawns system ``ssh``,
     which needs the workspace's configured key (the machine's default identity
     is usually a different, personal key). Commands run in batch mode so a
     missing key or unknown host fails loudly instead of hanging on a prompt.
+    The remote URL uses the scp syntax, which has no port slot and always means
+    22, so a server on another port is dialled through ``ssh -p``.
     """
-    return {
-        "GIT_SSH_COMMAND": (
-            "ssh -o IdentitiesOnly=yes"
-            f" -i {key_path} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-        )
-    }
+    command = "ssh -o IdentitiesOnly=yes"
+    if port is not None and port != 22:
+        command = f"{command} -p {int(port)}"
+    command = f"{command} -i {key_path} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    return {"GIT_SSH_COMMAND": command}
 
 
 def git_push_ref(
@@ -354,13 +356,18 @@ def git_push_ref(
     dst: str,
     *,
     env: dict[str, str] | None = None,
+    timeout: int = 30,
 ) -> None:
     """Push *src* to *dst* on *remote* with an explicit refspec (no ``-u``).
 
     Publishing uses ``HEAD:main`` so the production branch is the local current
     state whatever the branch is called — no local ``main`` branch required.
+    *timeout* defaults to the 30 s of every other git call, but a publish is
+    different: the server's ``post-receive`` hook runs the deployment
+    synchronously (Compose up, then the import), so the push must be allowed
+    to outlast it.
     """
-    _run_git(["push", remote, f"{src}:{dst}"], cwd=path, env=env)
+    _run_git(["push", remote, f"{src}:{dst}"], cwd=path, env=env, timeout=timeout)
     logger.info("Pushed %s:%s to %s in %s", src, dst, remote, path)
 
 

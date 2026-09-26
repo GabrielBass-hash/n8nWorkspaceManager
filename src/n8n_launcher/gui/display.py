@@ -156,6 +156,16 @@ def format_row(workspace: Workspace) -> str:
     )
 
 
+def row_tooltip(workspace: Workspace) -> str:
+    """Return the row's tooltip: the full name, then its one-line summary.
+
+    The launcher row shortens its name to whatever width the status chips leave
+    over, so this is how the complete name stays readable — the first line is
+    the untouched name, the second the metadata ``format_row`` renders.
+    """
+    return f"{workspace.name}\n{format_row(workspace)}"
+
+
 def ci_enabled(workspace: Workspace) -> bool:
     """Return True when the workspace's GitHub Actions tests are enabled."""
     return workspace.git.ci_enabled

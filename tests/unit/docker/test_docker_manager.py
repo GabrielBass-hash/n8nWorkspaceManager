@@ -8,6 +8,7 @@ from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 from n8n_launcher.docker.manager import (
     DockerManager,
     parse_compose_status,
+    parse_container_labels,
     parse_container_states,
     resolve_docker_command,
 )
@@ -198,6 +199,27 @@ def test_parse_container_states_ignores_non_compose_containers() -> None:
 
 def test_parse_container_states_empty_when_no_rows() -> None:
     assert parse_container_states("") == {}
+
+
+def test_parse_container_states_accepts_flat_comma_separated_labels() -> None:
+    """Docker Desktop (Compose 2.35) returns ``Labels`` as ``k=v,k=v``, not JSON."""
+    raw = (
+        '{"Id":"a","State":"running","Labels":"com.docker.compose.oneoff=False,'
+        "com.docker.compose.project=n8n-ws-1,com.docker.compose.service=n8n,"
+        'com.docker.compose.project.working_dir=/Users/me/My Work/x"}\n'
+    )
+    assert parse_container_states(raw) == {"n8n-ws-1": {"n8n": "running"}}
+
+
+def test_parse_container_labels_reads_every_cli_shape() -> None:
+    assert parse_container_labels({"a": 1}) == {"a": "1"}
+    assert parse_container_labels('{"a":"1"}') == {"a": "1"}
+    assert parse_container_labels("a=1,b=x=y") == {"a": "1", "b": "x=y"}
+    assert parse_container_labels("") == {}
+    assert parse_container_labels(None) == {}
+    assert parse_container_labels("{broken") == {}
+    # A JSON-looking value keeps its own shape when it decodes to a map.
+    assert parse_container_labels('{"a":{"b":1}}') == {"a": "{'b': 1}"}
 
 
 def test_list_project_states_runs_one_docker_ps_batch(tmp_path: Path) -> None:

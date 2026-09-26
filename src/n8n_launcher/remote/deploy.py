@@ -14,8 +14,21 @@ never f-strings, so braces survive verbatim).
 from __future__ import annotations
 
 from ..core.models import ServerConfig
+from ..n8n.scopes import REQUIRED_WORKFLOW_SCOPES
 
 GENERATED_MARKER = "n8n-launcher : généré — ne pas modifier à la main."
+REMOTE_STATUS_CAPABILITY = "__N8N_LAUNCHER_STATUS_V1__"
+# n8n's own execution vocabulary (packages/workflow/src/execution-status.ts).
+# ``/rest/executions`` sends no ``finished`` flag, so the launcher only learns
+# whether a run is over from its status. The sets mirror upstream exactly:
+# ``isTerminalExecutionStatus`` covers the first set, and upstream deliberately
+# excludes ``waiting`` and ``unknown`` from it (``unknown`` may still be
+# rewritten to ``crashed`` by recovery), which is why they land in the pending
+# set instead. The generated script receives both sets through the
+# ``__TERMINAL_STATUSES__`` / ``__PENDING_STATUSES__`` tokens so the two parsers
+# cannot drift.
+TERMINAL_EXECUTION_STATUSES = frozenset({"canceled", "crashed", "error", "success"})
+PENDING_EXECUTION_STATUSES = frozenset({"new", "running", "waiting", "unknown"})
 
 
 def _sh_sq(value: str) -> str:
@@ -65,13 +78,29 @@ def log_path(cfg: ServerConfig, workspace_id: str | None = None) -> str:
     return f"{resolve_base(cfg, workspace_id)}/server.log"
 
 
+def history_path(cfg: ServerConfig, workspace_id: str | None = None) -> str:
+    """Server path of the bounded JSONL deployment history."""
+    return f"{resolve_base(cfg, workspace_id)}/deploy-history.jsonl"
+
+
+def deploy_script_path(cfg: ServerConfig, workspace_id: str | None = None) -> str:
+    """Server path of the generated deployment/status script."""
+    return f"{resolve_base(cfg, workspace_id)}/deploy.py"
+
+
 def marker_path(cfg: ServerConfig, workspace_id: str | None = None) -> str:
     """Server path of ``last-deploy.json`` (``{sha,status,error,at}``)."""
     return f"{resolve_base(cfg, workspace_id)}/last-deploy.json"
 
 
 def server_remote_url(cfg: ServerConfig, workspace_id: str | None = None) -> str:
-    """Git URL (scp syntax) of the workspace's ``server`` remote."""
+    """Git URL (scp syntax) of the workspace's ``server`` remote.
+
+    The scp syntax is the only form that keeps the path relative to the remote
+    user's home, where ``base_dir`` lives, and it has no port slot: the port is
+    given to ssh itself through ``GIT_SSH_COMMAND`` (see
+    :func:`n8n_launcher.git.manager.git_ssh_env`).
+    """
     return f"{cfg.user}@{cfg.host}:{bare_dir(cfg, workspace_id)}"
 
 
@@ -83,9 +112,9 @@ TEMPLATE_HOOK = r"""#!/usr/bin/env bash
 # __MARKER__
 
 set -u
+set -o pipefail
+umask 077
 
-# Git runs hooks with the cwd set to the bare repo; every path below is
-# home-relative (BASE, BARE, WORKFLOW, ...), so anchor them on $HOME first.
 cd "$HOME"
 
 BASE=__BASE__
@@ -93,48 +122,220 @@ BARE=__BARE__
 WORKFLOW=__WORKFLOW__
 LOG=__LOG__
 PROJECT=__PROJECT__
+MAX_LOG_BYTES=5242880
+HISTORY_LIMIT=100
 
-marker() {
-    python3 - "$1" "$2" "$3" "$BASE" <<'PY'
-import json, os, sys, time
-payload = {"sha": sys.argv[1], "status": sys.argv[2], "at": int(time.time())}
-if sys.argv[3]:
-    payload["error"] = sys.argv[3]
-path = sys.argv[4] + "/last-deploy.json"
-# Atomic write: readers (the launcher's _poll_deploy) never see a partial file.
-with open(path + ".tmp", "w", encoding="utf-8") as fh:
-    json.dump(payload, fh)
-os.replace(path + ".tmp", path)
+append_log() {
+    python3 - "$LOG" "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+path = sys.argv[1]
+event = str(sys.argv[2])[:100]
+sha = str(sys.argv[3])[:128]
+detail = str(sys.argv[4])[:2000]
+quoted = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+plain = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+bearer = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+url_password = re.compile(r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)''')
+def keep_quoted(match):
+    return match.group('prefix') + match.group('quote') + '[REDACTED]' + match.group('quote')
+
+detail = quoted.sub(keep_quoted, detail)
+detail = plain.sub(lambda m: m.group('prefix') + '[REDACTED]', detail)
+detail = bearer.sub(lambda m: m.group('prefix') + '[REDACTED]', detail)
+detail = url_password.sub(lambda m: m.group('prefix') + '[REDACTED]' + m.group('suffix'), detail)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+if os.path.exists(path) and os.path.getsize(path) > 5242880:
+    try:
+        os.replace(path, path + '.1')
+    except OSError:
+        pass
+entry = {'at': int(time.time()), 'event': event, 'sha': sha, 'detail': detail}
+with open(path, 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+try:
+    os.chmod(path, 0o600)
+except OSError:
+    pass
 PY
 }
 
-# Serialize the whole listener under an exclusive flock on .deploy.lock:
-# two pushes arriving together (or a push colliding with the tail of a
-# previous deploy) must not race on the Compose project or workflow sync.
-# The lock is *blocking* — the later deploy waits its turn instead of
-# failing the push, and its marker is only ever written once the earlier
-# one has finished.
+log_output() {
+    python3 - "$LOG" "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+path = sys.argv[1]
+event = str(sys.argv[2])[:100]
+sha = str(sys.argv[3])[:128]
+source = str(sys.argv[4])
+try:
+    with open(source, encoding='utf-8', errors='replace') as fh:
+        text = fh.read(65536)
+except OSError:
+    text = 'sortie de commande indisponible'
+secret = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+plain = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+bearer = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+url_password = re.compile(r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)''')
+def keep_quoted_text(match):
+    return match.group('prefix') + match.group('quote') + '[REDACTED]' + match.group('quote')
+
+text = secret.sub(keep_quoted_text, text)
+text = plain.sub(lambda m: m.group('prefix') + '[REDACTED]', text)
+text = bearer.sub(lambda m: m.group('prefix') + '[REDACTED]', text)
+text = url_password.sub(lambda m: m.group('prefix') + '[REDACTED]' + m.group('suffix'), text)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+if os.path.exists(path) and os.path.getsize(path) > 5242880:
+    try:
+        os.replace(path, path + '.1')
+    except OSError:
+        pass
+with open(path, 'a', encoding='utf-8') as fh:
+    for line in text.splitlines() or ['']:
+        entry = {'at': int(time.time()), 'event': event, 'sha': sha, 'detail': line[:2000]}
+        fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+try:
+    os.chmod(path, 0o600)
+except OSError:
+    pass
+PY
+}
+
+record() {
+    python3 - "$BASE" "$LOG" "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+base = sys.argv[1]
+log_path = sys.argv[2]
+sha = str(sys.argv[3])[:128]
+status = str(sys.argv[4])[:32]
+error = str(sys.argv[5])[:2000]
+secret = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+plain = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+bearer = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+url_password = re.compile(r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)''')
+def keep_quoted_error(match):
+    return match.group('prefix') + match.group('quote') + '[REDACTED]' + match.group('quote')
+
+error = secret.sub(keep_quoted_error, error)
+error = plain.sub(lambda m: m.group('prefix') + '[REDACTED]', error)
+error = bearer.sub(lambda m: m.group('prefix') + '[REDACTED]', error)
+error = url_password.sub(lambda m: m.group('prefix') + '[REDACTED]' + m.group('suffix'), error)
+os.makedirs(base, exist_ok=True)
+payload = {'sha': sha, 'status': status, 'at': int(time.time())}
+if error:
+    payload['error'] = error
+marker = os.path.join(base, 'last-deploy.json')
+with open(marker + '.tmp', 'w', encoding='utf-8') as fh:
+    json.dump(payload, fh)
+os.replace(marker + '.tmp', marker)
+try:
+    os.chmod(marker, 0o600)
+except OSError:
+    pass
+history = os.path.join(base, 'deploy-history.jsonl')
+entry = dict(payload)
+entry['event'] = 'deploy'
+with open(history, 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+try:
+    with open(history, encoding='utf-8') as fh:
+        lines = fh.readlines()
+    if len(lines) > 100:
+        temporary = history + '.tmp'
+        with open(temporary, 'w', encoding='utf-8') as fh:
+            fh.writelines(lines[-100:])
+        os.replace(temporary, history)
+    os.chmod(history, 0o600)
+except OSError:
+    pass
+try:
+    entry = {'at': int(time.time()), 'event': 'deploy', 'sha': sha}
+    entry['status'] = status
+    entry['detail'] = error
+    with open(log_path, 'a', encoding='utf-8') as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    os.chmod(log_path, 0o600)
+except OSError:
+    pass
+PY
+}
+
+marker_matches() {
+    python3 - "$BASE/last-deploy.json" "$1" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as fh:
+        payload = json.load(fh)
+except (OSError, ValueError, TypeError):
+    sys.exit(1)
+if not isinstance(payload, dict) or payload.get('sha') != sys.argv[2]:
+    sys.exit(1)
+sys.exit(0 if payload.get('status') in ('ok', 'error') else 1)
+PY
+}
+
 (
     flock -x 9
-
+    TMP_OUTPUT=""
+    trap 'rm -f -- "$TMP_OUTPUT"' EXIT
     while read -r old new ref; do
-        # Only the server's main is deployed (dev stays on GitHub/Actions).
         [ "$ref" = "refs/heads/main" ] || continue
-        # A deleted main produces an all-zeros sha — nothing to deploy.
         [ "$new" != "0000000000000000000000000000000000000000" ] || continue
-
+        append_log "$new" "received" "push"
         mkdir -p "$WORKFLOW"
-        if ! git --git-dir="$BARE" archive "$new" | tar -x -C "$WORKFLOW"; then
-            marker "$new" "error" "git archive a échoué"
+        TMP_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/n8n-launcher-deploy.XXXXXX")"
+        if ! (git --git-dir="$BARE" archive "$new" | tar -x -C "$WORKFLOW") \
+            >"$TMP_OUTPUT" 2>&1; then
+            log_output "$new" "archive" "$TMP_OUTPUT"
+            record "$new" "error" "git archive a échoué"
             exit 0
         fi
-        if ! docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d >> "$LOG" 2>&1; then
-            marker "$new" "error" "docker compose up -d a échoué"
+        log_output "$new" "archive" "$TMP_OUTPUT"
+        if ! docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d >"$TMP_OUTPUT" 2>&1; then
+            log_output "$new" "compose" "$TMP_OUTPUT"
+            record "$new" "error" "docker compose up -d a échoué"
             exit 0
         fi
-        DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" \
+        log_output "$new" "compose" "$TMP_OUTPUT"
+        if ! DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" \
             DEPLOY_N8N_PORT=__N8N_PORT__ \
-            python3 "$BASE/deploy.py" "$new" >> "$LOG" 2>&1
+            python3 "$BASE/deploy.py" "$new" >"$TMP_OUTPUT" 2>&1; then
+            log_output "$new" "deploy" "$TMP_OUTPUT"
+            if ! marker_matches "$new"; then
+                record "$new" "error" "deploy.py a échoué"
+            fi
+            exit 0
+        fi
+        log_output "$new" "deploy" "$TMP_OUTPUT"
+        if ! marker_matches "$new"; then
+            record "$new" "error" "deploy.py n'a pas confirmé le déploiement"
+        fi
     done
     exit 0
 ) 9>>"$BASE/.deploy.lock"
@@ -169,11 +370,13 @@ TEMPLATE_DEPLOY = r"""#!/usr/bin/env python3
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
+from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, build_opener
 
 CHECKOUT = os.environ.get("DEPLOY_CHECKOUT", ".")
@@ -183,6 +386,17 @@ ROOT = "http://127.0.0.1:%d" % N8N_PORT
 SHA = sys.argv[1] if len(sys.argv) > 1 else "unknown"
 SECRETS = os.path.join(DEPLOY_BASE, "secrets.json")
 MARKER = os.path.join(DEPLOY_BASE, "last-deploy.json")
+HISTORY = os.path.join(DEPLOY_BASE, "deploy-history.jsonl")
+HISTORY_LIMIT = 100
+MAX_ERROR_LENGTH = 2000
+STATUS_CAPABILITY = "__N8N_LAUNCHER_STATUS_V1__"
+# n8n's own execution vocabulary, injected by render_deploy_script() so this
+# script and the launcher's parser can never disagree. Upstream is the
+# reference (packages/workflow/src/execution-status.ts): terminal statuses end a
+# run, and waiting/unknown are deliberately not terminal because recovery may
+# still rewrite an unknown execution to crashed.
+TERMINAL_STATUSES = __TERMINAL_STATUSES__
+PENDING_STATUSES = __PENDING_STATUSES__
 
 WORKFLOW_KEYS = (
     "name",
@@ -196,22 +410,86 @@ WORKFLOW_KEYS = (
     "parentFolderId",
 )
 
+_SECRET_QUOTED = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+_SECRET_PLAIN = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+_SECRET_BEARER = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+_SECRET_URL_PASSWORD = re.compile(
+    r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)'''
+)
+
+
+def redact(value):
+    text = str(value)
+    text = _SECRET_QUOTED.sub(
+        lambda m: m.group("prefix") + m.group("quote") + "[REDACTED]" + m.group("quote"),
+        text,
+    )
+    text = _SECRET_PLAIN.sub(lambda m: m.group("prefix") + "[REDACTED]", text)
+    text = _SECRET_BEARER.sub(lambda m: m.group("prefix") + "[REDACTED]", text)
+    text = _SECRET_URL_PASSWORD.sub(
+        lambda m: m.group("prefix") + "[REDACTED]" + m.group("suffix"),
+        text,
+    )
+    return text[:MAX_ERROR_LENGTH]
+
 
 def progress(msg):
-    print("[deploy] " + msg, flush=True)
+    print("[deploy] " + redact(msg), flush=True)
+
+
+def unwrap(body):
+    # n8n 2.x answers a single object either bare (POST /api/v1/workflows) or
+    # wrapped in {"data": {...}} (the internal /rest routes); list answers keep
+    # a list under "data" and are returned untouched.
+    if isinstance(body, dict) and isinstance(body.get("data"), dict):
+        return body["data"]
+    return body if isinstance(body, dict) else {}
+
+
+def _error_text(body):
+    # n8n answers errors as {"message": ...} on the public API and
+    # {"error": ...} elsewhere; fall back to the whole body when neither fits.
+    if isinstance(body, dict):
+        for field in ("error", "message"):
+            value = body.get(field)
+            if isinstance(value, str) and value:
+                return value
+    return str(body)
+
+
+def append_history(payload):
+    try:
+        os.makedirs(DEPLOY_BASE, exist_ok=True)
+        with open(HISTORY, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        with open(HISTORY, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        if len(lines) > HISTORY_LIMIT:
+            temporary = HISTORY + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as fh:
+                fh.writelines(lines[-HISTORY_LIMIT:])
+            os.replace(temporary, HISTORY)
+        os.chmod(HISTORY, 0o600)
+    except OSError:
+        pass
 
 
 def write_marker(status, error=None):
     payload = {"sha": SHA, "status": status, "at": int(time.time())}
     if error:
-        payload["error"] = error
-    # Atomic replace: the launcher polls the marker, never a partial file.
+        payload["error"] = redact(error)
     with open(MARKER + ".tmp", "w", encoding="utf-8") as fh:
-        json.dump(payload, fh)
+        json.dump(payload, fh, ensure_ascii=False)
     os.replace(MARKER + ".tmp", MARKER)
-
-
-# --- pure helpers (unit-tested via exec) -----------------------------------
+    try:
+        os.chmod(MARKER, 0o600)
+    except OSError:
+        pass
+    append_history(dict(payload, event="deploy"))
 
 
 def load_secrets(path):
@@ -284,6 +562,13 @@ class Http:
         self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
         self.api_key = ""
 
+    def reset_session(self):
+        # Creating an API key revokes the n8n session the deploy holds, and a
+        # dead cookie still sent on /rest calls makes n8n answer like an
+        # anonymous caller ("you can only access workflows owned by you") even
+        # right after a successful login. Start from an empty jar instead.
+        self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
+
     def request(self, method, path, data=None, auth="none", timeout=30.0):
         body = None
         headers = {"Accept": "application/json"}
@@ -301,9 +586,9 @@ class Http:
                 return resp.status, json.loads(payload) if payload else {}
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
-            return exc.code, {"error": detail}
-        except Exception as exc:  # connection refused while n8n is starting
-            return -1, {"error": str(exc)}
+            return exc.code, {"error": redact(detail)}
+        except Exception as exc:
+            return -1, {"error": redact(exc)}
 
 
 def wait_ready(http, timeout=120.0):
@@ -317,14 +602,8 @@ def wait_ready(http, timeout=120.0):
     raise RuntimeError("n8n ne répond pas après %ds" % int(timeout))
 
 
-def ensure_owner(http, email, password):
-    # idempotent: owner/setup 400s once an owner exists.
-    http.request(
-        "POST",
-        "/rest/owner/setup",
-        {"firstName": "n8n-launcher", "lastName": "deploy", "email": email, "password": password},
-        auth="session",
-    )
+def login(http, email, password):
+    http.reset_session()
     code, _ = http.request(
         "POST",
         "/rest/login",
@@ -335,11 +614,45 @@ def ensure_owner(http, email, password):
         raise RuntimeError("échec de connexion owner")
 
 
+def ensure_owner(http, email, password):
+    http.request(
+        "POST",
+        "/rest/owner/setup",
+        {"firstName": "n8n-launcher", "lastName": "deploy", "email": email, "password": password},
+        auth="session",
+    )
+    login(http, email, password)
+
+
+def api_key_entries(body):
+    # n8n 2.x paginates this internal endpoint: {"data": {"items": [...]}}.
+    # Older builds answered {"data": [...]}. Accept both so one generated
+    # script keeps working across n8n versions.
+    if not isinstance(body, dict):
+        return []
+    data = body.get("data", [])
+    if isinstance(data, dict):
+        data = data.get("items", [])
+    return data if isinstance(data, list) else []
+
+
+def api_key_value(body):
+    # 2.x returns {"data": {"rawApiKey": ...}}; older builds used "apiKey",
+    # and some versions answered the key at the top level.
+    for source in (body, body.get("data") if isinstance(body, dict) else None):
+        if isinstance(source, dict):
+            for field in ("rawApiKey", "apiKey"):
+                value = source.get(field)
+                if isinstance(value, str) and value:
+                    return value
+    return ""
+
+
 def ensure_api_key(http):
     code, body = http.request("GET", "/rest/api-keys", auth="session")
     if code >= 400:
-        raise RuntimeError("GET /rest/api-keys a échoué: %s" % body)
-    for entry in body.get("data", []):
+        raise RuntimeError("GET /rest/api-keys a échoué: %s" % redact(body))
+    for entry in api_key_entries(body):
         if entry.get("label") == "n8n-launcher":
             http.request("DELETE", "/rest/api-keys/%s" % entry.get("id"), auth="session")
     code, body = http.request(
@@ -347,25 +660,17 @@ def ensure_api_key(http):
         "/rest/api-keys",
         {
             "label": "n8n-launcher",
-            "scopes": [
-                "workflow:read",
-                "workflow:create",
-                "workflow:update",
-                "workflow:activate",
-                "workflow:deactivate",
-                "credential:read",
-                "credential:create",
-                "credential:update",
-                "user:read",
-                "project:read",
-            ],
+            # n8n rejects scopes its owner role does not grant, so the exact
+            # list is shared with the local bootstrap (see n8n.scopes).
+            "scopes": __API_KEY_SCOPES__,
             "expiresAt": 0,
         },
         auth="session",
     )
-    if code >= 400 or not body.get("data", {}).get("apiKey"):
-        raise RuntimeError("création d'API key a échoué: %s" % body)
-    http.api_key = body["data"]["apiKey"]
+    api_key = api_key_value(body) if code < 400 else ""
+    if not api_key:
+        raise RuntimeError("création d'API key a échoué: %s" % redact(body))
+    http.api_key = api_key
 
 
 def sync_credentials(http, secrets):
@@ -388,14 +693,79 @@ def sync_credentials(http, secrets):
         else:
             code, body = http.request("POST", "/api/v1/credentials", payload, auth="key")
         if code >= 400:
-            raise RuntimeError("credentials %s/%s: %s" % (name, ctype, body.get("error")))
-        new_id = body.get("data", {}).get("id")
+            raise RuntimeError(
+                "credentials %s/%s: %s" % (name, ctype, redact(_error_text(body)))
+            )
+        new_id = unwrap(body).get("id")
+        if not new_id:
+            raise RuntimeError("n8n n'a pas renvoyé d'id pour le credential %s/%s" % (name, ctype))
         id_map[(name, ctype)] = new_id
         progress("credential %s/%s en place" % (name, ctype))
     return id_map
 
 
-def sync_workflows(http, id_map):
+# The public API activates with a key n8n may refuse for the very workflow the
+# deploy just imported, so the owner session is the primary route. It only works
+# once n8n has linked the workflow to the session user's project, hence the
+# patient retries.
+VERSION_LOOKUP_ATTEMPTS = 10
+VERSION_LOOKUP_DELAY = 3.0
+
+
+def workflow_version(http, workflow_id, attempts=VERSION_LOOKUP_ATTEMPTS):
+    # Returns the workflow's current versionId through the owner session, or
+    # None when the session still cannot see it.
+    for attempt in range(attempts):
+        code, body = http.request("GET", "/rest/workflows/%s" % workflow_id, auth="session")
+        version = unwrap(body).get("versionId")
+        if version:
+            return version
+        if code == 200:
+            return None
+        if attempt + 1 < attempts:
+            time.sleep(VERSION_LOOKUP_DELAY)
+    return None
+
+
+def activate_workflow(http, workflow_id, name, relogin):
+    # n8n 2.x refuses a public-API activation with "ask the owner to share it
+    # with you" for a workflow the key's user cannot activate, and its internal
+    # /rest endpoint additionally requires the current versionId. The deploy
+    # already holds an owner session, so use it and keep the API key as the
+    # fallback for n8n builds without /rest/workflows/<id>. A refusal is never
+    # fatal: the import already succeeded, so n8n's own reason is only logged.
+    version = workflow_version(http, workflow_id, attempts=1)
+    if version is None:
+        # Creating the API key revokes the session this deploy was given, and an
+        # invalid session answers the internal routes as if the workflow did not
+        # exist ("you can only access workflows owned by you"). Logging in again
+        # is cheap and makes the lookup trustworthy.
+        relogin()
+        version = workflow_version(http, workflow_id)
+    if version:
+        progress("activation de %s via la session owner" % name)
+        code, body = http.request(
+            "POST",
+            "/rest/workflows/%s/activate" % workflow_id,
+            {"versionId": version},
+            auth="session",
+        )
+    else:
+        progress(
+            "version de %s illisible après %d essais, activation via la clé API"
+            % (name, VERSION_LOOKUP_ATTEMPTS)
+        )
+        code, body = http.request(
+            "POST", "/api/v1/workflows/%s/activate" % workflow_id, auth="key"
+        )
+    if code >= 400:
+        progress("workflow %s laissé inactif (%s)" % (name, redact(_error_text(body))))
+        return False
+    progress("workflow %s actif" % name)
+    return True
+
+
+def sync_workflows(http, id_map, relogin):
     code, body = http.request("GET", "/api/v1/workflows?limit=250", auth="key")
     remote = body.get("data", []) if code == 200 else []
     for path in collect_workflow_files(CHECKOUT):
@@ -415,43 +785,169 @@ def sync_workflows(http, id_map):
         else:
             code, body = http.request("POST", "/api/v1/workflows", payload, auth="key")
         if code >= 400:
-            raise RuntimeError("workflow %s: %s" % (name, body.get("error")))
-        new_id = body.get("data", {}).get("id")
-        code, _ = http.request("POST", "/api/v1/workflows/%s/activate" % new_id, auth="key")
+            raise RuntimeError("workflow %s: %s" % (name, redact(_error_text(body))))
+        new_id = unwrap(body).get("id")
+        if not new_id:
+            raise RuntimeError("n8n n'a pas renvoyé d'id pour le workflow %s" % name)
+        activate_workflow(http, new_id, name, relogin)
+
+
+def _execution_finished(item):
+    # n8n 2.40's /rest/executions omits the "finished" flag, so the status is
+    # the only evidence available. An explicit boolean always wins; otherwise a
+    # terminal status proves the run ended, a pending one proves it did not,
+    # and anything else stays None rather than guessing.
+    if isinstance(item.get("finished"), bool):
+        return item["finished"]
+    status = str(item.get("status") or "").strip().lower()
+    if status in __TERMINAL_STATUSES__:
+        return True
+    if status in __PENDING_STATUSES__:
+        return False
+    return None
+
+
+def _execution_summary(item):
+    if not isinstance(item, dict):
+        return None
+    identifier = item.get("id") or item.get("executionId")
+    status = item.get("status")
+    if not isinstance(identifier, (str, int)) or not isinstance(status, str):
+        return None
+    workflow = item.get("workflowName") or item.get("workflow_name")
+    workflow_data = item.get("workflowData")
+    if not workflow and isinstance(workflow_data, dict):
+        workflow = workflow_data.get("name")
+    result = {
+        "id": redact(identifier),
+        "status": redact(status),
+    }
+    for key, value in (
+        ("workflowName", workflow),
+        ("startedAt", item.get("startedAt") or item.get("started_at")),
+        ("stoppedAt", item.get("stoppedAt") or item.get("stopped_at")),
+    ):
+        if isinstance(value, (str, int)) and str(value):
+            result[key] = redact(value)
+    finished = _execution_finished(item)
+    if finished is not None:
+        result["finished"] = finished
+    return result
+
+
+def execution_status(limit=20):
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return {"supported": False, "error": "limite d'exécutions invalide"}
+    if limit < 1 or limit > 100:
+        return {"supported": False, "error": "limite d'exécutions invalide"}
+    try:
+        secrets = load_secrets(SECRETS)
+        http = Http()
+        wait_ready(http, timeout=15.0)
+        login(http, secrets["owner_email"], secrets["owner_password"])
+        path = "/rest/executions?" + urlencode({"limit": limit})
+        code, body = http.request("GET", path, auth="session")
         if code >= 400:
-            raise RuntimeError("activation du workflow %s a échoué" % name)
-        progress("workflow %s actif" % name)
+            return {
+                "supported": False,
+                "error": "endpoint d'exécutions indisponible (HTTP %s)" % code,
+            }
+        data = body.get("data", body) if isinstance(body, dict) else body
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                data = []
+        if isinstance(data, dict):
+            data = data.get("results", data.get("executions", []))
+        if not isinstance(data, list):
+            return {
+                "supported": False,
+                "error": "réponse d'exécutions invalide",
+            }
+        executions = []
+        for item in data:
+            summary = _execution_summary(item)
+            if summary is not None:
+                executions.append(summary)
+        return {
+            "supported": True,
+            "at": int(time.time()),
+            "executions": executions,
+        }
+    except Exception as exc:
+        return {"supported": False, "error": redact(exc)}
+
+
+def record_result(sha, status, error=None):
+    global SHA
+    SHA = redact(sha)
+    write_marker(status, error)
 
 
 def main():
     progress("déploiement de %s" % SHA)
-    try:
-        secrets = load_secrets(SECRETS)
-    except Exception as exc:
-        write_marker("error", "secrets.json illisible: %s" % exc)
-        raise
+    secrets = load_secrets(SECRETS)
     http = Http()
     wait_ready(http)
     ensure_owner(http, secrets["owner_email"], secrets["owner_password"])
     ensure_api_key(http)
     id_map = sync_credentials(http, secrets)
-    sync_workflows(http, id_map)
+
+    def relogin():
+        login(http, secrets["owner_email"], secrets["owner_password"])
+
+    sync_workflows(http, id_map, relogin)
     write_marker("ok")
     progress("déploiement terminé")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        write_marker("error", str(exc))
-        raise
+    if len(sys.argv) > 1 and sys.argv[1] in ("status", "--status", "--executions"):
+        limit = 20
+        if len(sys.argv) > 2 and sys.argv[2] == "--limit":
+            limit = sys.argv[3] if len(sys.argv) > 3 else ""
+        print(json.dumps(execution_status(limit), ensure_ascii=False), flush=True)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--record":
+        if len(sys.argv) < 4:
+            raise SystemExit(2)
+        record_result(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
+    else:
+        try:
+            main()
+        except Exception as exc:
+            write_marker("error", str(exc))
+            raise
 """
 
 
 def render_deploy_script() -> str:
     """Return the self-contained server deploy script for the workspace tree."""
-    return TEMPLATE_DEPLOY.replace("__MARKER__", GENERATED_MARKER)
+    content = TEMPLATE_DEPLOY.replace("__MARKER__", GENERATED_MARKER)
+    # The status vocabulary is injected as sorted tuples so the generated script
+    # carries the exact sets the launcher-side parser uses.
+    content = content.replace(
+        "__TERMINAL_STATUSES__", _status_set_literal(TERMINAL_EXECUTION_STATUSES)
+    )
+    content = content.replace(
+        "__PENDING_STATUSES__", _status_set_literal(PENDING_EXECUTION_STATUSES)
+    )
+    # Same reasoning for the API-key scopes: one contract with n8n, shared with
+    # the local owner bootstrap.
+    content = content.replace("__API_KEY_SCOPES__", _list_literal(REQUIRED_WORKFLOW_SCOPES))
+    return content
+
+
+def _status_set_literal(statuses: frozenset[str]) -> str:
+    """Render *statuses* as a Python set literal for the generated script."""
+    return "{" + ", ".join(repr(status) for status in sorted(statuses)) + "}"
+
+
+def _list_literal(values: list[str]) -> str:
+    """Render *values* as a Python list literal for the generated script."""
+    return "[" + ", ".join(repr(value) for value in values) + "]"
 
 
 # ---------------------------------------------------------------------------

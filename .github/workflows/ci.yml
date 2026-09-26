@@ -104,10 +104,17 @@ jobs:
           if-no-files-found: error
 
   integration:
-    # The remote-deployment flow (install_server/publish/hook) is the code
-    # most likely to ship a silent bug to production, and it can only run end
-    # to end when Docker is present. GitHub's ubuntu runners already have a
-    # daemon; unit runs keep excluding these via ``-m 'not integration'``.
+    # The remote-deployment flow (install_server/publish/hook) and the remote
+    # execution-status contract are the code most likely to ship a silent bug to
+    # production, and they can only run end to end when Docker is present.
+    # Linux-only on purpose: the sshd sandbox is a Linux container and the
+    # harness reaches the deployed n8n through an SSH reverse tunnel, which is
+    # proven here but not on the macOS/Windows runners. What the harness needs
+    # from the runner: a Docker daemon (its socket is the default
+    # ``/var/run/docker.sock``, so no N8N_LAUNCHER_TEST_DOCKER_SOCKET override),
+    # the ``ssh`` client used to open that tunnel (preinstalled), and a free
+    # ephemeral port for the sandbox's sshd bridge. Unit runs keep excluding
+    # these via ``-m 'not integration'``.
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -123,6 +130,7 @@ jobs:
 
       - name: Run integration tests
         run: uv run pytest tests/integration -m integration --junitxml=pytest-report-integration.xml
+        timeout-minutes: 60
 
       - name: Upload pytest report
         uses: actions/upload-artifact@v4
