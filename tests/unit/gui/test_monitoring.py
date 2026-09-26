@@ -523,10 +523,57 @@ def test_prompt_server_supervision_renders_a_synchronous_read():
             lambda: ServerSnapshot(health=_health(), logs="ready"),
             set_status=statuses.append,
         )
-    assert window._geometry == "1000x680"
+    # The height is the screen-derived one; the width opens at the floor it had,
+    # and the position is part of the same geometry.
+    assert window._geometry == "900x680+0+0"
     assert window.title_text == "Supervision du serveur — Demo"
     assert window.server_panel is not None
     assert any("sain" in status for status in statuses)
+
+
+def test_prompt_server_supervision_width_follows_the_snapshot():
+    # Container logs are long lines: a wider snapshot must widen the window, and
+    # the height must stay the screen-derived one.
+    with fake_gui():
+        root = FakeRoot()
+        root._width, root._height = 1920, 1080
+        root._screen = (1920, 1080)
+        window = monitoring.prompt_server_supervision(
+            root,
+            "Demo",
+            "prod.example.test",
+            lambda: ServerSnapshot(health=_health(), logs="ready"),
+        )
+        # A dialog knows the display it is on: the fake reports the same one.
+        window._screen = (1920, 1080)
+        assert window._geometry == "900x864+510+72"
+
+        # A wide log line lands: the window grows to hold it, height untouched.
+        window._reqwidth = 1300
+        window.server_panel.apply(ServerSnapshot(health=_health(), logs="x" * 400))
+        assert window._geometry == "1300x864+310+72"
+
+
+def test_prompt_server_supervision_never_shrinks_on_a_narrower_snapshot():
+    with fake_gui():
+        root = FakeRoot()
+        root._width, root._height = 1920, 1080
+        root._screen = (1920, 1080)
+        window = monitoring.prompt_server_supervision(
+            root,
+            "Demo",
+            "prod.example.test",
+            lambda: ServerSnapshot(health=_health(), logs="ready"),
+        )
+        window._screen = (1920, 1080)
+        window._reqwidth = 1300
+        window.server_panel.apply(ServerSnapshot(health=_health(), logs="x" * 400))
+        opened = window._geometry
+
+        # A short deploy history must not shrink the window under the reader.
+        window._reqwidth = 700
+        window.server_panel.apply(ServerSnapshot(health=_health(), logs="ok"))
+        assert window._geometry == opened
 
 
 def test_prompt_server_supervision_defers_to_an_async_read():
@@ -741,40 +788,63 @@ def test_panel_tree_is_requested_at_its_minimum_widths():
         assert width == monitoring._JOURNAL_MINIMUMS[name]
 
 
-def test_panel_tree_columns_fit_the_pane_once_it_is_mapped():
+def test_panel_tree_columns_follow_their_own_content():
     with fake_gui():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
-        panel.tree._width = 900
-        panel.apply([make_event(id=1, message="démarrage du workspace")], store=None)
+        panel.apply(
+            [
+                make_event(
+                    id=1,
+                    message="démarrage du workspace — docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s",
+                )
+            ],
+            store=None,
+        )
 
     widths = panel.tree.column_widths()
-    # The message column carries the prose: it is the one that grows, while the
-    # short columns stay at the width of what they hold.
-    assert widths["message"] == 900 - widths["time"] - widths["level"] - widths["name"]
+    # The message column is the one that carries prose, so it is the one that
+    # takes real room, whatever the pane is.
     assert widths["message"] > monitoring._JOURNAL_MINIMUMS["message"]
     assert (
         monitoring._JOURNAL_MINIMUMS["name"]
         <= widths["name"]
         < monitoring._JOURNAL_MAXIMUMS["name"]
     )
-    # Every column stays inside its declared bounds.
+    # Every column stays inside its declared bounds, and none of them is elastic.
     for name, width in widths.items():
         assert monitoring._JOURNAL_MINIMUMS[name] <= width <= monitoring._JOURNAL_MAXIMUMS[name]
+    assert all(request["stretch"] is False for request in panel.tree.column_requests().values())
 
 
-def test_panel_tree_refits_when_the_sash_moves():
+def test_panel_tree_columns_do_not_depend_on_the_sash():
+    # The defect this fixes: the journal used to hand the flexible column the room
+    # the pane had left, so the same events were laid out differently depending on
+    # where the user had dragged the sash.
     with fake_gui():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
-        panel.apply([make_event(id=1)], store=None)
-        panel.tree._width = 600
-        panel.tree._bindings["<Configure>"](SimpleNamespace(width=600))
-        narrow = panel.tree.column_widths()["message"]
+        panel.apply(
+            [
+                make_event(
+                    id=1,
+                    message="démarrage du workspace — docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s",
+                )
+            ],
+            store=None,
+        )
+        first = panel.tree.column_widths()
 
         panel.tree._width = 1200
-        panel.tree._bindings["<Configure>"](SimpleNamespace(width=1200))
+        panel.apply(
+            [
+                make_event(
+                    id=1,
+                    message="démarrage du workspace — docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s",
+                )
+            ],
+            store=None,
+        )
 
-    # The journal pane follows the sash instead of clipping the message.
-    assert panel.tree.column_widths()["message"] > narrow
+    assert panel.tree.column_widths() == first
 
 
 def test_panel_detail_wraps_at_its_own_width():

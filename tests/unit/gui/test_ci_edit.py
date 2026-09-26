@@ -1008,20 +1008,21 @@ def _pipeline_tree(workspace_root, tmp_path, exports):
     )
 
 
-def test_pipeline_tree_is_requested_at_its_minimum_widths(tmp_path) -> None:
-    # The dialog asks only for the room the pipeline names and their reasons
-    # need, instead of a fixed 360 + 460 that was wide enough for nothing in
-    # particular on every host.
+def test_pipeline_tree_is_built_at_its_minimum_widths(tmp_path) -> None:
+    # The tree asks Tk for its minimums and nothing more, instead of a fixed
+    # 360 + 460 that was wide enough for nothing in particular on every host: the
+    # width it really needs is pushed once the rows are in.
     root = tmp_path / "ws"
     tree = _pipeline_tree(root, tmp_path, {"n8nPipelines/manual.json": _MANUAL})
 
-    assert tree.column_widths() == {
-        "#0": ci_edit._SELECTION_MINIMUMS["#0"],
-        "detail": ci_edit._SELECTION_MINIMUMS["detail"],
-    }
+    requests = tree.column_requests()
+    assert requests["#0"]["minwidth"] == ci_edit._SELECTION_MINIMUMS["#0"]
+    assert requests["detail"]["minwidth"] == ci_edit._SELECTION_MINIMUMS["detail"]
+    # Nothing may stretch to fill a pane: the columns are sized, not elastic.
+    assert all(request["stretch"] is False for request in requests.values())
 
 
-def test_pipeline_tree_columns_grow_to_the_pipeline_names(tmp_path) -> None:
+def test_pipeline_tree_columns_follow_the_pipeline_names(tmp_path) -> None:
     long_name = "n8nPipelines/" + "very-long-pipeline-name" * 2 + ".json"
     root = tmp_path / "ws"
     tree = _pipeline_tree(
@@ -1029,15 +1030,55 @@ def test_pipeline_tree_columns_grow_to_the_pipeline_names(tmp_path) -> None:
         tmp_path,
         {"n8nPipelines/manual.json": _MANUAL, long_name: _MANUAL},
     )
-    tree._width = 1200
-    tree._bindings["<Configure>"](SimpleNamespace(width=1200))
 
     widths = tree.column_widths()
-    # A long export name is fully readable instead of being cut to fit 360px...
+    # A long export name is fully readable instead of being cut to a fixed 360px,
+    # and it does not matter how wide the pane happens to be.
     assert widths["#0"] > ci_edit._SELECTION_MINIMUMS["#0"]
-    # ... and the details column keeps the reason of the blocked pipelines.
-    assert widths["detail"] == 1200 - widths["#0"]
-    assert widths["detail"] > ci_edit._SELECTION_MINIMUMS["detail"]
+    # The details column keeps the room its own reasons ask for.
+    assert widths["detail"] >= ci_edit._SELECTION_MINIMUMS["detail"]
+
+
+def test_ci_dialog_opens_at_the_width_its_tables_need(tmp_path) -> None:
+    # The pipeline names were clipped because the dialog opened at the sum of the
+    # *minimum* column widths: it must open at the content width instead.
+    workspace = _workspace_with_manual(tmp_path)
+
+    with (
+        patch.object(FakeTk.Toplevel, "winfo_reqwidth", lambda _self: 1180),
+        patch.object(FakeTk.Toplevel, "winfo_screenwidth", lambda _self: 1920),
+    ):
+        _pipeline_tree(tmp_path / "ws", tmp_path, {"n8nPipelines/manual.json": _MANUAL})
+
+    dialog = FakeTk.Toplevel.instances[-1]
+    assert dialog._geometry.startswith("1180x")
+
+
+def test_the_runs_tab_grows_the_dialog_it_opened_in(tmp_path) -> None:
+    # The runs tree is fed asynchronously and is usually wider than the pipeline
+    # tree: a snapshot that arrives after the dialog opened must widen it rather
+    # than be clipped.
+    workspace = _workspace_with_manual(tmp_path)
+    snapshot = _runs_snapshot()
+    FakeTtk.Notebook.instances.clear()
+    RunsPanel.instances.clear()
+
+    widths = iter([700, 700, 1300])
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+        _patch_ci_editor(FakeTk()),
+        patch.object(FakeTk.Toplevel, "winfo_reqwidth", lambda _self: next(widths, 1300)),
+        patch.object(FakeTk.Toplevel, "winfo_screenwidth", lambda _self: 1920),
+    ):
+        prompt_ci_workflows(FakeRoot(), workspace, runs_source=lambda: snapshot)
+        dialog = FakeTk.Toplevel.instances[-1]
+        panel = next(iter(RunsPanel.instances))
+        # A later, wider snapshot (the tree grew a long pipeline label).
+        panel.apply(snapshot)
+
+    assert dialog._geometry.startswith("1300x")
 
 
 def test_pipeline_hint_wraps_at_the_dialog_width(tmp_path) -> None:

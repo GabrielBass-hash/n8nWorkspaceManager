@@ -552,7 +552,7 @@ def test_runs_tree_columns_follow_the_nested_labels() -> None:
     snapshot = _snapshot(
         runs=[_run(11)],
         jobs={11: (_job(21),)},
-        pipelines={21: (_pipeline(detail="3 nœuds"),)},
+        pipelines={21: (_pipeline(detail="3 nœuds — terminé en 4,2 s le 12 mars"),)},
     )
     with (
         fake_runs_panel_bases(),
@@ -561,18 +561,19 @@ def test_runs_tree_columns_follow_the_nested_labels() -> None:
     ):
         panel, _refresh, _open = _build()
         panel.apply(snapshot)
-        panel.tree._width = 900
-        panel.tree._bindings["<Configure>"](SimpleNamespace(width=900))
 
     widths = panel.tree.column_widths()
-    assert sum(widths.values()) == 900
-    assert widths["detail"] > ci_runs_panel._RUNS_MINIMUMS["detail"]
-    # The label column grew past its minimum: the indented pipeline names are
-    # what the table was unreadable without.
+    # Every column took the width of what it holds, whatever the pane is: the
+    # indented pipeline names are what the table was unreadable without.
     assert widths["#0"] > ci_runs_panel._RUNS_MINIMUMS["#0"]
+    assert widths["detail"] > ci_runs_panel._RUNS_MINIMUMS["detail"]
+    # Nothing is elastic, so the two widths are independent of each other.
+    assert all(request["stretch"] is False for request in panel.tree.column_requests().values())
 
 
-def test_runs_tree_refits_when_the_panel_is_resized() -> None:
+def test_runs_tree_columns_do_not_depend_on_the_pane_width() -> None:
+    # The defect this fixes: a wide pane used to hand its room to the flexible
+    # column, so the same snapshot was laid out differently in two windows.
     with (
         fake_runs_panel_bases(),
         patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
@@ -580,14 +581,12 @@ def test_runs_tree_refits_when_the_panel_is_resized() -> None:
     ):
         panel, _refresh, _open = _build()
         panel.apply(_snapshot(runs=[_run(11)]))
-        panel.tree._width = 500
-        panel.tree._bindings["<Configure>"](SimpleNamespace(width=500))
-        narrow = panel.tree.column_widths()["detail"]
+        narrow = panel.tree.column_widths()
 
         panel.tree._width = 1400
-        panel.tree._bindings["<Configure>"](SimpleNamespace(width=1400))
+        panel.apply(_snapshot(runs=[_run(11)]))
 
-    assert panel.tree.column_widths()["detail"] > narrow
+    assert panel.tree.column_widths() == narrow
 
 
 def test_runs_empty_state_wraps_at_its_own_width() -> None:

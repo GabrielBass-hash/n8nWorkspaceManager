@@ -24,15 +24,13 @@ MINIMUMS = {"time": 40, "level": 40, "message": 100}
 MAXIMUMS = {"time": 200, "level": 200, "message": 5000}
 
 
-def widths_for(rows, *, available, flexible="message", **kwargs):
+def widths_for(rows, **kwargs):
     """Return :func:`column_widths` for *rows* with the test's own bounds."""
     return layout.column_widths(
         rows,
-        available=available,
         headings=kwargs.get("headings", HEADINGS),
         minimums=kwargs.get("minimums", MINIMUMS),
         maximums=kwargs.get("maximums", MAXIMUMS),
-        flexible=kwargs.get("flexible", (flexible,)),
         measure=kwargs.get("measure", measure),
     )
 
@@ -51,123 +49,57 @@ def natural(text: str) -> int:
 def test_a_short_value_keeps_its_column_short():
     # The level column is sized to the widest heading or value, not to the room a
     # long status might need: "INFO" is narrower than the word "Niveau".
-    assert widths_for([row()], available=600)["level"] == natural("Niveau")
-    # ... and it grows for a longer value, at the message's expense.
-    assert widths_for([row(level="CRITICAL")], available=600)["level"] == natural("CRITICAL")
-    # The time column fits its value ("16/09 14:32:07"), the message takes the rest.
-    widths = widths_for([row()], available=600)
+    assert widths_for([row()])["level"] == natural("Niveau")
+    # ... and it grows for a longer value, at the expense of nothing else.
+    assert widths_for([row(level="CRITICAL")])["level"] == natural("CRITICAL")
+    # Each column is sized on its own content: the time column fits its value, and
+    # the message is not shortened to help it.
+    widths = widths_for([row()])
     assert widths["time"] == natural("16/09 14:32:07")
-    assert widths["message"] == 600 - widths["time"] - widths["level"]
+    assert widths["message"] == natural("démarrage")
 
 
 def test_a_wide_value_grows_its_column_up_to_the_maximum():
-    # The message keeps at least the width of its content, and grows into the
-    # spare room of the pane.
-    widths = widths_for([row(message="x" * 40)], available=1000)
-    assert widths["message"] == 1000 - widths["time"] - widths["level"]
-    assert widths["message"] >= natural("x" * 40)
-    # In a pane large enough, the column stops at its declared maximum: a wider
-    # value is cut rather than stealing the room of the other columns.
-    assert widths_for([row(message="x" * 500)], available=8000)["message"] == 5000
-
-
-def test_the_elastic_column_yields_before_a_fixed_one():
-    # The message is far wider than the pane: it is the message that gets cut to
-    # the room that is actually left, and the fixed columns keep their full
-    # natural width.
-    widths = widths_for([row(message="x" * 500)], available=1000)
-    assert widths["message"] == 1000 - widths["time"] - widths["level"]
-    assert widths["time"] == natural("16/09 14:32:07")
-    assert widths["level"] == natural("Niveau")
+    # The message takes the width of its content...
+    widths = widths_for([row(message="x" * 40)])
+    assert widths["message"] == natural("x" * 40)
+    # ... and stops at its declared maximum: the bound is what keeps a hosting
+    # window from being asked to open as wide as the longest message ever logged.
+    assert widths_for([row(message="x" * 500)])["message"] == 5000
 
 
 def test_a_column_never_shrinks_below_its_minimum():
-    # An empty table still shows readable headings, and the spare goes to the
-    # elastic column.
-    widths = widths_for([], available=600)
+    # An empty table still shows readable headings...
+    widths = widths_for([])
     assert widths["level"] == natural("Niveau")
     assert widths["time"] == natural("Heure")
-    assert widths["message"] == 600 - widths["time"] - widths["level"]
+    # ... and a heading narrower than the column's floor still gets the floor:
+    # "Message" is 82px wide, the message column is never squeezed below 100.
+    assert widths["message"] == MINIMUMS["message"]
     assert all(width >= MINIMUMS[name] for name, width in widths.items())
 
 
-def test_the_message_takes_everything_left_over():
-    widths = widths_for([row(), row(message="un message un peu plus long")], available=800)
-    assert sum(widths.values()) == 800
-    assert widths["message"] == 800 - widths["time"] - widths["level"]
-
-
-def test_an_unmapped_table_asks_for_its_content_only():
-    # ``available`` of zero means the widget was never laid out: the columns keep
-    # their content width, which is what makes the dialog size itself to them.
-    widths = widths_for([row(message="un message un peu plus long")], available=0)
-    assert widths["message"] == natural("un message un peu plus long")
+def test_the_heading_sizes_an_empty_column():
+    # A column holding only short values still reserves its own heading, so the
+    # header never ends up narrower than the word on it.
+    widths = widths_for([row(level="")])
     assert widths["level"] == natural("Niveau")
-    assert sum(widths.values()) < 600
+    assert widths["level"] > measure("")
 
 
-def test_a_narrow_pane_shrinks_the_fixed_columns_before_the_message():
-    # Not even the minimums fit: the elastic column is already at its minimum, so
-    # the fixed ones give their slack back rather than letting Tk clip the tail.
-    widths = widths_for([row(message="y" * 40)], available=300)
-    assert widths["message"] == 100
-    assert sum(widths.values()) == 300
-    assert widths["time"] == 133  # 152 - 19, its proportional share of the 24 left
-    assert widths["level"] == 67  # 72 - 5
-
-
-def test_the_total_always_fits_a_pane_larger_than_the_minimums():
-    for available in (200, 300, 500, 700, 1000, 4000):
-        widths = widths_for([row(message="z" * 30), row(level="CRITICAL")], available=available)
-        assert sum(widths.values()) <= max(available, 1)
-
-
-def test_a_pane_narrower_than_the_minimums_keeps_them():
-    # Nothing better exists: every column sits on its floor and Tk clips the tail.
-    widths = widths_for([row()], available=90)
-    assert widths == {"time": 40, "level": 40, "message": 100}
-
-
-def test_the_flexible_column_is_the_only_one_that_stretches():
-    # Two flexible columns share the spare, and a column stopped by its maximum
-    # hands the remainder to the other one.
-    headings = {"a": "A", "b": "B"}
-    minimums = {"a": 50, "b": 50}
-    maximums = {"a": 80, "b": 400}
-    widths = layout.column_widths(
-        [],
-        available=400,
-        headings=headings,
-        minimums=minimums,
-        maximums=maximums,
-        flexible=("a", "b"),
-        measure=measure,
-    )
-    assert widths == {"a": 80, "b": 320}
-    # A shared spare below both minimums is impossible to satisfy: both keep
-    # their floor and the table overflows rather than losing a column.
-    tight = layout.column_widths(
-        [],
-        available=60,
-        headings=headings,
-        minimums=minimums,
-        maximums=maximums,
-        flexible=("a", "b"),
-        measure=measure,
-    )
-    assert tight == {"a": 50, "b": 50}
+def test_the_widths_do_not_depend_on_the_pane():
+    # The whole point of the rule: the widths are a property of the content, so
+    # two panes of very different sizes ask the table for the very same thing.
+    # Squeezing a table into a narrow pane is what used to cut the message.
+    rows = [row(message="x" * 40), row(level="CRITICAL")]
+    assert widths_for(rows) == widths_for(rows)
 
 
 def test_a_column_absent_from_headings_is_ignored():
-    widths = widths_for([row()], available=600, flexible="time")
-    assert set(widths) == set(HEADINGS)
-    # "time" is elastic and bounded: it stops at its maximum and the fixed columns
-    # grow into what is left, none of them dropping below their content.
-    assert widths["time"] == 200
-    assert widths["level"] == 78  # 72 + its share of the 226 pixels left over
-    assert widths["message"] == 322
-    assert sum(widths.values()) == 600
-    assert widths["level"] >= natural("Niveau")
+    rows = [{"time": "10:00", "level": "INFO", "message": "un message", "extra": "x" * 90}]
+    widths = widths_for(rows, headings={"time": "Heure", "message": "Message"})
+    assert set(widths) == {"time", "message"}
+    assert widths == {"time": natural("10:00"), "message": natural("un message")}
 
 
 def test_only_the_longest_values_are_measured():
@@ -179,15 +111,7 @@ def test_only_the_longest_values_are_measured():
         return measure(text)
 
     rows = [row(message=f"message numéro {index}") for index in range(50)]
-    layout.column_widths(
-        rows,
-        available=800,
-        headings=HEADINGS,
-        minimums=MINIMUMS,
-        maximums=MAXIMUMS,
-        flexible=("message",),
-        measure=counting,
-    )
+    widths_for(rows, measure=counting)
     # 50 rows would be 150 measurements; the shortlist keeps it bounded.
     assert len(measured) < 40
 
@@ -283,17 +207,15 @@ def test_screen_size_reports_an_unmapped_screen_as_one_pixel():
 
 
 # ----------------------------------------------------------- ColumnFitter
-def make_fitter(tree=None, *, flexible="detail", **kwargs):
+def make_fitter(tree=None, **kwargs):
     """Return a fitter over a fake tree, with the runs-tree shape."""
     tree = tree or FakeTtk.Treeview(None, columns=("detail",))
-    headings = kwargs.get("headings", {"#0": "Run", "detail": "Détails"})
     fitter = layout.ColumnFitter(
         tree,
         columns=kwargs.get("columns", ("detail",)),
-        headings=headings,
+        headings=kwargs.get("headings", {"#0": "Run", "detail": "Détails"}),
         minimums=kwargs.get("minimums", {"#0": 100, "detail": 60}),
         maximums=kwargs.get("maximums", {"#0": 300, "detail": 3000}),
-        flexible=flexible,
         measure=measure,
     )
     return tree, fitter
@@ -302,13 +224,12 @@ def make_fitter(tree=None, *, flexible="detail", **kwargs):
 def test_column_fitter_sizes_the_columns_to_the_rows_it_reads_back():
     tree, fitter = make_fitter()
     tree.insert("", "end", iid="run-1", text="✓  build (success)", values=("success",))
-    tree._width = 500
 
     fitter.rows()
 
     widths = fitter.widths()
     assert widths["#0"] == len("✓  build (success)") * CHAR_WIDTH + layout._CELL_PADDING
-    assert widths["detail"] == 500 - widths["#0"]
+    assert widths["detail"] == natural("success")
     assert tree.column_widths() == widths
 
 
@@ -316,7 +237,6 @@ def test_column_fitter_walks_a_nested_tree():
     tree, fitter = make_fitter()
     job = tree.insert("", "end", iid="run-1", text="run", values=("queued",))
     tree.insert(job, "end", iid="job-1", text="    importer", values=("running",))
-    tree._width = 600
 
     fitter.rows()
 
@@ -325,47 +245,49 @@ def test_column_fitter_walks_a_nested_tree():
     assert fitter.widths()["#0"] == natural("    importer")
 
 
-def test_column_fitter_refits_on_configure():
+def test_column_fitter_ignores_the_pane_it_is_shown_in():
     tree, fitter = make_fitter()
     tree.insert("", "end", iid="run-1", text="run", values=("success",))
     tree._width = 400
     fitter.rows()
-    narrow = fitter.widths()["detail"]
+    narrow = dict(fitter.widths())
 
-    # Resizing the window: the flexible column absorbs the new room.
-    fitter.on_resize(SimpleNamespace(width=900))
-    assert fitter.widths()["detail"] == 900 - fitter.widths()["#0"]
-    assert fitter.widths()["detail"] > narrow
-    assert tree.column_widths()["detail"] == fitter.widths()["detail"]
-
-
-def test_column_fitter_ignores_an_unmapped_tree():
-    tree, fitter = make_fitter()
-    tree.insert("", "end", iid="run-1", text="run", values=("success",))
-
-    # ``winfo_width`` reports 1 before the first layout: nothing is pushed, so
-    # the widget keeps the requested widths it was built with.
+    # The very same rows in a much wider table: the widths are a property of the
+    # content, so resizing the window (or dragging the paned sash) changes
+    # nothing — there is no longer a ``<Configure>`` handler to feed.
+    tree._width = 1400
     fitter.rows()
-    assert fitter.widths() == {}
-    assert tree.column_widths() == {}
+    assert fitter.widths() == narrow
+    assert "<Configure>" not in tree._bindings
+
+
+def test_column_fitter_fits_a_tree_that_is_not_mapped_yet():
+    tree, fitter = make_fitter()
+    tree.insert("", "end", iid="run-1", text="un run assez long", values=("success",))
+
+    # ``winfo_width`` reports 1 before the first layout, and the columns are
+    # pushed anyway: this is what makes a dialog size itself to its content
+    # before it is ever shown.
+    fitter.rows()
+    assert fitter.widths()["#0"] == natural("un run assez long")
+    assert tree.column_widths() == fitter.widths()
 
 
 def test_column_fitter_does_not_push_an_unchanged_width_twice():
     tree, fitter = make_fitter()
     tree.insert("", "end", iid="run-1", text="run", values=("success",))
-    tree._width = 500
     fitter.rows()
     first = dict(tree._columns)
 
     fitter.rows()
 
-    # Identical options: a re-push could feed a ``<Configure>`` loop.
+    # Identical options: a re-push is wasted work on a table re-rendered on every
+    # keystroke of a search field.
     assert tree._columns == first
 
 
 def test_column_fitter_survives_a_row_that_vanished():
-    tree, fitter = make_fitter()
-    tree._width = 400
+    _tree, fitter = make_fitter()
 
     class Vanished(FakeTtk.Treeview):
         """A tree whose rows are gone, as when a snapshot lands after a close."""
@@ -373,24 +295,22 @@ def test_column_fitter_survives_a_row_that_vanished():
         def item(self, iid, **kwargs):  # type: ignore[override]
             raise ValueError(f"no item {iid}")
 
-    vanished = Vanished(None, columns=("detail",))
-    vanished._width = 400
-    fitter._tree = vanished
+    fitter._tree = Vanished(None, columns=("detail",))
     fitter.rows()
     # No rows, no crash: the columns fall back to their minimum, which holds
     # their heading readably.
     assert fitter.widths()["#0"] == 100
-    assert sum(fitter.widths().values()) == 400
 
 
-def test_column_fitter_marks_only_the_flexible_column_stretchable():
-    tree, fitter = make_fitter(flexible="#0")
+def test_no_column_is_stretchable():
+    tree, fitter = make_fitter()
     tree.insert("", "end", iid="run-1", text="run", values=("success",))
-    tree._width = 500
 
     fitter.rows()
 
-    assert tree._columns["#0"]["stretch"] is True
+    # No column absorbs the room the widget has to spare: each one keeps the exact
+    # width its content asked for, which is the whole point of the rule.
+    assert tree._columns["#0"]["stretch"] is False
     assert tree._columns["detail"]["stretch"] is False
     assert tree._columns["detail"]["minwidth"] == 60
 
@@ -445,7 +365,6 @@ def test_ellipsize_never_grows_a_string(text: str) -> None:
 def test_a_vanished_row_is_skipped_by_the_walk():
     tree, fitter = make_fitter()
     tree.insert("", "end", iid="run-1", text="run", values=("success",))
-    tree._width = 500
 
     class Vanished(FakeTtk.Treeview):
         """A tree whose rows are gone, as when a snapshot lands after a close."""
@@ -455,7 +374,6 @@ def test_a_vanished_row_is_skipped_by_the_walk():
 
     fitter._tree = Vanished(None, columns=("detail",))
     fitter._tree._items = tree._items
-    fitter._tree._width = 500
     fitter.rows()
 
     # The rows are walked, every one of them raises, and the fit falls back to the
@@ -463,70 +381,223 @@ def test_a_vanished_row_is_skipped_by_the_walk():
     assert fitter.widths()["#0"] == 100
 
 
-def test_the_fitter_survives_a_tree_that_cannot_be_measured():
-    _tree, fitter = make_fitter()
+# ------------------------------------------------------------ content_width
+def test_content_width_keeps_the_width_the_content_asks_for():
+    assert layout.content_width(880, screen_width=1920) == 880
 
-    class Unmeasurable(FakeTtk.Treeview):
-        """A tree whose geometry is unavailable, as on a half-built dialog."""
 
-        def winfo_width(self) -> int:
+def test_content_width_is_capped_by_the_screen():
+    # A long prose label must not open a dialog wider than the display: the
+    # fraction is the launcher-wide share of the screen.
+    assert layout.content_width(3000, screen_width=1920) == round(1920 * 0.72)
+    assert layout.content_width(3000, screen_width=1000) == 720
+
+
+def test_content_width_honours_a_minimum():
+    # A dialog whose content is tiny (a row of buttons) still needs room for it.
+    assert layout.content_width(40, screen_width=1920, minimum=420) == 420
+
+
+def test_content_width_caps_its_minimum_on_a_small_screen():
+    # The floor is a floor for a large display, never a licence to overflow a
+    # small one: a 800px laptop must still get a window that fits.
+    assert layout.content_width(40, screen_width=800, minimum=1200) == 800
+
+
+def test_content_width_falls_back_on_an_unmeasured_window():
+    # Tk never mapped it, or there is no screen at all (the fakes): the default
+    # stands in for both rather than a one-pixel window.
+    assert layout.content_width(0, screen_width=1920) == layout.DEFAULT_CONTENT_WIDTH
+    assert layout.content_width(900, screen_width=1) == layout.DEFAULT_CONTENT_WIDTH
+
+
+# ------------------------------------------------------------- WindowFitter
+class FakeWindow:
+    """A dialog whose requested size and screen the tests drive directly."""
+
+    def __init__(self, *, reqwidth=800, reqheight=400, screen=(1920, 1080)):
+        self._reqwidth = reqwidth
+        self._reqheight = reqheight
+        self._screen = screen
+        self._geometry = ""
+        self._bindings: dict[str, object] = {}
+        self.laid_out = 0
+
+    def bind(self, sequence, handler=None, add=None):
+        """Record the handler, as Tk does for a widget binding."""
+        self._bindings[sequence] = handler
+
+    def update_idletasks(self) -> None:
+        """Count the layout passes, so a fit that never reads the widget shows."""
+        self.laid_out += 1
+
+    def winfo_reqwidth(self) -> int:
+        """Report the width the content asks for."""
+        return self._reqwidth
+
+    def winfo_reqheight(self) -> int:
+        """Report the height the content asks for."""
+        return self._reqheight
+
+    def winfo_screenwidth(self) -> int:
+        """Report the display the window is on."""
+        return self._screen[0]
+
+    def winfo_screenheight(self) -> int:
+        """Report the display the window is on."""
+        return self._screen[1]
+
+    def geometry(self, value: str) -> None:
+        """Record the applied geometry, as ``wm geometry`` would set it."""
+        self._geometry = value
+
+    @property
+    def width(self) -> int:
+        """Return the applied width, parsed back out of the geometry string."""
+        return int(self._geometry.split("x", 1)[0]) if self._geometry else 0
+
+    def resize_to(self, width: int) -> None:
+        """Report a ``<Configure>`` at *width*, as a user dragging an edge does."""
+        if self._geometry:
+            self._geometry = f"{width}x{self._geometry.split('x', 1)[1]}"
+        handler = self._bindings.get("<Configure>")
+        if handler is not None:
+            handler(SimpleNamespace(width=width))
+
+
+def make_window_fitter(**kwargs):
+    """Return a fake parent, a fake dialog and a fitter over both.
+
+    Keyword arguments go to the fake dialog, except ``height`` which is the one
+    :class:`WindowFitter` option that is not a metric of the widget.
+    """
+    parent = SimpleNamespace(winfo_rootx=lambda: 0, winfo_rooty=lambda: 0)
+    parent.winfo_width = lambda: 1000
+    parent.winfo_height = lambda: 800
+    height = kwargs.pop("height", None)
+    window = FakeWindow(**kwargs)
+    return parent, window, layout.WindowFitter(window, parent=parent, height=height)
+
+
+def test_the_window_opens_at_the_width_its_content_asks_for():
+    _parent, window, fitter = make_window_fitter(reqwidth=940, reqheight=500)
+
+    fitter.fit()
+
+    assert window.width == 940
+    assert window._geometry == "940x500+30+100"
+
+
+def test_the_window_is_centred_over_its_parent():
+    parent, window, fitter = make_window_fitter(reqwidth=500, reqheight=400)
+    parent.winfo_rootx = lambda: 100
+    parent.winfo_rooty = lambda: 50
+
+    fitter.fit()
+
+    # Horizontal thirds, as the other dialogs have always done it.
+    x = 100 + (1000 - 500) // 2
+    y = 50 + (800 - 400) // 3
+    assert window._geometry == f"500x400+{x}+{y}"
+
+
+def test_the_window_never_opens_wider_than_its_screen():
+    _parent, window, fitter = make_window_fitter(reqwidth=4000, screen=(1280, 800))
+
+    fitter.fit()
+
+    assert window.width == round(1280 * 0.72)
+
+
+def test_the_window_grows_when_its_content_does():
+    # The runs tab is fed asynchronously, so the tree inside the dialog can become
+    # wider than the width the dialog opened at. A window that then has to be
+    # widened by hand is the defect this fixes.
+    _parent, window, fitter = make_window_fitter(reqwidth=700, reqheight=400)
+    fitter.fit()
+    assert window.width == 700
+
+    window._reqwidth = 940
+    fitter.fit()
+
+    assert window.width == 940
+
+
+def test_the_window_never_shrinks_by_itself():
+    # A narrower snapshot must not shrink the window under the user's cursor, nor
+    # undo a width they chose.
+    _parent, window, fitter = make_window_fitter(reqwidth=940, reqheight=400)
+    fitter.fit()
+    before = window._geometry
+
+    window._reqwidth = 700
+    fitter.fit()
+
+    assert window._geometry == before
+    assert window.width == 940
+
+
+def test_resizing_the_window_by_hand_ends_the_auto_fitting():
+    _parent, window, fitter = make_window_fitter(reqwidth=700, reqheight=400)
+    fitter.fit()
+
+    # The user dragged an edge: the reported width is not the one we applied.
+    window.resize_to(820)
+    assert fitter.locked is True
+
+    window._reqwidth = 1200
+    fitter.fit()
+
+    assert window.width == 820
+
+
+def test_the_fitters_own_geometry_does_not_lock_it():
+    # The ``<Configure>`` our own ``geometry()`` triggers reports back that same
+    # width, and must not be mistaken for the user taking over.
+    _parent, window, fitter = make_window_fitter(reqwidth=940, reqheight=500)
+    fitter.fit()
+
+    window.resize_to(940)
+
+    assert fitter.locked is False
+
+
+def test_the_initial_layout_does_not_lock_the_fitter():
+    # Tk lays the dialog out once on its own before anything is applied; that
+    # says nothing about the user's intent.
+    _parent, window, fitter = make_window_fitter(reqwidth=700, reqheight=400)
+
+    window.resize_to(430)
+    fitter.fit()
+
+    assert fitter.locked is False
+    assert window.width == 700
+
+
+def test_a_window_can_keep_a_fixed_height():
+    # The supervision window holds a block of container logs: its height must
+    # stay the screen-derived one it had, and only the width follows the content.
+    _parent, window, fitter = make_window_fitter(reqwidth=1100, reqheight=9000, height=680)
+    fitter.fit()
+
+    # The 9000px the logs would have asked for is ignored; the width still follows
+    # the content.
+    assert window._geometry == "1100x680+0+40"
+    assert window.width == 1100
+
+
+def test_the_fitter_survives_a_window_it_cannot_measure():
+    class Broken:
+        """A dialog whose geometry is unavailable, as on a half-built window."""
+
+        def bind(self, sequence, handler=None, add=None):
+            """Accept the binding without keeping it."""
+
+        def update_idletasks(self) -> None:
             """Fail the way a destroyed widget does."""
             raise RuntimeError("invalid command name")
 
-    fitter._tree = Unmeasurable(None, columns=("detail",))
-    fitter.rows()
+    fitter = layout.WindowFitter(Broken(), parent=SimpleNamespace())
+    fitter.fit()  # must not raise
 
-    assert fitter.widths() == {}
-
-
-def test_a_pane_wider_than_every_maximum_leaves_space_beside_the_table():
-    widths = layout.column_widths(
-        [],
-        available=1000,
-        headings={"message": "Message"},
-        minimums={"message": 50},
-        maximums={"message": 80},
-        flexible=("message",),
-        measure=measure,
-    )
-    # Every column sits on its declared bound; the rest of the pane stays empty
-    # rather than a column growing past what it was allowed to take.
-    assert widths == {"message": 80}
-
-
-def test_two_elastic_columns_yield_in_order():
-    headings = {"a": "A", "b": "B"}
-    minimums = {"a": 50, "b": 50}
-    maximums = {"a": 400, "b": 400}
-    # "a" holds a long value and "b" is empty: the pane is too narrow for both
-    # content widths, and it is "a" that gives its room back — "b" never pays for
-    # a value it does not hold.
-    widths = layout.column_widths(
-        [{"a": "x" * 30, "b": ""}],
-        available=200,
-        headings=headings,
-        minimums=minimums,
-        maximums=maximums,
-        flexible=("a", "b"),
-        measure=measure,
-    )
-    assert widths == {"a": 100, "b": 100}
-
-
-def test_a_table_without_a_flexible_column_keeps_its_content_widths():
-    headings = {"visibility": "Visibilité", "branch": "Branche"}
-    widths = layout.column_widths(
-        [{"visibility": "public", "branch": "main"}, {"visibility": "privé", "branch": "dev"}],
-        available=800,
-        headings=headings,
-        minimums={"visibility": 80, "branch": 60},
-        maximums={"visibility": 130, "branch": 220},
-        flexible=(),
-        measure=measure,
-    )
-    # Nothing is designated elastic, so no column grows past its content for the
-    # pane's sake: the surplus is only handed to the columns, in proportion to
-    # the room they were each allowed, and they stop on their bounds.
-    assert widths == {"visibility": 130, "branch": 220}
-    assert sum(widths.values()) < 800
-    assert widths["visibility"] > measure("privé") + layout._CELL_PADDING
+    assert fitter.locked is False

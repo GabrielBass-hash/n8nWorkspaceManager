@@ -16,7 +16,7 @@ from .. import git
 from ..core.models import DbConfig, DbMode, ServerConfig
 from ..database import has_db_layout
 from ..github import auth
-from .layout import ColumnFitter, bind_wraplength
+from .layout import ColumnFitter, WindowFitter, bind_wraplength
 from .theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -33,7 +33,8 @@ from .theme import (
 # Repository picker: the label column holds ``owner/repo`` and the other three
 # hold "public"/"privé", a branch name and a date. The fitter sizes each to what
 # it actually contains (see ``gui.layout``) instead of reserving a fixed 280px
-# for the name while 90px sit on a five-letter word.
+# for the name while 90px sit on a five-letter word. The maximums are sized to
+# add up to a dialog that fits a display.
 _REPO_COLUMNS = ("visibility", "branch", "updated")
 _REPO_HEADINGS = {
     "#0": "Dépôt",
@@ -42,7 +43,7 @@ _REPO_HEADINGS = {
     "updated": "Mis à jour",
 }
 _REPO_MINIMUMS = {"#0": 200, "visibility": 80, "branch": 90, "updated": 90}
-_REPO_MAXIMUMS = {"#0": 900, "visibility": 130, "branch": 220, "updated": 150}
+_REPO_MAXIMUMS = {"#0": 520, "visibility": 130, "branch": 180, "updated": 150}
 
 
 @dataclass
@@ -82,9 +83,20 @@ class GitHubCreatePlan:
 
 
 def _finish_dialog_setup(
-    dialog: tk.Toplevel, root: tk.Tk, *, focus: tk.Widget | None = None
+    dialog: tk.Toplevel,
+    root: tk.Tk,
+    *,
+    focus: tk.Widget | None = None,
+    fitter: WindowFitter | None = None,
 ) -> None:
-    """Center a modal dialog over its parent, grab input and focus a widget."""
+    """Center a modal dialog over its parent, grab input and focus a widget.
+
+    The width is the one the dialog's content asks for, bounded by the screen and
+    never shrunk afterwards: that is what ``layout.WindowFitter`` is for, and it
+    owns the whole geometry string (position included) so a width is never applied
+    twice. A dialog whose content is fed asynchronously — the CI runs tab — hands
+    in the very fitter it will ask to grow, so both share one history.
+    """
     # A dialog can be the first window against a freshly created Tk root (the
     # creation flow opens directly from the top bar); make sure the named UI
     # fonts exist on that interpreter so FONT_* strings render correctly.
@@ -94,9 +106,9 @@ def _finish_dialog_setup(
         dialog.transient(root)
         dialog.grab_set()
         dialog.update_idletasks()
-        x = root.winfo_rootx() + max((root.winfo_width() - dialog.winfo_reqwidth()) // 2, 0)
-        y = root.winfo_rooty() + max((root.winfo_height() - dialog.winfo_reqheight()) // 3, 0)
-        dialog.geometry(f"+{x}+{y}")
+        if fitter is None:
+            fitter = WindowFitter(dialog, parent=root)
+        fitter.fit()
         if focus is not None:
             focus.focus_set()
     except Exception:
@@ -301,7 +313,7 @@ def prompt_ask_string(
 
     result: str | None = None
 
-    tk.Label(
+    prompt_label = tk.Label(
         dialog,
         text=prompt,
         bg=APP_BACKGROUND,
@@ -309,8 +321,9 @@ def prompt_ask_string(
         font=FONT_META,
         anchor="w",
         justify="left",
-        wraplength=380,
-    ).pack(fill="x", padx=18, pady=(16, 8))
+    )
+    prompt_label.pack(fill="x", padx=18, pady=(16, 8))
+    bind_wraplength(prompt_label, minimum=200, padding=36)
     value_var = tk.StringVar(value=initial)
     entry = tk.Entry(
         dialog,
@@ -373,7 +386,7 @@ def prompt_server_config(
 
     result: ServerConfig | None = None
 
-    tk.Label(
+    intro = tk.Label(
         dialog,
         text=f"Déploiement serveur pour « {workspace_name} »\n"
         "Le serveur reçoit vos pipelines via Git (branche « main ») — "
@@ -383,8 +396,9 @@ def prompt_server_config(
         font=FONT_META,
         anchor="w",
         justify="left",
-        wraplength=420,
-    ).pack(fill="x", padx=18, pady=(16, 8))
+    )
+    intro.pack(fill="x", padx=18, pady=(16, 8))
+    bind_wraplength(intro, minimum=200, padding=36)
 
     def field(label: str, value: str) -> tuple[tk.StringVar, tk.Entry]:
         tk.Label(
@@ -581,7 +595,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
         return var, entry
 
     if locked:
-        tk.Label(
+        locked_hint = tk.Label(
             dialog,
             text="Paramètres figés pour une base déjà en service : basculez sur "
             "« Aucune base » puis « Locale » pour les régénérer.",
@@ -589,9 +603,10 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
             fg=ACCENT,
             font=FONT_SUBTITLE,
             anchor="w",
-            wraplength=420,
             justify="left",
-        ).pack(fill="x", padx=18, pady=(0, 6))
+        )
+        locked_hint.pack(fill="x", padx=18, pady=(0, 6))
+        bind_wraplength(locked_hint, minimum=200, padding=36)
 
     db_var, db_name_entry = field(
         "Base de données :", current.database_name or "data", enabled=not locked
@@ -679,7 +694,7 @@ def prompt_git_config(root: tk.Tk, workspace_name: str) -> GitConfigChoice | Non
 
     result: GitConfigChoice | None = None
 
-    tk.Label(
+    url_intro = tk.Label(
         dialog,
         text=f"URL du dépôt distant pour « {workspace_name} »\n"
         "Laisser vide pour un dépôt local uniquement :",
@@ -688,8 +703,9 @@ def prompt_git_config(root: tk.Tk, workspace_name: str) -> GitConfigChoice | Non
         font=FONT_META,
         anchor="w",
         justify="left",
-        wraplength=380,
-    ).pack(fill="x", padx=18, pady=(16, 8))
+    )
+    url_intro.pack(fill="x", padx=18, pady=(16, 8))
+    bind_wraplength(url_intro, minimum=200, padding=36)
     url_var = tk.StringVar(value="")
     url_entry = tk.Entry(
         dialog,
@@ -807,7 +823,7 @@ def prompt_github_create(
         font=FONT_META,
     ).pack(fill="x", padx=18, pady=(0, 10))
 
-    tk.Label(
+    token_hint = tk.Label(
         dialog,
         text="Token GitHub (PAT « repo » ou fine-grained avec Administration) :",
         bg=APP_BACKGROUND,
@@ -815,8 +831,9 @@ def prompt_github_create(
         font=FONT_SUBTITLE,
         anchor="w",
         justify="left",
-        wraplength=380,
-    ).pack(fill="x", padx=18)
+    )
+    token_hint.pack(fill="x", padx=18)
+    bind_wraplength(token_hint, minimum=200, padding=36)
     token_var = tk.StringVar(value=token or "")
     token_entry = tk.Entry(
         dialog,
@@ -952,7 +969,7 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
         highlightthickness=0,
         font=FONT_SUBTITLE,
     ).pack(fill="x", padx=18)
-    tk.Label(
+    remember_hint = tk.Label(
         dialog,
         text=(
             "Le token sert à lire vos runs GitHub Actions (permission « Actions »). "
@@ -963,8 +980,9 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
         font=FONT_SUBTITLE,
         anchor="w",
         justify="left",
-        wraplength=380,
-    ).pack(fill="x", padx=18, pady=(4, 12))
+    )
+    remember_hint.pack(fill="x", padx=18, pady=(4, 12))
+    bind_wraplength(remember_hint, minimum=200, padding=36)
 
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
@@ -1146,8 +1164,10 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
         font=FONT_SUBTITLE,
         anchor="w",
         justify="left",
-        wraplength=380,
     )
+    # The branch list echoes GitHub's answer verbatim, errors included: it wraps
+    # at the dialog's real width rather than at a fixed number of pixels.
+    bind_wraplength(status, minimum=200, padding=36)
     status.pack(fill="x", padx=18)
 
     def load_branches() -> None:
@@ -1273,7 +1293,7 @@ def prompt_github_repo_picker(
             name,
             width=_REPO_MINIMUMS[name],
             minwidth=_REPO_MINIMUMS[name],
-            stretch=name == "#0",
+            stretch=False,
             anchor="w",
         )
     fitter = ColumnFitter(
@@ -1282,9 +1302,11 @@ def prompt_github_repo_picker(
         headings=_REPO_HEADINGS,
         minimums=_REPO_MINIMUMS,
         maximums=_REPO_MAXIMUMS,
-        flexible="#0",
         measure=text_measure(dialog, FONT_META),
     )
+    # The dialog opens as wide as "owner/repo" plus its three fields really need,
+    # bounded by the screen, and grows if a later page of repositories is wider.
+    window_fitter = WindowFitter(dialog, parent=root)
     tree.pack(fill="both", expand=True, padx=18, pady=(0, 6))
 
     # Sorted most-recently-updated first: matches the GitHub web default.
@@ -1414,6 +1436,6 @@ def prompt_github_repo_picker(
 
     dialog.bind("<Return>", submit)
     dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=branch_entry)
+    _finish_dialog_setup(dialog, root, focus=branch_entry, fitter=window_fitter)
     dialog.wait_window()
     return result

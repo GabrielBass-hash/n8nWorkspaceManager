@@ -37,7 +37,7 @@ from ..core.models import Workspace
 from ..monitoring.events import Event
 from ..monitoring.store import RETENTION_DAYS, EventStore
 from ..remote import RemoteExecutionStatus, RemoteHealth
-from .layout import ColumnFitter, bind_wraplength, screen_fraction_size, screen_size
+from .layout import ColumnFitter, WindowFitter, bind_wraplength, screen_fraction_size, screen_size
 from .theme import (
     ACCENT,
     APP_BACKGROUND,
@@ -75,7 +75,9 @@ _LEVEL_TAGS = {
 # Journal table: columns, headings and per-column bounds handed to the fitter.
 # Nothing here is a width: the table is sized to whatever the rows hold (see
 # ``gui.layout``), and these bounds only say how small a column may get before
-# it stops being readable, and how large before it stops being a column.
+# it stops being readable, and how large before it stops being a column. The
+# maximums are what keep the *sum* — the width a hosting window is asked to open
+# at — inside a display, so a long message is bounded rather than unbounded.
 _JOURNAL_COLUMNS = ("time", "level", "name", "message")
 _JOURNAL_HEADINGS = {
     "time": "Heure",
@@ -84,7 +86,7 @@ _JOURNAL_HEADINGS = {
     "message": "Message",
 }
 _JOURNAL_MINIMUMS = {"time": 80, "level": 60, "name": 90, "message": 200}
-_JOURNAL_MAXIMUMS = {"time": 140, "level": 96, "name": 280, "message": 4000}
+_JOURNAL_MAXIMUMS = {"time": 120, "level": 90, "name": 220, "message": 760}
 
 # The supervision window is a *reader* (logs, deploy history, executions), so it
 # follows the screen the same way the main window does instead of asking for a
@@ -405,7 +407,7 @@ class MonitoringPanel(tk.Frame):
                 name,
                 width=_JOURNAL_MINIMUMS[name],
                 minwidth=_JOURNAL_MINIMUMS[name],
-                stretch=name == "message",
+                stretch=False,
                 anchor="w",
             )
         self._fitter = ColumnFitter(
@@ -414,7 +416,6 @@ class MonitoringPanel(tk.Frame):
             headings=_JOURNAL_HEADINGS,
             minimums=_JOURNAL_MINIMUMS,
             maximums=_JOURNAL_MAXIMUMS,
-            flexible="message",
             measure=text_measure(self, FONT_META),
         )
         for tag, color in (
@@ -660,6 +661,11 @@ class ServerPanel(tk.Frame):
     def __init__(self, parent: tk.Misc) -> None:
         """Build the snapshot view."""
         super().__init__(parent, bg=APP_BACKGROUND)
+        # Set by the host when the snapshot's width drives a window geometry. The
+        # reads land asynchronously, so a later snapshot can be wider than the
+        # window that opened around it; the panel says so through this callback
+        # rather than reaching for the window manager itself.
+        self.fitted_cb: Callable[[], None] | None = None
         self._label = tk.Label(
             self,
             text=server_snapshot_text(ServerSnapshot()),
@@ -686,6 +692,8 @@ class ServerPanel(tk.Frame):
             text=server_snapshot_text(snapshot),
             fg=TEXT_PRIMARY if snapshot.healthy else TEXT_MUTED,
         )
+        if self.fitted_cb is not None:
+            self.fitted_cb()
 
 
 def prompt_server_supervision(
@@ -706,9 +714,11 @@ def prompt_server_supervision(
     """
     window = tk.Toplevel(root)
     window.title(f"Supervision du serveur — {workspace_name}")
-    # Sized against the screen rather than a fixed box: the snapshot is mostly
-    # text, so the reader wants every pixel the display can spare, while a small
-    # laptop still gets a window that fits on it.
+    # The height is decided once, against the screen: the snapshot is mostly a
+    # block of container logs, so the reader wants a tall window on a big display
+    # while a small laptop still gets one that fits. Only the width follows the
+    # content — this window is fed asynchronously, and a wider snapshot (a long
+    # compose line, a failed command) must not be clipped.
     width, height = screen_fraction_size(
         *screen_size(root),
         fraction=_SERVER_WINDOW_FRACTION,
@@ -716,7 +726,7 @@ def prompt_server_supervision(
         maximum=_SERVER_WINDOW_MAXIMUM,
         default=_SERVER_WINDOW_DEFAULT,
     )
-    window.geometry(f"{width}x{height}")
+    window_fitter = WindowFitter(window, parent=root, height=height)
     # Never a floor larger than the box itself: a minsize above the geometry
     # would make Tk grow the window on the first map.
     window.minsize(min(_SERVER_WINDOW_MINIMUM[0], width), min(_SERVER_WINDOW_MINIMUM[1], height))
@@ -753,10 +763,16 @@ def prompt_server_supervision(
 
     panel = ServerPanel(window)
     panel.pack(fill="both", expand=True)
+    # A snapshot is fetched off the Tk thread and can be wider than the window
+    # that opened for it: let every render ask the window to grow.
+    panel.fitted_cb = window_fitter.fit
     # Exposed so the host can push a snapshot it fetched in a background worker
     # (SSH reads are far too slow to run on the Tk thread).
     window.server_panel = panel  # type: ignore[attr-defined]
     window.bind("<Escape>", lambda _event: window.destroy())
+    # The panel is in place: open the window at the width the snapshot needs
+    # (the synchronous ``read`` below may grow it further).
+    window_fitter.fit()
     refresh()
     return window
 

@@ -34,7 +34,7 @@ from ..core.models import Workspace
 from ..workspaces import ci, ci_runs
 from ..workspaces.manager import WorkspaceManager
 from .ci_runs import RunsPanel
-from .layout import ColumnFitter, bind_wraplength
+from .layout import ColumnFitter, WindowFitter, bind_wraplength
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -52,11 +52,13 @@ _COLOR_DISABLED = TEXT_MUTED
 # Pipeline selection tree: the label column holds the export file name and its
 # indented node names, "Détails" the node count and the reason a pipeline is
 # blocked. Both are sized to their content by the fitter (see ``gui.layout``),
-# so a short reason stops reserving the room of a long export name.
+# so a short reason stops reserving the room of a long export name. The
+# maximums are sized to add up to a dialog that fits a display, since this tree
+# and the runs tree share one.
 _SELECTION_COLUMNS = ("detail",)
 _SELECTION_HEADINGS = {"#0": "Pipeline", "detail": "Détails"}
 _SELECTION_MINIMUMS = {"#0": 260, "detail": 180}
-_SELECTION_MAXIMUMS = {"#0": 480, "detail": 3000}
+_SELECTION_MAXIMUMS = {"#0": 420, "detail": 520}
 
 # Per-pipeline state markers. Plain ASCII on purpose: the box glyphs ☑/☐
 # (U+2610/U+2611) and the en dash fallback are absent from the Linux font
@@ -72,8 +74,14 @@ RUNS_POLL_ACTIVE_MS = 5000
 RUNS_POLL_IDLE_MS = 30000
 
 
-def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk) -> None:
-    """Center a modal dialog over its parent and make it modal (best-effort)."""
+def _finish_dialog_setup(
+    dialog: tk.Toplevel, root: tk.Tk, *, fitter: WindowFitter | None = None
+) -> None:
+    """Center a modal dialog over its parent and make it modal (best-effort).
+
+    The width is the one the content asks for, bounded by the screen; a dialog
+    fed asynchronously hands in the fitter it will keep asking to grow.
+    """
     # Same guarantee as gui/dialogs: a dialog can own its interpreter's first
     # font registration, so make the named UI fonts resolvable on that root.
     with contextlib.suppress(Exception):
@@ -82,6 +90,9 @@ def _finish_dialog_setup(dialog: tk.Toplevel, root: tk.Tk) -> None:
         dialog.transient(root)
         dialog.grab_set()
         dialog.update_idletasks()
+        if fitter is None:
+            fitter = WindowFitter(dialog, parent=root)
+        fitter.fit()
     except Exception:
         pass
 
@@ -173,6 +184,11 @@ def prompt_ci_workflows(
     dialog.title("Tests GitHub Actions")
     dialog.configure(bg=APP_BACKGROUND)
     dialog.resizable(True, True)
+    # The dialog opens at the width of the widest table it holds, bounded by the
+    # screen (see ``gui.layout``), and grows if the runs tab later turns out to be
+    # wider than the pipeline tree. Two tables share this window, so the fitter is
+    # asked once for each and keeps the larger of the two.
+    window_fitter = WindowFitter(dialog, parent=root)
 
     result: tuple[set[str], bool] | None = None
     selection = set(ci.read_selection(workspace.workflows_dir))
@@ -220,7 +236,7 @@ def prompt_ci_workflows(
             name,
             width=_SELECTION_MINIMUMS[name],
             minwidth=_SELECTION_MINIMUMS[name],
-            stretch=name == "#0",
+            stretch=False,
             anchor="w",
         )
     fitter = ColumnFitter(
@@ -229,7 +245,6 @@ def prompt_ci_workflows(
         headings=_SELECTION_HEADINGS,
         minimums=_SELECTION_MINIMUMS,
         maximums=_SELECTION_MAXIMUMS,
-        flexible="#0",
         measure=text_measure(dialog, FONT_META),
     )
     tree.configure(selectmode="none")
@@ -402,6 +417,9 @@ def prompt_ci_workflows(
             run=(lambda: None) if runs_run is not None else None,
         )
         panel.pack(fill="both", expand=True)
+        # The runs tab can turn out wider than the pipeline tree, and its
+        # snapshots land asynchronously: let each render ask the window to grow.
+        panel.fitted_cb = window_fitter.fit
         panel.apply(runs_source())
         if runs_refresh is not None:
             panel.refresh_cb = lambda: runs_refresh(panel)
@@ -415,7 +433,7 @@ def prompt_ci_workflows(
             panel.run_cb = lambda: runs_run(panel)
 
     update_caption()
-    _finish_dialog_setup(dialog, root)
+    _finish_dialog_setup(dialog, root, fitter=window_fitter)
     dialog.wait_window()
     return result
 
@@ -454,7 +472,7 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
         font=FONT_META,
     )
     ref_entry.pack(fill="x", padx=18, pady=(0, 6))
-    tk.Label(
+    intro = tk.Label(
         dialog,
         text=(
             "GitHub Actions exécute alors les pipelines sélectionnées sur cette "
@@ -465,8 +483,9 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
         font=FONT_META,
         anchor="w",
         justify="left",
-        wraplength=360,
-    ).pack(fill="x", padx=18, pady=(0, 12))
+    )
+    intro.pack(fill="x", padx=18, pady=(0, 12))
+    bind_wraplength(intro, minimum=200, padding=36)
 
     buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
     buttons.pack(fill="x", padx=18, pady=(0, 16))
@@ -528,9 +547,8 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
     dialog.title("Credentials CI")
     dialog.configure(bg=APP_BACKGROUND)
     dialog.resizable(True, True)
-    _finish_dialog_setup(dialog, root)
 
-    tk.Label(
+    intro = tk.Label(
         dialog,
         text=(
             "Cochez les credentials n8n à inclure dans les tests GitHub Actions. "
@@ -540,9 +558,11 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-        wraplength=760,
-    ).pack(fill="x", padx=18, pady=(14, 2))
-    tk.Label(
+        justify="left",
+    )
+    intro.pack(fill="x", padx=18, pady=(14, 2))
+    bind_wraplength(intro, minimum=200, padding=36)
+    secret_hint = tk.Label(
         dialog,
         text=(
             "Créez le secret GitHub Actions « N8N_CI_CREDENTIALS » sur votre "
@@ -553,8 +573,10 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         fg=TEXT_MUTED,
         font=FONT_META,
         anchor="w",
-        wraplength=760,
-    ).pack(fill="x", padx=18, pady=(0, 8))
+        justify="left",
+    )
+    secret_hint.pack(fill="x", padx=18, pady=(0, 8))
+    bind_wraplength(secret_hint, minimum=200, padding=36)
 
     rows: list[tuple[tk.IntVar, str, str]] = []
     for item in sorted(listed, key=lambda credential: str(credential.get("name") or "")):
@@ -639,4 +661,6 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
             command=command,
         ).pack(side="right", padx=(6, 0))
 
+    # Every child is in: the dialog opens as wide as this prose really needs.
+    _finish_dialog_setup(dialog, root)
     dialog.wait_window()

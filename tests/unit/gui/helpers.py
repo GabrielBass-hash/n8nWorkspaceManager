@@ -246,6 +246,12 @@ class FakeTk:
             self._bindings: dict[str, object] = {}
             self.destroyed = False
             self._clipboard = ""
+            # What the dialog's content asks for, and the display it is on: the
+            # window fitters read both to pick a geometry, and a fake cannot
+            # measure a font or ask a window manager.
+            self._reqwidth = 1
+            self._reqheight = 1
+            self._screen = (1, 1)
             # Pending ``after`` timers, keyed by id (tests drive them manually).
             self._after_callbacks: list[tuple[int, object]] = []
             FakeTk.Toplevel.instances.append(self)
@@ -282,6 +288,35 @@ class FakeTk:
 
         def geometry(self, value: str) -> None:
             self._geometry = value
+
+        def winfo_reqwidth(self) -> int:
+            """Report the width the dialog's children ask for.
+
+            Tests set this to whatever the content of a dialog would be: the
+            window fitters read it to decide the geometry, and the fakes cannot
+            measure a font.
+            """
+            return self._reqwidth
+
+        def winfo_reqheight(self) -> int:
+            """Report the height the dialog's children ask for."""
+            return self._reqheight
+
+        def winfo_screenwidth(self) -> int:
+            """Report the width of the display the dialog is on."""
+            return self._screen[0]
+
+        def winfo_screenheight(self) -> int:
+            """Report the height of the display the dialog is on."""
+            return self._screen[1]
+
+        def winfo_width(self) -> int:
+            """Report the mapped width, parsed back out of the applied geometry."""
+            return int(self._geometry.split("x", 1)[0]) if self._geometry else self._reqwidth
+
+        def winfo_height(self) -> int:
+            """Report the mapped height, parsed back out of the applied geometry."""
+            return int(self._geometry.split("x", 1)[1].split("+", 1)[0]) if self._geometry else 0
 
         def bind(self, sequence: str, handler=None, add: bool | str | None = None) -> None:
             if add:
@@ -457,6 +492,15 @@ class FakeTtk:
             """Record the pushed options so layout tests can assert on them."""
             self._columns[column] = dict(kwargs)
 
+        def column_requests(self) -> dict[str, dict[str, object]]:
+            """Return the full last push to each column, ``width`` included.
+
+            A tree asks Tk for its *minimums* when it is built and is then pushed
+            the widths its content needs, so the requested box (``width`` and
+            ``minwidth``) is what a test needs to read, not just the last width.
+            """
+            return {name: dict(options) for name, options in self._columns.items()}
+
         def column_widths(self) -> dict[str, int]:
             """Return the last width pushed to each column."""
             return {name: int(options.get("width", 0)) for name, options in self._columns.items()}
@@ -586,6 +630,11 @@ class FakeRoot:
         self._next_after_id = 0
         self._protocol_handlers: dict[str, object] = {}
         self.destroyed = False
+        # The mapped geometry and the display, both settable by the tests: the
+        # dialogs are centred over the root and bounded by the screen.
+        self._width = 1
+        self._height = 1
+        self._screen = (1, 1)
 
     def after(self, delay: int, callback) -> int:
         after_id = self._next_after_id
@@ -619,6 +668,30 @@ class FakeRoot:
 
     def minsize(self, *_args) -> None:
         pass
+
+    def winfo_rootx(self) -> int:
+        """Report the root's position, as a window manager would."""
+        return 0
+
+    def winfo_rooty(self) -> int:
+        """Report the root's position, as a window manager would."""
+        return 0
+
+    def winfo_width(self) -> int:
+        """Report the root's mapped width; tests set it to place a dialog."""
+        return self._width
+
+    def winfo_height(self) -> int:
+        """Report the root's mapped height; tests set it to place a dialog."""
+        return self._height
+
+    def winfo_screenwidth(self) -> int:
+        """Report the width of the display the root is on."""
+        return self._screen[0]
+
+    def winfo_screenheight(self) -> int:
+        """Report the height of the display the root is on."""
+        return self._screen[1]
 
     def configure(self, **_kwargs) -> None:
         pass

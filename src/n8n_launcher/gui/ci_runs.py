@@ -60,11 +60,12 @@ _TAG_SELECTED = "#1e3056"
 # Runs tree: the label column carries the run, job, step and pipeline names —
 # deeply indented, so it needs real room — while "Détails" holds a short status
 # or timestamp. Both are sized to their content by the fitter; see
-# ``gui.layout``.
+# ``gui.layout``. These two tables share a dialog, so their maximums are sized to
+# add up to a dialog that fits a display.
 _RUNS_COLUMNS = ("detail",)
 _RUNS_HEADINGS = {"#0": "Run / job / pipeline", "detail": "Détails"}
 _RUNS_MINIMUMS = {"#0": 240, "detail": 160}
-_RUNS_MAXIMUMS = {"#0": 460, "detail": 3000}
+_RUNS_MAXIMUMS = {"#0": 420, "detail": 520}
 
 # Human labels for the live *step* rows shown under an in-progress job.
 _STEP_LABELS: dict[str, str] = {
@@ -222,6 +223,13 @@ class RunsPanel(tk.Frame):
         self.refresh_cb = refresh
         self.open_run_cb = open_run
         self.run_cb = run
+        # Set by the host when the panel's width drives a window geometry. The
+        # runs tree is fed asynchronously, so a snapshot can arrive that is wider
+        # than the dialog that opened around it; the panel says so through this
+        # callback rather than reaching for the window manager itself. Same
+        # late-binding as the other callbacks: it can only be set once the panel
+        # exists, which is after the dialog it fits.
+        self.fitted_cb: Callable[[], None] | None = None
         self._expanded: set[str] = set()
         self._active: set[str] = set()
         self._row_runs: dict[str, ci_runs.RunSummary] = {}
@@ -261,13 +269,13 @@ class RunsPanel(tk.Frame):
         for name, heading in _RUNS_HEADINGS.items():
             self.tree.heading(name, text=heading)
         for name in ("#0", *_RUNS_COLUMNS):
-            # Request the minimum up front so the dialog opens only as wide as
-            # the labels need; the fitter re-fits on the first real layout.
+            # Request the minimum up front: the dialog opens only as wide as
+            # the labels need; the fitter re-fits on the first real render.
             self.tree.column(
                 name,
                 width=_RUNS_MINIMUMS[name],
                 minwidth=_RUNS_MINIMUMS[name],
-                stretch=name == "detail",
+                stretch=False,
                 anchor="w",
             )
         self._fitter = ColumnFitter(
@@ -276,7 +284,6 @@ class RunsPanel(tk.Frame):
             headings=_RUNS_HEADINGS,
             minimums=_RUNS_MINIMUMS,
             maximums=_RUNS_MAXIMUMS,
-            flexible="detail",
             measure=text_measure(self, FONT_META),
         )
         for tag, color in (
@@ -349,7 +356,7 @@ class RunsPanel(tk.Frame):
                     text += "\n" + " · ".join(snapshot.messages)
                 self._empty.config(text=text)
             self._restore_selection(selected)
-            self._fitter.rows()
+            self._refit()
             return
 
         if snapshot.messages:
@@ -453,9 +460,17 @@ class RunsPanel(tk.Frame):
                     )
             self.tree.item(run_iid, open=active_run or run_iid in self._expanded)
         self._restore_selection(selected)
-        # Every label is in: size the columns to them, so the nested step and
-        # pipeline rows get the room their (indented) names ask for.
+        self._refit()
+
+    def _refit(self) -> None:
+        """Size the columns to the rows just rendered, then let the host resize.
+
+        Every label is in by the time this runs, so the nested step and pipeline
+        rows get the room their (indented) names ask for.
+        """
         self._fitter.rows()
+        if self.fitted_cb is not None:
+            self.fitted_cb()
 
     def _restore_selection(self, selected: tuple[str, ...] | list[str]) -> None:
         """Restore a selected row when its stable id survived the refresh."""

@@ -1358,20 +1358,19 @@ def _open_repo_picker(gui_mocks, repos):
     return tree, status
 
 
-def test_repo_picker_asks_only_for_its_minimum_widths(gui_mocks) -> None:
+def test_repo_picker_tree_is_built_at_its_minimum_widths(gui_mocks) -> None:
     # Four short fields, not a 280px guess for a name that may be 60 characters
-    # and a 120px date column: the dialog sizes itself to what it lists.
+    # and a 120px date column: the tree asks Tk for its minimums, and the width
+    # it really needs is pushed once the repositories are in.
     tree, _status = _open_repo_picker(
         gui_mocks,
         [{"full_name": "octo/flows", "clone_url": "u", "private": True, "default_branch": "main"}],
     )
 
-    assert tree.column_widths() == {
-        "#0": dialogs._REPO_MINIMUMS["#0"],
-        "visibility": dialogs._REPO_MINIMUMS["visibility"],
-        "branch": dialogs._REPO_MINIMUMS["branch"],
-        "updated": dialogs._REPO_MINIMUMS["updated"],
-    }
+    requests = tree.column_requests()
+    for name in ("#0", "visibility", "branch", "updated"):
+        assert requests[name]["minwidth"] == dialogs._REPO_MINIMUMS[name]
+        assert requests[name]["stretch"] is False
 
 
 def test_repo_picker_columns_follow_the_repository_names(gui_mocks) -> None:
@@ -1387,8 +1386,6 @@ def test_repo_picker_columns_follow_the_repository_names(gui_mocks) -> None:
             }
         ],
     )
-    tree._width = 1000
-    tree._bindings["<Configure>"](SimpleNamespace(width=1000))
 
     widths = tree.column_widths()
     # The repository name is read in full, and the three short fields keep the
@@ -1397,7 +1394,39 @@ def test_repo_picker_columns_follow_the_repository_names(gui_mocks) -> None:
     assert widths["#0"] < dialogs._REPO_MAXIMUMS["#0"]
     for name in ("visibility", "branch", "updated"):
         assert widths[name] >= dialogs._REPO_MINIMUMS[name]
-    assert sum(widths.values()) == 1000
+    # The columns add up to what the content needs, not to the pane's width: a
+    # 1000px-wide dialog and a 600px one lay this table out identically.
+    assert sum(widths.values()) < 1000
+
+
+def test_repo_picker_dialog_opens_at_the_width_its_table_needs(gui_mocks) -> None:
+    # The picker used to open at the sum of the *minimum* column widths, so a long
+    # repository name was clipped: it opens at the content width instead.
+    with (
+        patch.object(FakeTk.Toplevel, "winfo_reqwidth", lambda _self: 1120),
+        patch.object(FakeTk.Toplevel, "winfo_screenwidth", lambda _self: 1920),
+    ):
+        _open_repo_picker(
+            gui_mocks,
+            [{"full_name": "octo/flows", "clone_url": "u", "private": True}],
+        )
+
+    assert gui_mocks.tk.Toplevel.instances[-1]._geometry.startswith("1120x")
+
+
+def test_a_dialog_never_opens_wider_than_its_screen(gui_mocks) -> None:
+    # A long prose label must not open a dialog the reader cannot see: the width
+    # is capped at the launcher's share of the display.
+    with (
+        patch.object(FakeTk.Toplevel, "winfo_reqwidth", lambda _self: 4000),
+        patch.object(FakeTk.Toplevel, "winfo_screenwidth", lambda _self: 1280),
+    ):
+        _open_repo_picker(
+            gui_mocks,
+            [{"full_name": "octo/flows", "clone_url": "u", "private": True}],
+        )
+
+    assert gui_mocks.tk.Toplevel.instances[-1]._geometry.startswith("922x")
 
 
 def test_repo_picker_status_wraps_at_its_own_width(gui_mocks) -> None:
