@@ -16,6 +16,7 @@ from .. import git
 from ..core.models import DbConfig, DbMode, ServerConfig
 from ..database import has_db_layout
 from ..github import auth
+from .layout import ColumnFitter, bind_wraplength
 from .theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -26,7 +27,22 @@ from .theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     configure_fonts,
+    text_measure,
 )
+
+# Repository picker: the label column holds ``owner/repo`` and the other three
+# hold "public"/"privé", a branch name and a date. The fitter sizes each to what
+# it actually contains (see ``gui.layout``) instead of reserving a fixed 280px
+# for the name while 90px sit on a five-letter word.
+_REPO_COLUMNS = ("visibility", "branch", "updated")
+_REPO_HEADINGS = {
+    "#0": "Dépôt",
+    "visibility": "Visibilité",
+    "branch": "Branche par défaut",
+    "updated": "Mis à jour",
+}
+_REPO_MINIMUMS = {"#0": 200, "visibility": 80, "branch": 90, "updated": 90}
+_REPO_MAXIMUMS = {"#0": 900, "visibility": 130, "branch": 220, "updated": 150}
 
 
 @dataclass
@@ -1248,14 +1264,27 @@ def prompt_github_repo_picker(
         show="tree headings",
         height=14,
     )
-    tree.heading("#0", text="Dépôt")
-    tree.heading("visibility", text="Visibilité")
-    tree.heading("branch", text="Branche par défaut")
-    tree.heading("updated", text="Mis à jour")
-    tree.column("#0", width=280, stretch=True)
-    tree.column("visibility", width=90, anchor="w")
-    tree.column("branch", width=150, anchor="w")
-    tree.column("updated", width=120, anchor="w")
+    for name, heading in _REPO_HEADINGS.items():
+        tree.heading(name, text=heading)
+    for name in ("#0", *_REPO_COLUMNS):
+        # Request the minimum up front: the dialog opens as wide as "owner/repo"
+        # plus its three short fields really need, not as wide as a 280px guess.
+        tree.column(
+            name,
+            width=_REPO_MINIMUMS[name],
+            minwidth=_REPO_MINIMUMS[name],
+            stretch=name == "#0",
+            anchor="w",
+        )
+    fitter = ColumnFitter(
+        tree,
+        columns=_REPO_COLUMNS,
+        headings=_REPO_HEADINGS,
+        minimums=_REPO_MINIMUMS,
+        maximums=_REPO_MAXIMUMS,
+        flexible="#0",
+        measure=text_measure(dialog, FONT_META),
+    )
     tree.pack(fill="both", expand=True, padx=18, pady=(0, 6))
 
     # Sorted most-recently-updated first: matches the GitHub web default.
@@ -1278,6 +1307,10 @@ def prompt_github_repo_picker(
                 str(repo.get("updated_at") or "")[:10],
             ),
         )
+
+    # The list is filled: let each column take the width of what it holds, so a
+    # repository name is never cut to make room for "public" or a date.
+    fitter.rows()
 
     tk.Label(
         dialog,
@@ -1305,9 +1338,12 @@ def prompt_github_repo_picker(
         fg=TEXT_MUTED,
         font=FONT_SUBTITLE,
         anchor="w",
-        wraplength=520,
+        wraplength=480,
         justify="left",
     )
+    # The branch list echoes GitHub's answer verbatim, errors included: it wraps
+    # at the dialog's real width instead of a hard-coded 520 pixels.
+    bind_wraplength(status, minimum=200, padding=36)
     status.pack(fill="x", padx=18)
 
     def pick(full_name: str) -> None:

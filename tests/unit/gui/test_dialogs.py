@@ -1,6 +1,7 @@
 """GUI creation-dialog tests: prompt_create_workflow, DB default and click triggers."""
 
 import types
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from helpers import (
@@ -15,7 +16,7 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, ServerConfig
 from n8n_launcher.git import workspace_branch
 from n8n_launcher.github.api import GitHubError
-from n8n_launcher.gui import CreatePlan, LauncherApp
+from n8n_launcher.gui import CreatePlan, LauncherApp, dialogs
 from n8n_launcher.gui.dialogs import (
     GitClonePlan,
     GitConfigChoice,
@@ -1329,3 +1330,83 @@ def test_clone_removes_token_from_config_after_seed(gui_mocks, tmp_path) -> None
     assert workspace.git.remote_url == "https://github.com/octo/flows.git"
     assert workspace.git.branch == workspace_branch(workspace.id)
     assert "ghp_secret" not in str(workspace.to_dict())
+
+
+# --- repository picker sizing -------------------------------------------------
+
+
+def _open_repo_picker(gui_mocks, repos):
+    """Open the repository picker and return its Treeview and status label."""
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.ttk.Treeview.instances.clear()
+    gui_mocks.tk.Label.instances.clear()
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", lambda _self: None),
+    ):
+        prompt_github_repo_picker(
+            FakeRoot(),
+            repos=repos,
+            branches_loader=lambda _path: ["main"],
+        )
+    tree = gui_mocks.ttk.Treeview.instances[0]
+    status = next(
+        label for label in gui_mocks.tk.Label.instances if label._options.get("wraplength")
+    )
+    return tree, status
+
+
+def test_repo_picker_asks_only_for_its_minimum_widths(gui_mocks) -> None:
+    # Four short fields, not a 280px guess for a name that may be 60 characters
+    # and a 120px date column: the dialog sizes itself to what it lists.
+    tree, _status = _open_repo_picker(
+        gui_mocks,
+        [{"full_name": "octo/flows", "clone_url": "u", "private": True, "default_branch": "main"}],
+    )
+
+    assert tree.column_widths() == {
+        "#0": dialogs._REPO_MINIMUMS["#0"],
+        "visibility": dialogs._REPO_MINIMUMS["visibility"],
+        "branch": dialogs._REPO_MINIMUMS["branch"],
+        "updated": dialogs._REPO_MINIMUMS["updated"],
+    }
+
+
+def test_repo_picker_columns_follow_the_repository_names(gui_mocks) -> None:
+    tree, _status = _open_repo_picker(
+        gui_mocks,
+        [
+            {
+                "full_name": "octo/a-very-long-repository-name-for-workflows",
+                "clone_url": "u",
+                "private": True,
+                "default_branch": "production",
+                "updated_at": "2026-09-25T10:00:00Z",
+            }
+        ],
+    )
+    tree._width = 1000
+    tree._bindings["<Configure>"](SimpleNamespace(width=1000))
+
+    widths = tree.column_widths()
+    # The repository name is read in full, and the three short fields keep the
+    # room of their own content ("privé", "production", the date).
+    assert widths["#0"] > dialogs._REPO_MINIMUMS["#0"]
+    assert widths["#0"] < dialogs._REPO_MAXIMUMS["#0"]
+    for name in ("visibility", "branch", "updated"):
+        assert widths[name] >= dialogs._REPO_MINIMUMS[name]
+    assert sum(widths.values()) == 1000
+
+
+def test_repo_picker_status_wraps_at_its_own_width(gui_mocks) -> None:
+    # The status line echoes GitHub's answer verbatim, errors included: it wraps
+    # at the dialog's real width instead of a hard-coded 520 pixels.
+    _tree, status = _open_repo_picker(
+        gui_mocks,
+        [{"full_name": "octo/flows", "clone_url": "u", "private": True, "default_branch": "main"}],
+    )
+    status._bindings["<Configure>"](SimpleNamespace(width=700))
+
+    assert status._options["wraplength"] == 664

@@ -7,9 +7,17 @@ from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from helpers import FakeRoot, FakeTk, FakeTtk, fake_runs_panel_bases, make_workspace
+from helpers import (
+    FakeRoot,
+    FakeTk,
+    FakeTtk,
+    all_labels,
+    fake_runs_panel_bases,
+    make_workspace,
+)
 
 from n8n_launcher.github.api import GitHubError
+from n8n_launcher.gui import ci_edit
 from n8n_launcher.gui.app import CI_RUNS_TTL_SECONDS
 from n8n_launcher.gui.ci_edit import (
     RUNS_POLL_ACTIVE_MS,
@@ -982,3 +990,69 @@ def test_refresh_ci_runs_force_bypasses_freshness_window(app) -> None:
     client.list_workflow_runs.assert_called_once_with("octo/repo")
     app.app._drain_events()
     panel.apply.assert_called_once()
+
+
+# ------------------------------------------------------- selection tree sizing
+def _pipeline_tree(workspace_root, tmp_path, exports):
+    """Open the selection dialog and return its pipeline Treeview."""
+    (workspace_root / "n8nPipelines").mkdir(parents=True, exist_ok=True)
+    for rel, body in exports.items():
+        (workspace_root / rel).write_text(body, encoding="utf-8")
+    workspace = make_workspace(tmp_path, "CI", 5678)
+    workspace.workflows_dir = workspace_root
+    FakeTtk.Treeview.instances.clear()
+    with _patch_ci_editor(FakeTk()):
+        prompt_ci_workflows(FakeRoot(), workspace)
+    return next(
+        tree for tree in FakeTtk.Treeview.instances if tree._options.get("columns") == ("detail",)
+    )
+
+
+def test_pipeline_tree_is_requested_at_its_minimum_widths(tmp_path) -> None:
+    # The dialog asks only for the room the pipeline names and their reasons
+    # need, instead of a fixed 360 + 460 that was wide enough for nothing in
+    # particular on every host.
+    root = tmp_path / "ws"
+    tree = _pipeline_tree(root, tmp_path, {"n8nPipelines/manual.json": _MANUAL})
+
+    assert tree.column_widths() == {
+        "#0": ci_edit._SELECTION_MINIMUMS["#0"],
+        "detail": ci_edit._SELECTION_MINIMUMS["detail"],
+    }
+
+
+def test_pipeline_tree_columns_grow_to_the_pipeline_names(tmp_path) -> None:
+    long_name = "n8nPipelines/" + "very-long-pipeline-name" * 2 + ".json"
+    root = tmp_path / "ws"
+    tree = _pipeline_tree(
+        root,
+        tmp_path,
+        {"n8nPipelines/manual.json": _MANUAL, long_name: _MANUAL},
+    )
+    tree._width = 1200
+    tree._bindings["<Configure>"](SimpleNamespace(width=1200))
+
+    widths = tree.column_widths()
+    # A long export name is fully readable instead of being cut to fit 360px...
+    assert widths["#0"] > ci_edit._SELECTION_MINIMUMS["#0"]
+    # ... and the details column keeps the reason of the blocked pipelines.
+    assert widths["detail"] == 1200 - widths["#0"]
+    assert widths["detail"] > ci_edit._SELECTION_MINIMUMS["detail"]
+
+
+def test_pipeline_hint_wraps_at_the_dialog_width(tmp_path) -> None:
+    # The hint explains why a pipeline is blocked: it must wrap at the dialog's
+    # real width rather than at a hard-coded 820px.
+    root = tmp_path / "ws"
+    FakeTk.Label.instances.clear()
+    _pipeline_tree(root, tmp_path, {"n8nPipelines/manual.json": _MANUAL})
+
+    hint = next(
+        label
+        for label in all_labels()
+        if "pipeline non testable" in str(label._options.get("text", ""))
+    )
+    hint._bindings["<Configure>"](SimpleNamespace(width=900))
+
+    # 864 = 900 - the 18px padding on each side of the dialog.
+    assert hint._options["wraplength"] == 864

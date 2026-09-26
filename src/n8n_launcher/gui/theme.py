@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable
 
 from ..core.models import WorkspaceState
 
@@ -103,6 +104,11 @@ FONT_FAMILY_ORDER = (
     "Sans",
 )
 
+# Width assumed for one character when the host cannot measure text. It only
+# feeds the estimate of :func:`text_measure`, which decides where a string is
+# cut, so being a few pixels off changes nothing about what the user reads.
+_FALLBACK_CHAR_WIDTH = 7
+
 
 def _registered_font_names(root: tk.Misc) -> set[str]:
     """Return the named fonts already created in *root*'s Tcl interpreter.
@@ -116,6 +122,59 @@ def _registered_font_names(root: tk.Misc) -> set[str]:
         return set(root.tk.call("font", "names"))
     except Exception:
         return set()
+
+
+def _font_measure(root: tk.Misc, font: str) -> Callable[[str], int] | None:
+    """Return the interpreter's own pixel measure for *font*, or None.
+
+    ``None`` means the host cannot measure text at all (a unit-test fake, a
+    stripped interpreter); :func:`text_measure` then falls back to its estimate.
+    """
+    try:
+        import tkinter.font as tkfont
+
+        handle = tkfont.Font(root=root, font=font)
+    except Exception:
+        return None
+
+    def measured(text: str) -> int:
+        """Return the rendered width of *text* in pixels."""
+        return int(handle.measure(text))
+
+    return measured
+
+
+def text_measure(root: tk.Misc, font: str) -> Callable[[str], int]:
+    """Return a callable measuring *text* in pixels for the named *font*.
+
+    The named font is resolved on the first call rather than at build time: a
+    root that has not run :func:`configure_fonts` yet — the app registers its
+    fonts in ``_apply_theme``, and a dialog can be the very first window against
+    a fresh interpreter — would otherwise be stuck with the estimate for the
+    whole session. Hosts with no text metrics keep the per-character estimate,
+    which only decides where a string gets cut, never what it says.
+    """
+    measure: Callable[[str], int] | None = None
+    resolved = False
+
+    def fallback(text: str) -> int:
+        """Estimate the width of *text* from its length alone."""
+        return len(text) * _FALLBACK_CHAR_WIDTH
+
+    def measure_text(text: str) -> int:
+        """Return the width of *text* in pixels, measured or estimated."""
+        nonlocal measure, resolved
+        if not resolved:
+            resolved = True
+            measure = _font_measure(root, font)
+        if measure is None:
+            return fallback(text)
+        try:
+            return measure(text)
+        except Exception:
+            return fallback(text)
+
+    return measure_text
 
 
 def configure_fonts(root: tk.Misc) -> bool:

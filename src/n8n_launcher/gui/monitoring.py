@@ -13,10 +13,15 @@ Two behaviours deserve their own home here because they are pure logic:
 * :class:`CriticalGate` implements the "surface critical incidents" rule: an
   ``ERROR``/``CRITICAL`` event updates the status bar, while repeating failures
   of the same operation are grouped so a retry loop cannot flood the user.
+
+Filtering is deliberately reduced to a single free-text field: the severity is
+part of the searched text (see :func:`filter_events`), so there is no level
+control to keep in sync with it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import time
@@ -32,7 +37,9 @@ from ..core.models import Workspace
 from ..monitoring.events import Event
 from ..monitoring.store import RETENTION_DAYS, EventStore
 from ..remote import RemoteExecutionStatus, RemoteHealth
+from .layout import ColumnFitter, bind_wraplength, screen_fraction_size, screen_size
 from .theme import (
+    ACCENT,
     APP_BACKGROUND,
     FONT_META,
     FONT_ROWS,
@@ -40,6 +47,7 @@ from .theme import (
     SURFACE,
     TEXT_MUTED,
     TEXT_PRIMARY,
+    text_measure,
 )
 
 # Row colouring by severity. ERROR/CRITICAL reuse the destructive row colour
@@ -63,6 +71,28 @@ _LEVEL_TAGS = {
     "ERROR": _TAG_ERROR,
     "CRITICAL": _TAG_CRITICAL,
 }
+
+# Journal table: columns, headings and per-column bounds handed to the fitter.
+# Nothing here is a width: the table is sized to whatever the rows hold (see
+# ``gui.layout``), and these bounds only say how small a column may get before
+# it stops being readable, and how large before it stops being a column.
+_JOURNAL_COLUMNS = ("time", "level", "name", "message")
+_JOURNAL_HEADINGS = {
+    "time": "Heure",
+    "level": "Niveau",
+    "name": "Source",
+    "message": "Message",
+}
+_JOURNAL_MINIMUMS = {"time": 80, "level": 60, "name": 90, "message": 200}
+_JOURNAL_MAXIMUMS = {"time": 140, "level": 96, "name": 280, "message": 4000}
+
+# The supervision window is a *reader* (logs, deploy history, executions), so it
+# follows the screen the same way the main window does instead of asking for a
+# fixed 1000x680 that overflows a small laptop.
+_SERVER_WINDOW_FRACTION = (0.8, 0.8)
+_SERVER_WINDOW_MINIMUM = (820, 520)
+_SERVER_WINDOW_MAXIMUM = (1400, 900)
+_SERVER_WINDOW_DEFAULT = (1000, 680)
 
 
 def level_tag(event: Event) -> str:
@@ -89,10 +119,11 @@ def event_detail(event: Event | None) -> str:
     """Render the context and traceback of the selected *event*.
 
     ``None`` (nothing selected) yields the hint line, so the pane is never
-    blank and the user knows the row is clickable.
+    blank and the user knows the row is clickable. The line is also what
+    ``Ctrl+C`` puts on the clipboard: one event, whole, as a bug report needs it.
     """
     if event is None:
-        return "Sélectionnez une ligne pour voir le détail (contexte, exception)."
+        return "Sélectionnez une ligne pour voir le détail (contexte, exception). Ctrl+C la copie."
     lines = [f"{event.level} · {event.name} · {_format_time(event.timestamp)}", event.message]
     if event.context:
         lines.append("")
@@ -131,27 +162,18 @@ def summary_text(
     return " · ".join(parts)
 
 
-def filter_events(
-    events: Sequence[Event],
-    *,
-    level: str | None = None,
-    query: str | None = None,
-) -> list[Event]:
-    """Return the events matching a level filter and a case-insensitive *query*.
+def filter_events(events: Sequence[Event], *, query: str | None = None) -> list[Event]:
+    """Return the events matching a case-insensitive *query*.
 
     The text filter runs here rather than in SQL so the panel and the
-    in-memory snapshot can never disagree about what a query means.
+    in-memory snapshot can never disagree about what a query means. Severity
+    needs no dedicated control because :func:`_haystack` includes the level:
+    typing ``ERROR`` (or ``WARNING``…) narrows the table to that severity.
     """
-    selected = level.upper() if level else None
     needle = query.strip().casefold() if query else ""
-    matches = []
-    for event in events:
-        if selected and event.level.upper() != selected:
-            continue
-        if needle and needle not in _haystack(event):
-            continue
-        matches.append(event)
-    return matches
+    if not needle:
+        return list(events)
+    return [event for event in events if needle in _haystack(event)]
 
 
 def _haystack(event: Event) -> str:
@@ -164,15 +186,76 @@ def _haystack(event: Event) -> str:
     return " ".join(parts).casefold()
 
 
-def filter_options() -> tuple[tuple[str, str], ...]:
-    """Return the (label, level) pairs offered by the level selector."""
-    return (
-        ("Tous", ""),
-        ("Critique", "CRITICAL"),
-        ("Erreur", "ERROR"),
-        ("Avertissement", "WARNING"),
-        ("Info", "INFO"),
+# Geometry of the download glyph, in the 24x20 canvas of ``_download_icon``:
+# a downward arrow (stem + head) dropping into an open tray. Drawing the lines
+# instead of using a Unicode arrow keeps the icon identical on every platform —
+# the UI font is not guaranteed to carry a given glyph (the same reason the
+# checkbox markers are ASCII).
+_ICON_SIZE = (24, 20)
+_ICON_STROKES: tuple[tuple[int, int, int, int], ...] = (
+    (12, 3, 12, 11),  # stem
+    (7, 8, 12, 13),  # head, left
+    (12, 13, 17, 8),  # head, right
+    (4, 19, 20, 19),  # tray, base
+    (4, 15, 4, 19),  # tray, left wall
+    (20, 15, 20, 19),  # tray, right wall
+)
+
+
+def _copy_text(widget: tk.Misc, text: str) -> None:
+    """Copy *text* to the clipboard of *widget* (best-effort for test fakes).
+
+    Same contract as the CI credentials dialog's own copy helper: a clipboard
+    that is unavailable (a stripped interpreter, a headless test) must not turn
+    a keystroke into an error.
+    """
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(text)
+    except Exception:
+        pass
+
+
+def _download_icon(
+    parent: tk.Misc,
+    *,
+    command: Callable[[], None],
+    tooltip: Callable[[tk.Misc, str], None] | None = None,
+    label: str = "Exporter le journal (JSON)",
+) -> tk.Canvas:
+    """Build the discreet download button used instead of a labelled button.
+
+    The icon only makes sense with a hint, so the hover also raises *label*
+    through the host-provided *tooltip* helper (the panel itself never owns
+    windows). ``takefocus`` keeps the action reachable from the keyboard.
+    """
+    canvas = tk.Canvas(
+        parent,
+        width=_ICON_SIZE[0],
+        height=_ICON_SIZE[1],
+        bg=APP_BACKGROUND,
+        highlightthickness=0,
+        cursor="hand2",
+        takefocus=True,
     )
+    strokes = [
+        canvas.create_line(*points, fill=TEXT_MUTED, width=2, capstyle="round")
+        for points in _ICON_STROKES
+    ]
+
+    def repaint(color: str) -> None:
+        """Recolour every stroke of the glyph."""
+        for stroke in strokes:
+            canvas.itemconfigure(stroke, fill=color)
+
+    canvas.bind("<Button-1>", lambda _event: command())
+    canvas.bind("<Return>", lambda _event: command())
+    canvas.bind("<Key-space>", lambda _event: command())
+    canvas.bind("<Enter>", lambda _event: repaint(TEXT_PRIMARY))
+    canvas.bind("<Leave>", lambda _event: repaint(TEXT_MUTED))
+    if tooltip is not None:
+        tooltip(canvas, label)
+    return canvas
 
 
 class CriticalGate:
@@ -214,7 +297,14 @@ class CriticalGate:
 
 
 class MonitoringPanel(tk.Frame):
-    """Read-only event table with a detail pane and compact inline filters."""
+    """Read-only event table with a detail pane and a single search field.
+
+    The header carries only the download icon, and the one filter is a
+    free-text query whose placeholder doubles as the field's label: a level,
+    a source, a message or a piece of traceback all narrow the table the same
+    way. ``Ctrl+C`` copies the selected event whole — the detail pane's own text,
+    so what is pasted into a bug report is exactly what is on screen.
+    """
 
     instances: ClassVar[weakref.WeakSet[MonitoringPanel]] = weakref.WeakSet()
 
@@ -222,9 +312,8 @@ class MonitoringPanel(tk.Frame):
         self,
         parent: tk.Misc,
         *,
-        on_refresh: Callable[[], None] | None = None,
         on_export: Callable[[], None] | None = None,
-        on_clear_workspace: Callable[[], None] | None = None,
+        tooltip: Callable[[tk.Misc, str], None] | None = None,
     ) -> None:
         """Build the integrated journal view and its optional host actions."""
         super().__init__(parent, bg=APP_BACKGROUND)
@@ -233,7 +322,7 @@ class MonitoringPanel(tk.Frame):
         self._order: list[str] = []
         self._store: EventStore | None = None
         self._workspace: Workspace | None = None
-        self._level_var = tk.StringVar()
+        self._export_icon: tk.Canvas | None = None
         MonitoringPanel.instances.add(self)
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
@@ -247,9 +336,9 @@ class MonitoringPanel(tk.Frame):
             anchor="w",
         )
         title.pack(side="left")
-        # Current scope, shown only when narrowed to a workspace: the "Tous les
-        # workspaces" button already states the global scope, so repeating it
-        # here would just duplicate the same words side by side.
+        # Current scope, shown only when narrowed to a workspace: the global
+        # scope needs no wording, it is the one you get back to by clicking the
+        # already selected row in the workspace list.
         self._scope = tk.Label(
             header,
             text="",
@@ -259,54 +348,36 @@ class MonitoringPanel(tk.Frame):
             anchor="e",
         )
         self._scope.pack(side="left", fill="x", expand=True, padx=(10, 6))
-        if on_clear_workspace is not None:
-            ttk.Button(
-                header,
-                text="Tous les workspaces",
-                style="Secondary.TButton",
-                command=on_clear_workspace,
-            ).pack(side="right", padx=(4, 0))
         if on_export is not None:
-            ttk.Button(
-                header,
-                text="Exporter",
-                style="Secondary.TButton",
-                command=on_export,
-            ).pack(side="right", padx=(4, 0))
-        if on_refresh is not None:
-            ttk.Button(
-                header,
-                text="Actualiser",
-                style="Secondary.TButton",
-                command=on_refresh,
-            ).pack(side="right")
+            self._export_icon = _download_icon(header, command=on_export, tooltip=tooltip)
+            self._export_icon.pack(side="right")
 
-        filters = tk.Frame(self, bg=APP_BACKGROUND)
-        filters.pack(fill="x", padx=12, pady=(0, 4))
-        search_row = tk.Frame(filters, bg=APP_BACKGROUND)
-        search_row.pack(fill="x")
-        tk.Label(
-            search_row,
-            text="Recherche",
-            bg=APP_BACKGROUND,
-            fg=TEXT_MUTED,
+        self._entry = tk.Entry(
+            self,
+            bg=SURFACE,
+            fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            selectbackground=ACCENT,
+            selectforeground="#ffffff",
+            relief="flat",
             font=FONT_META,
-        ).pack(side="left")
-        self._entry = tk.Entry(search_row, width=20)
+        )
+        self._entry.pack(fill="x", padx=12, pady=(0, 4))
         self._entry.bind("<Return>", lambda _event: self._render())
         self._entry.bind("<KeyRelease>", lambda _event: self._render())
-        self._entry.pack(side="left", padx=(6, 10))
-        for options in (filter_options()[:3], filter_options()[3:]):
-            level_row = tk.Frame(filters, bg=APP_BACKGROUND)
-            level_row.pack(fill="x")
-            for label, value in options:
-                ttk.Radiobutton(
-                    level_row,
-                    text=label,
-                    value=value,
-                    variable=self._level_var,
-                    command=self._render,
-                ).pack(side="left", padx=(0, 6))
+        # Tk has no native placeholder, so the hint is a label floating over the
+        # empty field; it is removed as soon as the field holds text. Placed
+        # relatively to the entry height so it stays centred whatever the font.
+        self._placeholder = tk.Label(
+            self,
+            text="Rechercher…",
+            bg=SURFACE,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+            anchor="w",
+        )
+        self._placeholder.bind("<Button-1>", self._focus_search)
+        self._placeholder.place(in_=self._entry, x=8, rely=0.5, relheight=1.0, anchor="w")
 
         self._summary = tk.Label(
             self,
@@ -320,18 +391,32 @@ class MonitoringPanel(tk.Frame):
 
         self.tree = ttk.Treeview(
             self,
-            columns=("time", "level", "name", "message"),
+            columns=_JOURNAL_COLUMNS,
             show="headings",
             height=14,
         )
-        self.tree.heading("time", text="Heure")
-        self.tree.heading("level", text="Niveau")
-        self.tree.heading("name", text="Source")
-        self.tree.heading("message", text="Message")
-        self.tree.column("time", width=90, stretch=False, anchor="w")
-        self.tree.column("level", width=60, stretch=False, anchor="w")
-        self.tree.column("name", width=120, stretch=False, anchor="w")
-        self.tree.column("message", width=320, stretch=True, anchor="w")
+        for name, heading in _JOURNAL_HEADINGS.items():
+            self.tree.heading(name, text=heading)
+        for name in _JOURNAL_COLUMNS:
+            # The requested width starts at the column's minimum: the fitter
+            # takes over as soon as the first snapshot is rendered, and a table
+            # that asks for less up front leaves more room to the workspace list.
+            self.tree.column(
+                name,
+                width=_JOURNAL_MINIMUMS[name],
+                minwidth=_JOURNAL_MINIMUMS[name],
+                stretch=name == "message",
+                anchor="w",
+            )
+        self._fitter = ColumnFitter(
+            self.tree,
+            columns=_JOURNAL_COLUMNS,
+            headings=_JOURNAL_HEADINGS,
+            minimums=_JOURNAL_MINIMUMS,
+            maximums=_JOURNAL_MAXIMUMS,
+            flexible="message",
+            measure=text_measure(self, FONT_META),
+        )
         for tag, color in (
             ("info", _TAG_INFO),
             ("warning", _TAG_WARNING),
@@ -341,6 +426,11 @@ class MonitoringPanel(tk.Frame):
             self.tree.tag_configure(tag, background=color)
         self.tree.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        # Bound on the table only: Tk delivers a key to the focused widget, its
+        # class and the toplevel, so a binding on the panel would never see it —
+        # and one bound more widely would take the search field's own Ctrl+C away
+        # from the user.
+        self.tree.bind("<Control-c>", self._copy_selected)
 
         self._detail = tk.Label(
             self,
@@ -351,8 +441,11 @@ class MonitoringPanel(tk.Frame):
             height=6,
             anchor="nw",
             justify="left",
-            wraplength=520,
+            wraplength=480,
         )
+        # A traceback is the longest text in the panel: it re-wraps at the pane's
+        # real width instead of being cut at a hard-coded 520 pixels.
+        bind_wraplength(self._detail, minimum=200, padding=24)
         self._detail.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
     def layout_key(self, event: Event) -> str:
@@ -365,7 +458,6 @@ class MonitoringPanel(tk.Frame):
         *,
         store: EventStore | None = None,
         workspace: Workspace | None = None,
-        level: str | None = None,
         query: str | None = None,
     ) -> None:
         """Cache and render events for the current workspace scope."""
@@ -377,23 +469,35 @@ class MonitoringPanel(tk.Frame):
         self._events = list(events)
         self._store = store
         self._workspace = workspace
-        self._render(level=level, query=query)
+        self._render(query=query)
 
     def selected_event(self) -> Event | None:
         """Return the event backing the selected row, if any."""
         selection = self.tree.selection()
         return self._visible.get(selection[0]) if selection else None
 
-    def _render(self, *, level: str | None = None, query: str | None = None) -> None:
-        """Render the cached events using the current filters."""
+    def _focus_search(self, _event: object = None) -> None:
+        """Put the caret in the search field when its placeholder is clicked."""
+        self._entry.focus_set()
+
+    def _update_placeholder(self) -> None:
+        """Show the "Rechercher…" hint only while the search field is empty."""
+        # A torn-down interpreter must never break a keystroke handler.
+        with contextlib.suppress(Exception):
+            if self._entry.get():
+                self._placeholder.place_forget()
+            else:
+                self._placeholder.place(in_=self._entry, x=8, rely=0.5, relheight=1.0, anchor="w")
+
+    def _render(self, *, query: str | None = None) -> None:
+        """Render the cached events using the current search query."""
         try:
             if not self.winfo_exists():
                 return
         except Exception:
             return
-        chosen_level = (self._level_var.get() or None) if level is None else level
-        chosen_query = self._entry.get() if query is None else query
-        visible = filter_events(self._events, level=chosen_level, query=chosen_query)
+        self._update_placeholder()
+        visible = filter_events(self._events, query=self._entry.get() if query is None else query)
         if self._workspace is not None:
             visible = workspace_events(self._workspace, visible)
         selected = set(self.tree.selection())
@@ -421,10 +525,27 @@ class MonitoringPanel(tk.Frame):
         if restored is not None:
             self.tree.selection_set(restored)
         self._show_detail(self._visible.get(restored) if restored is not None else None)
+        # The rows are in: size every column to them before the user looks, so a
+        # filtered table shows as much of each line as its pane can hold.
+        self._fitter.rows()
 
     def _on_select(self, _event: object = None) -> None:
         """Refresh the detail pane when the selection changes."""
         self._show_detail(self.selected_event())
+
+    def _copy_selected(self, _event: object = None) -> str:
+        """Copy the selected event, whole, to the clipboard (``Ctrl+C``).
+
+        The copied text is exactly what the detail pane shows — level, source,
+        timestamp, message, context and traceback — so one keystroke yields the
+        one event a bug report needs, and nothing else. Nothing selected (or a
+        row the search has filtered out) leaves the clipboard alone. Returns
+        ``"break"`` so the keystroke does not travel any further.
+        """
+        event = self.selected_event()
+        if event is not None:
+            _copy_text(self, event_detail(event))
+        return "break"
 
     def _show_detail(self, event: Event | None) -> None:
         """Render *event* (or the hint line) in the detail pane."""
@@ -547,8 +668,11 @@ class ServerPanel(tk.Frame):
             font=FONT_ROWS,
             anchor="nw",
             justify="left",
-            wraplength=940,
+            wraplength=640,
         )
+        # Container logs and deploy history are long lines: let them use the
+        # window's real width instead of a fixed 940 pixels.
+        bind_wraplength(self._label, minimum=200, padding=28)
         self._label.pack(fill="both", expand=True, padx=14, pady=(4, 12))
 
     def apply(self, snapshot: ServerSnapshot) -> None:
@@ -582,8 +706,20 @@ def prompt_server_supervision(
     """
     window = tk.Toplevel(root)
     window.title(f"Supervision du serveur — {workspace_name}")
-    window.geometry("1000x680")
-    window.minsize(820, 520)
+    # Sized against the screen rather than a fixed box: the snapshot is mostly
+    # text, so the reader wants every pixel the display can spare, while a small
+    # laptop still gets a window that fits on it.
+    width, height = screen_fraction_size(
+        *screen_size(root),
+        fraction=_SERVER_WINDOW_FRACTION,
+        minimum=_SERVER_WINDOW_MINIMUM,
+        maximum=_SERVER_WINDOW_MAXIMUM,
+        default=_SERVER_WINDOW_DEFAULT,
+    )
+    window.geometry(f"{width}x{height}")
+    # Never a floor larger than the box itself: a minsize above the geometry
+    # would make Tk grow the window on the first map.
+    window.minsize(min(_SERVER_WINDOW_MINIMUM[0], width), min(_SERVER_WINDOW_MINIMUM[1], height))
     window.transient(root)
     window.configure(bg=APP_BACKGROUND)
 
@@ -658,7 +794,6 @@ __all__ = [
     "event_detail",
     "event_row",
     "filter_events",
-    "filter_options",
     "is_critical",
     "level_tag",
     "prompt_server_supervision",

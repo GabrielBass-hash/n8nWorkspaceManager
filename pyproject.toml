@@ -85,6 +85,8 @@ ignore = []
 "src/n8n_launcher/gui/close.py" = ["S110"]
 # gui/dialogs.py: fail-graceful clipboard access
 "src/n8n_launcher/gui/dialogs.py" = ["S110"]
+# gui/monitoring.py: fail-graceful clipboard access (Ctrl+C copies one event)
+"src/n8n_launcher/gui/monitoring.py" = ["S110"]
 # gui/update_flow.py: fail-graceful update checks
 "src/n8n_launcher/gui/update_flow.py" = ["S110"]
 # tests: fake passwords, deliberate try/except/pass, subprocess, exec (meta-tests

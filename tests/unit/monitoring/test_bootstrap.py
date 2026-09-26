@@ -18,13 +18,22 @@ from n8n_launcher.monitoring.store import EventStore
 
 @pytest.fixture(autouse=True)
 def restore_logging_state():
-    """Restore root handlers, exception hooks, and bootstrap globals after each test."""
+    """Restore root handlers, exception hooks, and bootstrap globals after each test.
+
+    The globals are also *reset* before the test: ``install_exception_capture``
+    only wraps ``sys.excepthook``/``threading.excepthook`` while no store is
+    active, so a store left behind by an earlier test in the session (any test
+    calling the real ``bootstrap_logging``) would make the hook assertions see
+    no event at all. Restoring the inherited value afterwards keeps the change
+    invisible to the rest of the suite.
+    """
     root = logging.getLogger()
     handlers = list(root.handlers)
     level = root.level
     sys_hook = sys.excepthook
     threading_hook = threading.excepthook
     active_store = bootstrap_module._ACTIVE_STORE
+    bootstrap_module._ACTIVE_STORE = None
     try:
         yield
     finally:

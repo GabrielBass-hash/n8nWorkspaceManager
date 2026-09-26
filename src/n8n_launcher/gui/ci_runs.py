@@ -31,12 +31,14 @@ from tkinter import ttk
 from typing import ClassVar
 
 from ..workspaces import ci_runs
+from .layout import ColumnFitter, bind_wraplength
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
     FONT_ROWS,
     SURFACE,
     TEXT_MUTED,
+    text_measure,
 )
 
 # Leading marks for the runs panel. Plain ASCII on purpose: the glyph sets
@@ -54,6 +56,15 @@ _TAG_FAILURE = "#3f1d1d"
 _TAG_WAITING = "#3a2f0f"
 _TAG_SKIPPED = "#1e293b"
 _TAG_SELECTED = "#1e3056"
+
+# Runs tree: the label column carries the run, job, step and pipeline names —
+# deeply indented, so it needs real room — while "Détails" holds a short status
+# or timestamp. Both are sized to their content by the fitter; see
+# ``gui.layout``.
+_RUNS_COLUMNS = ("detail",)
+_RUNS_HEADINGS = {"#0": "Run / job / pipeline", "detail": "Détails"}
+_RUNS_MINIMUMS = {"#0": 240, "detail": 160}
+_RUNS_MAXIMUMS = {"#0": 460, "detail": 3000}
 
 # Human labels for the live *step* rows shown under an in-progress job.
 _STEP_LABELS: dict[str, str] = {
@@ -246,11 +257,28 @@ class RunsPanel(tk.Frame):
             )
             self._run_btn.pack(side="right", padx=(6, 0))
 
-        self.tree = ttk.Treeview(self, columns=("detail",), show="tree headings", height=16)
-        self.tree.heading("#0", text="Run / job / pipeline")
-        self.tree.heading("detail", text="Détails")
-        self.tree.column("#0", width=540, stretch=True)
-        self.tree.column("detail", width=520, stretch=True, anchor="w")
+        self.tree = ttk.Treeview(self, columns=_RUNS_COLUMNS, show="tree headings", height=16)
+        for name, heading in _RUNS_HEADINGS.items():
+            self.tree.heading(name, text=heading)
+        for name in ("#0", *_RUNS_COLUMNS):
+            # Request the minimum up front so the dialog opens only as wide as
+            # the labels need; the fitter re-fits on the first real layout.
+            self.tree.column(
+                name,
+                width=_RUNS_MINIMUMS[name],
+                minwidth=_RUNS_MINIMUMS[name],
+                stretch=name == "detail",
+                anchor="w",
+            )
+        self._fitter = ColumnFitter(
+            self.tree,
+            columns=_RUNS_COLUMNS,
+            headings=_RUNS_HEADINGS,
+            minimums=_RUNS_MINIMUMS,
+            maximums=_RUNS_MAXIMUMS,
+            flexible="detail",
+            measure=text_measure(self, FONT_META),
+        )
         for tag, color in (
             ("success", _TAG_SUCCESS),
             ("failure", _TAG_FAILURE),
@@ -271,8 +299,11 @@ class RunsPanel(tk.Frame):
             font=FONT_ROWS,
             anchor="w",
             justify="left",
-            wraplength=900,
+            wraplength=640,
         )
+        # The message under the tree repeats a GitHub error verbatim: it wraps
+        # at the panel's real width rather than a hard-coded 900 pixels.
+        bind_wraplength(self._empty, minimum=200, padding=28)
         self._empty.pack(fill="x", padx=14, pady=(0, 10))
 
     # ------------------------------------------------------------------ API
@@ -318,6 +349,7 @@ class RunsPanel(tk.Frame):
                     text += "\n" + " · ".join(snapshot.messages)
                 self._empty.config(text=text)
             self._restore_selection(selected)
+            self._fitter.rows()
             return
 
         if snapshot.messages:
@@ -421,6 +453,9 @@ class RunsPanel(tk.Frame):
                     )
             self.tree.item(run_iid, open=active_run or run_iid in self._expanded)
         self._restore_selection(selected)
+        # Every label is in: size the columns to them, so the nested step and
+        # pipeline rows get the room their (indented) names ask for.
+        self._fitter.rows()
 
     def _restore_selection(self, selected: tuple[str, ...] | list[str]) -> None:
         """Restore a selected row when its stable id survived the refresh."""

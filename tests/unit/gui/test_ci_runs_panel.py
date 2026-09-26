@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from helpers import FakeTk, FakeTtk, fake_runs_panel_bases
 
+from n8n_launcher.gui import ci_runs as ci_runs_panel
 from n8n_launcher.gui.ci_runs import RunsPanel, _format_fetched_at, runs_summary_text
 from n8n_launcher.workspaces import ci_runs
 
@@ -526,3 +528,79 @@ def test_apply_restores_selection_and_event_expansion() -> None:
 
         panel.tree._bindings["<<TreeviewClose>>"](None)
         assert "job-11-21" not in panel.expanded
+
+
+# --- column sizing ------------------------------------------------------------
+
+
+def test_runs_tree_is_requested_at_its_minimum_widths() -> None:
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+
+    # The runs tree opens on the room its columns really need: the labels hold
+    # run, job and pipeline names, and the details column carries the status.
+    assert panel.tree.column_widths() == dict(ci_runs_panel._RUNS_MINIMUMS)
+    for name, width in panel.tree.column_widths().items():
+        assert width == ci_runs_panel._RUNS_MINIMUMS[name]
+
+
+def test_runs_tree_columns_follow_the_nested_labels() -> None:
+    snapshot = _snapshot(
+        runs=[_run(11)],
+        jobs={11: (_job(21),)},
+        pipelines={21: (_pipeline(detail="3 nœuds"),)},
+    )
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(snapshot)
+        panel.tree._width = 900
+        panel.tree._bindings["<Configure>"](SimpleNamespace(width=900))
+
+    widths = panel.tree.column_widths()
+    assert sum(widths.values()) == 900
+    assert widths["detail"] > ci_runs_panel._RUNS_MINIMUMS["detail"]
+    # The label column grew past its minimum: the indented pipeline names are
+    # what the table was unreadable without.
+    assert widths["#0"] > ci_runs_panel._RUNS_MINIMUMS["#0"]
+
+
+def test_runs_tree_refits_when_the_panel_is_resized() -> None:
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(_snapshot(runs=[_run(11)]))
+        panel.tree._width = 500
+        panel.tree._bindings["<Configure>"](SimpleNamespace(width=500))
+        narrow = panel.tree.column_widths()["detail"]
+
+        panel.tree._width = 1400
+        panel.tree._bindings["<Configure>"](SimpleNamespace(width=1400))
+
+    assert panel.tree.column_widths()["detail"] > narrow
+
+
+def test_runs_empty_state_wraps_at_its_own_width() -> None:
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(_snapshot())
+        panel._empty._width = 824
+
+    panel._empty._bindings["<Configure>"](SimpleNamespace(width=824))
+
+    # 796 = 824 - the 14px padding on each side of the panel.
+    assert panel._empty._options["wraplength"] == 796

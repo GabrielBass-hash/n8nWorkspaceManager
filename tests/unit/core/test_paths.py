@@ -75,3 +75,19 @@ def test_path_helpers_do_not_create_directories(
 
     assert not config.exists()
     assert not logs.exists()
+
+
+def test_default_paths_stay_inside_the_session_sandbox(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The root ``sandbox_platform_dirs`` fixture must cover the unpatched calls.
+
+    A test that builds a default ``ConfigStore()`` or calls the real
+    ``bootstrap_logging()`` resolves these two functions; if they ever pointed
+    back at the developer's home, the unit suite would write into the real
+    launcher config and monitoring journal.
+    """
+    base = str(tmp_path_factory.getbasetemp())
+
+    assert str(paths.config_dir()).startswith(base)
+    assert str(paths.logs_dir()).startswith(base)

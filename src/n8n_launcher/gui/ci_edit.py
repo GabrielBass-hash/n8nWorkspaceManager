@@ -34,6 +34,7 @@ from ..core.models import Workspace
 from ..workspaces import ci, ci_runs
 from ..workspaces.manager import WorkspaceManager
 from .ci_runs import RunsPanel
+from .layout import ColumnFitter, bind_wraplength
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -41,11 +42,21 @@ from .theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     configure_fonts,
+    text_measure,
 )
 
 # Colours used for the tree tags (dark theme).
 _COLOR_WARN = "#fcd34d"
 _COLOR_DISABLED = TEXT_MUTED
+
+# Pipeline selection tree: the label column holds the export file name and its
+# indented node names, "Détails" the node count and the reason a pipeline is
+# blocked. Both are sized to their content by the fitter (see ``gui.layout``),
+# so a short reason stops reserving the room of a long export name.
+_SELECTION_COLUMNS = ("detail",)
+_SELECTION_HEADINGS = {"#0": "Pipeline", "detail": "Détails"}
+_SELECTION_MINIMUMS = {"#0": 260, "detail": 180}
+_SELECTION_MAXIMUMS = {"#0": 480, "detail": 3000}
 
 # Per-pipeline state markers. Plain ASCII on purpose: the box glyphs ☑/☐
 # (U+2610/U+2611) and the en dash fallback are absent from the Linux font
@@ -200,10 +211,27 @@ def prompt_ci_workflows(
         body = selection_tab
 
     tree = ttk.Treeview(body, columns=("detail",), show="tree headings", height=18)
-    tree.heading("#0", text="Pipeline")
-    tree.heading("detail", text="Détails")
-    tree.column("#0", width=360, stretch=True)
-    tree.column("detail", width=460, stretch=True, anchor="w")
+    for name, heading in _SELECTION_HEADINGS.items():
+        tree.heading(name, text=heading)
+    for name in ("#0", "detail"):
+        # Request the minimum up front: the dialog then opens only as wide as
+        # the pipeline names and their reason really need.
+        tree.column(
+            name,
+            width=_SELECTION_MINIMUMS[name],
+            minwidth=_SELECTION_MINIMUMS[name],
+            stretch=name == "#0",
+            anchor="w",
+        )
+    fitter = ColumnFitter(
+        tree,
+        columns=("detail",),
+        headings=_SELECTION_HEADINGS,
+        minimums=_SELECTION_MINIMUMS,
+        maximums=_SELECTION_MAXIMUMS,
+        flexible="#0",
+        measure=text_measure(dialog, FONT_META),
+    )
     tree.configure(selectmode="none")
     for tag, color in (
         ("disabled", _COLOR_DISABLED),
@@ -250,6 +278,10 @@ def prompt_ci_workflows(
                 tags=(style,) if style else (),
             )
         tree.item(pipeline_item, open=False)
+
+    # Every row is inserted: size the columns to them before the dialog is
+    # measured, so it opens as wide as the content really needs.
+    fitter.rows()
 
     def update_caption() -> None:
         testable = sum(1 for ok in eligible.values() if ok)
@@ -351,8 +383,9 @@ def prompt_ci_workflows(
         fg=TEXT_MUTED,
         font=FONT_META,
         anchor="w",
-        wraplength=820,
+        wraplength=640,
     )
+    bind_wraplength(hint, minimum=200, padding=36)
     hint.pack(fill="x", padx=18, pady=(0, 10))
 
     # Runs view: a pure renderer wired to the host's closure. The panel is fed

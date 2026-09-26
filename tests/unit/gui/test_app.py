@@ -24,7 +24,10 @@ from helpers import (
     row_action_text,
     row_chip,
     row_chip_colors,
+    row_chip_pack,
     row_chip_text,
+    row_full_name,
+    row_label,
     row_text,
 )
 
@@ -32,10 +35,17 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
 from n8n_launcher.gui import LauncherApp
-from n8n_launcher.gui.app import _api_router_mounted, window_size
+from n8n_launcher.gui.app import (
+    _CHIP_GAP,
+    _CHIP_PADX,
+    _api_router_mounted,
+    window_minsize,
+    window_size,
+)
 from n8n_launcher.gui.ci_runs import RunsPanel
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
 from n8n_launcher.gui.display import GitRowStatus
+from n8n_launcher.gui.layout import ELLIPSIS
 from n8n_launcher.monitoring.events import Event
 from n8n_launcher.monitoring.store import EventStore
 from n8n_launcher.remote import RemoteExecution, RemoteExecutionStatus, RemoteHealth
@@ -43,14 +53,30 @@ from n8n_launcher.workspaces import ci_runs
 
 
 def test_window_size_scales_with_screen() -> None:
-    assert window_size(7680, 2160) == (1280, 820)
-    assert window_size(1920, 1080) == (1152, 778)
-    assert window_size(800, 600) == (720, 460)
+    # The two tables side by side need ~1000px, so a wide screen gets 72% of it
+    # up to the 1600px ceiling rather than 60% of it.
+    assert window_size(7680, 2160) == (1600, 900)
+    assert window_size(1920, 1080) == (1382, 778)
+    assert window_size(2560, 1440) == (1600, 900)
+
+
+def test_window_size_never_exceeds_a_small_screen() -> None:
+    # The 1000px floor is a floor for a large screen only: an 800px-wide display
+    # still gets a window that fits on it.
+    assert window_size(800, 600) == (800, 460)
 
 
 def test_window_size_falls_back_on_unknown_screen() -> None:
-    # A 1px metric means Tk never mapped the window; keep the legacy geometry.
-    assert window_size(1, 1) == (980, 600)
+    # A 1px metric means Tk never mapped the window; keep the default geometry.
+    assert window_size(1, 1) == (1000, 600)
+
+
+def test_window_minsize_is_the_column_floor() -> None:
+    assert window_minsize(3840, 2160) == (1000, 460)
+    # A screen narrower than the floor gets its own width back.
+    assert window_minsize(1024, 768) == (1000, 460)
+    assert window_minsize(800, 600) == (800, 460)
+    assert window_minsize(1, 1) == (1000, 460)
 
 
 class ScreenRoot(FakeRoot):
@@ -80,9 +106,9 @@ def test_configure_root_sizes_window_from_screen(app) -> None:
 
     app.app._configure_root()
 
-    assert fake_root._geometry_calls[0] == "1280x820"
-    # Centred with a slight upward bias; 0.6/0.72 fractions of 3840x2160.
-    assert fake_root._geometry_calls[1] == "+1280+446"
+    assert fake_root._geometry_calls[0] == "1600x900"
+    # Centred with a slight upward bias; 0.72 fractions of 3840x2160, capped.
+    assert fake_root._geometry_calls[1] == "+1120+420"
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -200,6 +226,98 @@ def test_refresh_drops_removed_workspace(app) -> None:
     assert app.app._row_order == ["ws-running"]
     assert "ws-stopped" not in app.app._rows
     assert "ws-stopped" not in app.app._row_order
+
+
+def test_row_chips_are_packed_tightly(app) -> None:
+    # The name is the elastic field of the row, so the chips around it take as
+    # little room as they can: one 4px gap between them, 6px of inner padding.
+    for attr in ("port_chip", "db_chip", "git_chip", "ci_chip", "server_chip", "pipelines_chip"):
+        options = row_chip_pack(app, "ws-running", attr)
+        assert options["side"] == "right"
+        # One 4px gap between the chips, and 6px of padding inside each of them.
+        assert options["padx"] == (_CHIP_GAP, 0)
+        assert _CHIP_GAP == 4
+        chip = row_chip(app, "ws-running", attr)
+        assert chip._options["padx"] == _CHIP_PADX
+        assert _CHIP_PADX == 6
+        assert chip._options["pady"] == 2
+    # The dirty dot and the action button share the same gap on the left.
+    assert row_chip_pack(app, "ws-running", "action_button")["padx"] == (_CHIP_GAP + 2, 0)
+
+
+def test_row_name_keeps_its_full_text_in_a_wide_row(app) -> None:
+    # Plenty of room: the label shows the name as it was typed.
+    label = row_label(app, "ws-running")
+    label._width = 400
+    label._options["text"] = "Running"
+
+    app.app._fit_row_name("ws-running")
+
+    assert row_text(app, "ws-running") == "Running"
+    assert row_full_name(app, "ws-running") == "Running"
+
+
+def test_row_name_is_cut_to_the_width_the_chips_leave(app) -> None:
+    # Not enough room for the whole name: the label is re-cut with an ellipsis
+    # rather than clipped, and the untouched name stays available for the tooltip.
+    label = row_label(app, "ws-running")
+    label._width = 30
+    label._options["text"] = "Running"
+
+    app.app._fit_row_name("ws-running")
+
+    text = row_text(app, "ws-running")
+    assert text.endswith(ELLIPSIS)
+    assert text != "Running"
+    assert row_full_name(app, "ws-running") == "Running"
+
+
+def test_row_name_follows_a_resize_in_both_directions(app) -> None:
+    # The <Configure> binding is what makes the name follow the list width.
+    label = row_label(app, "ws-running")
+    label._width = 30
+    label._bindings["<Configure>"](SimpleNamespace(width=30))
+    narrow = row_text(app, "ws-running")
+    assert narrow.endswith(ELLIPSIS)
+
+    label._width = 400
+    label._bindings["<Configure>"](SimpleNamespace(width=400))
+
+    assert row_text(app, "ws-running") == "Running"
+
+
+def test_row_name_survives_a_refresh_before_it_was_ever_mapped(app) -> None:
+    # A row is stored in ``app._rows`` only after it is built, so the name must be
+    # seeded by the build itself: the first refresh and the first <Configure> would
+    # otherwise read an attribute that was never set.
+    label = row_label(app, "ws-running")
+    label._width = 30
+    app.app._fit_row_name("ws-running", workspace=app.manager.list.return_value[0])
+
+    with patch("n8n_launcher.gui.display.git_row_status", return_value=GitRowStatus()):
+        app.app.refresh()
+
+    assert row_full_name(app, "ws-running") == "Running"
+    assert row_text(app, "ws-running").endswith(ELLIPSIS)
+
+
+def test_row_name_tooltip_shows_the_untouched_name(app) -> None:
+    # Hovering the row shows the full name, so a cut name is never a dead end.
+    label = row_label(app, "ws-running")
+    assert "<Enter>" in label._bindings
+    assert "<Leave>" in label._bindings
+
+    label._width = 30
+    app.app._fit_row_name("ws-running")
+    assert row_text(app, "ws-running").endswith(ELLIPSIS)
+    assert "Running" in row_full_name(app, "ws-running")
+
+
+def test_row_name_of_an_unknown_workspace_is_ignored(app) -> None:
+    # A <Configure> can arrive for a row that was just removed: no crash.
+    app.app._fit_row_name("ws-gone")
+
+    assert "ws-gone" not in app.app._rows
 
 
 def test_each_row_has_db_and_git_chips_clickable_but_no_delete(app) -> None:
@@ -1289,7 +1407,9 @@ def _monitor_scheduled(app) -> list[object]:
 
 def test_main_window_embeds_the_monitoring_panel(app) -> None:
     assert app.app._monitor_panel is not None
-    assert any(button.text == "Tous les workspaces" for button in FakeTtk.Button.instances)
+    # The journal header is a bare download icon: no "Tous les workspaces"
+    # button and no "Actualiser" one (the panel polls on its own timer).
+    assert app.app._monitor_panel._export_icon is not None
 
 
 def test_monitor_events_are_bounded_and_absent_without_a_store(app, tmp_path) -> None:
@@ -1313,15 +1433,20 @@ def test_selecting_a_workspace_scopes_the_journal(app, tmp_path) -> None:
     assert app.app._monitor_panel._scope.text == workspace.name
 
 
-def test_clear_workspace_scope_returns_to_global_logs(app) -> None:
+def test_clicking_the_selected_row_again_returns_to_global_logs(app) -> None:
     app.app._select_row("ws-running")
-    clear = next(
-        button for button in FakeTtk.Button.instances if button.text == "Tous les workspaces"
-    )
-    clear.command()
+    click = app.app._rows["ws-running"][0].name_label._bindings["<Button-1>"]
+    click(None)
     assert app.app._selected_id is None
+    assert app.app._monitor_panel is not None
     assert app.app._monitor_panel._scope.text == ""
     assert "Tous les workspaces" in app.app._monitor_panel._summary.text
+
+
+def test_clicking_another_row_scopes_the_journal_to_it(app) -> None:
+    app.app._select_row("ws-running")
+    app.app._rows["ws-stopped"][0].name_label._bindings["<Button-1>"](None)
+    assert app.app._selected_id == "ws-stopped"
 
 
 def test_apply_monitor_snapshot_reports_critical_events_without_a_window(app, tmp_path) -> None:
@@ -1367,11 +1492,28 @@ def test_apply_monitor_snapshot_initial_pass_never_reports_critical(app, tmp_pat
 
 def test_export_monitor_reports_count_and_path(app, tmp_path) -> None:
     store = _monitor_app(app, tmp_path, [_event(1)])
-    app.app._export_monitor()
-    app.app._drain_events()
     target = store.path.with_name("events-export.json")
+    with patch("n8n_launcher.gui.app.open_folder") as reveal:
+        app.app._export_monitor()
+        app.app._drain_events()
+
     assert target.exists()
     assert app.app._status_label._options["text"] == f"1 événement(s) exportés vers {target}"
+    # The export lands in a hidden log directory: the folder is opened for the
+    # user, otherwise the status line is the only clue where the file went.
+    reveal.assert_called_once_with(target)
+
+
+def test_export_monitor_does_not_open_the_folder_when_the_write_fails(app, tmp_path) -> None:
+    store = _monitor_app(app, tmp_path, [_event(1)])
+    with (
+        patch("n8n_launcher.gui.app.open_folder") as reveal,
+        patch.object(store, "export_events", side_effect=OSError("disk full")),
+    ):
+        app.app._export_monitor()
+        app.app._drain_events()
+
+    reveal.assert_not_called()
 
 
 def test_monitor_tick_keeps_last_snapshot_when_read_fails(app, tmp_path) -> None:

@@ -58,20 +58,33 @@ class FakeTk:
             self._place_options = None
 
     class Label:
+        instances: ClassVar[list["FakeTk.Label"]] = []
+
         def __init__(self, parent, **kwargs):
             self._parent = parent
             self._options = dict(kwargs)
             self._bindings: dict[str, object] = {}
+            self._pack_options: dict[str, object] = {}
+            self._width = 1
+            FakeTk.Label.instances.append(self)
 
         @property
         def text(self):
             """Mirror Tk: ``text`` is just the option set through ``config``."""
             return self._options.get("text", "")
 
-        def pack(self, *_args, **_kwargs) -> None:
+        def winfo_width(self) -> int:
+            """Report the width tests set, like Tk reports the mapped width."""
+            return self._width
+
+        def winfo_height(self) -> int:
+            return 0
+
+        def pack(self, *_args, **kwargs) -> None:
+            self.packed = True
+            self._pack_options = dict(kwargs)
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
-            self.packed = True
 
         def pack_forget(self) -> None:
             self.packed = False
@@ -94,9 +107,6 @@ class FakeTk:
         def winfo_rooty(self) -> int:
             return 0
 
-        def winfo_height(self) -> int:
-            return 0
-
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
 
@@ -110,19 +120,25 @@ class FakeTk:
             self.command = kwargs.get("command")
             self._options = dict(kwargs)
             self.packed = False
+            self._pack_options: dict[str, object] = {}
 
-        def pack(self, *_args, **_kwargs) -> None:
+        def pack(self, *_args, **kwargs) -> None:
             self.packed = True
+            self._pack_options = dict(kwargs)
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
     class Canvas:
+        instances: ClassVar[list["FakeTk.Canvas"]] = []
+
         def __init__(self, _parent, **kwargs):
             self._options = dict(kwargs)
             self._bindings: dict[str, object] = {}
             self._window_id = 0
             self._items: list[object] = []
+            self._lines: dict[int, dict[str, object]] = {}
             self.scrolled = 0
+            FakeTk.Canvas.instances.append(self)
 
         def pack(self, *_args, **_kwargs) -> None:
             pass
@@ -136,9 +152,20 @@ class FakeTk:
             self._items.append(kwargs.get("window"))
             return self._window_id
 
-        def itemconfigure(self, _item_id, **kwargs) -> None:
+        def create_line(self, *coords, **kwargs) -> int:
+            line_id = len(self._lines) + 1
+            self._lines[line_id] = {"coords": coords, **kwargs}
+            return line_id
+
+        def lines(self) -> list[dict[str, object]]:
+            """Return the drawn lines, as ``(coords, options)`` pairs."""
+            return [dict(options) for _id, options in sorted(self._lines.items())]
+
+        def itemconfigure(self, item_id, **kwargs) -> None:
             existing = getattr(self, "_item_kwargs", {})
             self._item_kwargs = {**existing, **kwargs}
+            if item_id in self._lines:
+                self._lines[item_id] = {**self._lines[item_id], **kwargs}
 
         def yview_scroll(self, _n: int, _what: str) -> None:
             self.scrolled += 1
@@ -148,6 +175,15 @@ class FakeTk:
 
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
+
+        def winfo_rootx(self) -> int:
+            return 0
+
+        def winfo_rooty(self) -> int:
+            return 0
+
+        def winfo_height(self) -> int:
+            return 20
 
     class StringVar:
         def __init__(self, value=""):
@@ -383,10 +419,12 @@ class FakeTtk:
             self.state = kwargs.pop("state", "normal")
             self._options = dict(kwargs)
             self.packed = False
+            self._pack_options: dict[str, object] = {}
             FakeTtk.Button.instances.append(self)
 
-        def pack(self, *_args, **_kwargs) -> None:
+        def pack(self, *_args, **kwargs) -> None:
             self.packed = True
+            self._pack_options = dict(kwargs)
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
@@ -397,29 +435,6 @@ class FakeTtk:
                     setattr(self, key, kwargs.pop(key))
             self._options.update(kwargs)
 
-    class Radiobutton:
-        instances: ClassVar[list["FakeTtk.Radiobutton"]] = []
-
-        def __init__(self, _parent, **kwargs):
-            self._parent = _parent
-            self.text = kwargs.pop("text", None)
-            self.value = kwargs.pop("value", None)
-            self.variable = kwargs.pop("variable", None)
-            self.command = kwargs.pop("command", None)
-            self._options = dict(kwargs)
-            self.packed = False
-            FakeTtk.Radiobutton.instances.append(self)
-
-        def pack(self, *_args, **_kwargs) -> None:
-            self.packed = True
-            if hasattr(self._parent, "children"):
-                self._parent.children.append(self)
-
-        def select(self) -> None:
-            """Mirror ttk: point the shared variable at this button's value."""
-            if self.variable is not None:
-                self.variable.set(self.value)
-
     class Treeview:
         instances: ClassVar[list["FakeTtk.Treeview"]] = []
 
@@ -428,7 +443,9 @@ class FakeTtk:
             self._items: dict[str, dict[str, object]] = {}
             self._bindings: dict[str, object] = {}
             self._headings: dict[str, object] = {}
+            self._columns: dict[str, dict[str, object]] = {}
             self._selection: list[str] = []
+            self._width = 1
             self.element = "Treeitem.text"
             self.packed = False
             FakeTtk.Treeview.instances.append(self)
@@ -436,8 +453,17 @@ class FakeTtk:
         def heading(self, column: str, **kwargs) -> None:
             self._headings[column] = dict(kwargs)
 
-        def column(self, _column: str, **_kwargs) -> None:
-            pass
+        def column(self, column: str, **kwargs) -> None:
+            """Record the pushed options so layout tests can assert on them."""
+            self._columns[column] = dict(kwargs)
+
+        def column_widths(self) -> dict[str, int]:
+            """Return the last width pushed to each column."""
+            return {name: int(options.get("width", 0)) for name, options in self._columns.items()}
+
+        def winfo_width(self) -> int:
+            """Report the width tests set, like Tk reports the mapped width."""
+            return self._width
 
         def tag_configure(self, _tag: str, **_kwargs) -> None:
             pass
@@ -713,12 +739,26 @@ INACTIVE_CHIP = ("#7f1d1d", "#fca5a5")
 WARN_CHIP = ("#78350f", "#fcd34d")
 
 
+def all_labels(tk_fake=FakeTk) -> list[FakeTk.Label]:
+    """Return every ``tk.Label`` built against *tk_fake*, in creation order."""
+    return list(tk_fake.Label.instances)
+
+
 def row_label(app, workspace_id: str) -> FakeTk.Label:
     return app.app._rows[workspace_id][1]
 
 
+def row_full_name(app, workspace_id: str) -> str:
+    return app.app._rows[workspace_id][0].full_name
+
+
 def row_text(app, workspace_id: str) -> str:
     return row_label(app, workspace_id)._options["text"]
+
+
+def row_chip_pack(app, workspace_id: str, attr: str) -> dict[str, object]:
+    """Return the ``pack`` options of one row chip (its gap, its own padding)."""
+    return row_chip(app, workspace_id, attr)._pack_options
 
 
 def row_chip(app, workspace_id: str, attr: str):

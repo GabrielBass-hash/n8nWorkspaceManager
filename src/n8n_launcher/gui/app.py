@@ -31,6 +31,7 @@ from ..github.api import GitHubClient, GitHubError
 from ..monitoring.events import Event
 from ..monitoring.store import EventStore
 from ..platform.browser import open_app, open_url
+from ..platform.files import open_folder
 from ..workspaces import ci, ci_runs
 from ..workspaces.ci_runs import RunsSnapshot
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
@@ -56,6 +57,7 @@ from .dialogs import (
     prompt_github_token,
     prompt_server_config,
 )
+from .layout import ellipsize, screen_fraction_size, screen_size
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
@@ -83,25 +85,38 @@ from .theme import (
     TEXT_PRIMARY,
     configure_fonts,
     state_label,
+    text_measure,
 )
 from .update_flow import UpdateController
 
 logger = logging.getLogger(__name__)
 
 # The main window is sized as a clamped fraction of the physical screen (see
-# ``window_size``): a fixed 980x600 geometry is a postage stamp on
-# high-resolution displays (e.g. 7680x2160) and an oversized box on small
-# laptops. Fonts stay point-sized, so the UI reflows with ``tk scaling``.
-# ``DEFAULT_WINDOW_*`` are the fallback geometry when screen metrics are
-# unavailable (a metric of 1 pixel means Tk never mapped the window).
-MIN_WINDOW_WIDTH = 720
+# ``window_size``): a fixed geometry is a postage stamp on high-resolution
+# displays (e.g. 7680x2160) and an oversized box on small laptops. Fonts stay
+# point-sized, so the UI reflows with ``tk scaling``. ``DEFAULT_WINDOW_*`` are
+# the fallback geometry when screen metrics are unavailable (a metric of 1 pixel
+# means Tk never mapped the window).
+#
+# The width fraction is generous on purpose: the window holds the workspace list
+# *and* the event journal side by side, and the two together need ~1000 pixels
+# before a single column is clipped. ``MIN_WINDOW_WIDTH`` is that same floor, so
+# resizing by hand cannot squeeze the tables either.
+MIN_WINDOW_WIDTH = 1000
 MIN_WINDOW_HEIGHT = 460
-MAX_WINDOW_WIDTH = 1280
-MAX_WINDOW_HEIGHT = 820
-WINDOW_WIDTH_FRACTION = 0.6
+MAX_WINDOW_WIDTH = 1600
+MAX_WINDOW_HEIGHT = 900
+WINDOW_WIDTH_FRACTION = 0.72
 WINDOW_HEIGHT_FRACTION = 0.72
-DEFAULT_WINDOW_WIDTH = 980
+DEFAULT_WINDOW_WIDTH = 1000
 DEFAULT_WINDOW_HEIGHT = 600
+
+# Chips carry short fixed content ("git", "CI", ":5678") and must never be
+# clipped, so the workspace name is the one elastic field of a row and these two
+# paddings are what it has to work with. Kept tight on purpose: six chips side
+# by side are ~370px of a ~500px pane.
+_CHIP_PADX = 6
+_CHIP_GAP = 4
 
 # Concurrent workspace starts are bounded by a semaphore: allowing eight
 # "Démarrer" clicks to spawn eight ``docker compose up`` at once would thresh
@@ -144,17 +159,28 @@ def _server_panel_of(window: tk.Toplevel) -> monitoring.ServerPanel:
 
 def window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
     """Pick the main-window geometry as a clamped fraction of the screen."""
-    width = (
-        round(screen_width * WINDOW_WIDTH_FRACTION) if screen_width > 1 else DEFAULT_WINDOW_WIDTH
+    return screen_fraction_size(
+        screen_width,
+        screen_height,
+        fraction=(WINDOW_WIDTH_FRACTION, WINDOW_HEIGHT_FRACTION),
+        minimum=(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
+        maximum=(MAX_WINDOW_WIDTH, MAX_WINDOW_HEIGHT),
+        default=(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
     )
-    height = (
-        round(screen_height * WINDOW_HEIGHT_FRACTION)
-        if screen_height > 1
-        else DEFAULT_WINDOW_HEIGHT
+
+
+def window_minsize(screen_width: int, screen_height: int) -> tuple[int, int]:
+    """Return the narrowest window that still shows every column.
+
+    The 1000px floor is what keeps the journal and a workspace row from
+    collapsing when the user drags the window smaller; a screen narrower than
+    that floor gets its own width as the minimum, so the launcher never opens
+    (or refuses to shrink) wider than the display it lives on.
+    """
+    return (
+        min(MIN_WINDOW_WIDTH, screen_width) if screen_width > 1 else MIN_WINDOW_WIDTH,
+        min(MIN_WINDOW_HEIGHT, screen_height) if screen_height > 1 else MIN_WINDOW_HEIGHT,
     )
-    width = min(max(width, MIN_WINDOW_WIDTH), MAX_WINDOW_WIDTH)
-    height = min(max(height, MIN_WINDOW_HEIGHT), MAX_WINDOW_HEIGHT)
-    return width, height
 
 
 def open_n8n_app(url: str, profile_dir: Path) -> None:
@@ -193,6 +219,9 @@ class RowFrame(Protocol):
     pipelines_chip: tk.Label
     action_button: ttk.Button
     dirty_dot: tk.Label
+    # The workspace name as given, before ``_fit_row_name`` shortened it to fit
+    # the row: this is what the tooltip shows when the label shows an ellipsis.
+    full_name: str
 
     def pack(self, **kwargs: object) -> None: ...
     def bind(
@@ -273,6 +302,11 @@ class LauncherApp:
         # instead of spending the API budget on every 5s tick.
         self._github_session = requests.Session()
         self._ci_runs_fetched_at: dict[str, float] = {}
+        # Text metrics for the row layout: the workspace name is cut to whatever
+        # width the status chips leave over (see ``_fit_row_name``). Resolved by
+        # ``_apply_theme`` through ``text_measure``'s lazy lookup, so the named
+        # font is measured against the real family once it exists.
+        self._measure: Callable[[str], int] = text_measure(self.root, FONT_ROWS)
         self._apply_theme()
         self._configure_root()
         self._build_ui()
@@ -412,15 +446,13 @@ class LauncherApp:
         except Exception:
             pass
         try:
-            self.root.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+            self.root.minsize(*window_minsize(*screen_size(self.root)))
             self.root.configure(bg=APP_BACKGROUND)
         except Exception:
             pass
         if self._owns_root:
             try:
-                width, height = window_size(
-                    self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-                )
+                width, height = window_size(*screen_size(self.root))
                 self.root.geometry(f"{width}x{height}")
                 self.root.update_idletasks()
                 x = (self.root.winfo_screenwidth() - width) // 2
@@ -487,9 +519,8 @@ class LauncherApp:
         content.add(monitor_card, weight=4)
         self._monitor_panel = monitoring.MonitoringPanel(
             monitor_card,
-            on_refresh=self._refresh_monitor,
             on_export=self._export_monitor,
-            on_clear_workspace=self._clear_selected_workspace,
+            tooltip=self._attach_tooltip,
         )
         self._monitor_panel.pack(fill="both", expand=True)
         self.workspace_list = tk.Frame(self._list_canvas, bg=SURFACE)
@@ -722,7 +753,7 @@ class LauncherApp:
             palette=CHIP_WARN if git_status.dirty else (SURFACE, SURFACE),
         )
         if git_status.dirty:
-            dirty_dot.pack(side="left", padx=(8, 0))
+            dirty_dot.pack(side="left", padx=(_CHIP_GAP, 0))
 
         name_label.pack(side="left", fill="x", expand=True)
 
@@ -750,14 +781,14 @@ class LauncherApp:
             state=action_state,
             command=action_command,  # type: ignore[arg-type]  # ttk accepts None for an empty command; typeshed only allows str/callable
         )
-        action_button.pack(side="right", padx=(6, 0))
+        action_button.pack(side="right", padx=(_CHIP_GAP + 2, 0))
 
         port_chip = self._chip(row, text=f":{workspace.port}", palette=CHIP_NEUTRAL)
-        port_chip.pack(side="right", padx=(6, 0))
+        port_chip.pack(side="right", padx=(_CHIP_GAP, 0))
 
         db_palette = CHIP_ACTIVE if display.db_connected(workspace) else CHIP_INACTIVE
         db_chip = self._chip(row, text=display.db_label(workspace), palette=db_palette)
-        db_chip.pack(side="right", padx=(6, 0))
+        db_chip.pack(side="right", padx=(_CHIP_GAP, 0))
         db_chip.configure(cursor="hand2")
         db_chip.bind("<Button-1>", lambda _event, wid=workspace.id: self._on_db_chip_click(wid))
         self._attach_tooltip(
@@ -772,13 +803,13 @@ class LauncherApp:
             text=display.git_row_label(git_status),
             palette=self._git_chip_palette(git_status),
         )
-        git_chip.pack(side="right", padx=(6, 0))
+        git_chip.pack(side="right", padx=(_CHIP_GAP, 0))
         git_chip.configure(cursor="hand2")
         git_chip.bind("<Button-1>", lambda _event, wid=workspace.id: self._on_git_chip_click(wid))
         self._attach_tooltip(git_chip, git_status.tooltip)
 
         ci_chip = self._chip(row, text="CI", palette=self._ci_chip_palette(workspace))
-        ci_chip.pack(side="right", padx=(6, 0))
+        ci_chip.pack(side="right", padx=(_CHIP_GAP, 0))
         ci_chip.configure(cursor="hand2")
         ci_chip.bind("<Button-1>", lambda _event, wid=workspace.id: self._on_ci_chip_click(wid))
         self._attach_tooltip(ci_chip, display.ci_tooltip(workspace))
@@ -788,7 +819,7 @@ class LauncherApp:
             text=display.server_label(workspace),
             palette=self._server_chip_palette(workspace),
         )
-        server_chip.pack(side="right", padx=(6, 0))
+        server_chip.pack(side="right", padx=(_CHIP_GAP, 0))
         server_chip.configure(cursor="hand2")
         server_chip.bind(
             "<Button-1>", lambda _event, wid=workspace.id: self._on_server_chip_click(wid)
@@ -797,9 +828,9 @@ class LauncherApp:
 
         pipelines = display.pipelines_count(workspace.workflows_dir)
         pipelines_chip = self._chip(row, text=str(pipelines), palette=CHIP_NEUTRAL)
-        pipelines_chip.pack(side="right", padx=(6, 0))
+        pipelines_chip.pack(side="right", padx=(_CHIP_GAP, 0))
 
-        name_label.bind("<Button-1>", lambda _event, wid=workspace.id: self._select_row(wid))
+        name_label.bind("<Button-1>", lambda _event, wid=workspace.id: self._on_row_click(wid))
         name_label.bind(
             "<Double-Button-1>",
             lambda _event, wid=workspace.id: self._handle_double(wid),
@@ -808,6 +839,9 @@ class LauncherApp:
             "<Button-3>",
             lambda event, wid=workspace.id: self._show_context_menu(event, wid),
         )
+        # Resizing the list (or the window) hands the name whatever width the
+        # chips left over, so the label is re-cut instead of clipping silently.
+        name_label.bind("<Configure>", lambda _event, wid=workspace.id: self._fit_row_name(wid))
         row.bind(
             "<Double-Button-1>",
             lambda _event, wid=workspace.id: self._handle_double(wid),
@@ -823,12 +857,58 @@ class LauncherApp:
         frame.db_chip = db_chip
         frame.git_chip = git_chip
         frame.ci_chip = ci_chip
+        frame.server_chip = server_chip
         frame.port_chip = port_chip
         frame.pipelines_chip = pipelines_chip
         frame.action_button = action_button
         frame.dirty_dot = dirty_dot
-        frame.server_chip = server_chip
+        # Set before the first cut: the row is not in ``self._rows`` until the
+        # caller stores it, so the name and its tooltip are seeded here rather
+        # than through ``_fit_row_name`` (which looks the row up by id).
+        frame.full_name = workspace.name
+        self._attach_tooltip(frame.name_label, display.row_tooltip(workspace))
+        self._fit_label(frame)
         return frame, name_label
+
+    def _fit_row_name(self, workspace_id: str, workspace: Workspace | None = None) -> None:
+        """Re-cut the workspace name to the width its row can spare.
+
+        A row is a row of widgets, not a table: the six status chips and the
+        action button hold short fixed content, and the name is the only field
+        allowed to yield. Cutting it here — rather than letting Tk clip the
+        label — is what guarantees no chip is ever truncated, and the untouched
+        name stays readable in the row's tooltip.
+        """
+        entry = self._rows.get(workspace_id)
+        if entry is None:
+            return
+        row = entry[0]
+        if workspace is not None:
+            # A refresh may carry a renamed workspace (or a new port/state), so
+            # both the cut text and the tooltip are refreshed with it.
+            row.full_name = workspace.name
+            self._attach_tooltip(row.name_label, display.row_tooltip(workspace))
+        self._fit_label(row)
+
+    def _fit_label(self, row: RowFrame) -> None:
+        """Re-cut one row's name label to the width the chips left it.
+
+        An unmapped label reports a width of 1, which leaves the name intact
+        until the real size is known.
+        """
+        label = row.name_label
+        try:
+            width = label.winfo_width()
+        except Exception:
+            width = 0
+        text = ellipsize(row.full_name, width, self._measure) if width > 1 else row.full_name
+        try:
+            if label.cget("text") == text:
+                return
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            label.config(text=text)
 
     @staticmethod
     def _chip(
@@ -837,7 +917,7 @@ class LauncherApp:
         *,
         palette: tuple[str, str],
         font: str | tuple[str, int, str] = FONT_PILL,
-        padx: int = 8,
+        padx: int = _CHIP_PADX,
         pady: int = 2,
     ) -> tk.Label:
         bg, fg = palette
@@ -880,7 +960,7 @@ class LauncherApp:
             return CHIP_WARN
         return CHIP_ACTIVE
 
-    def _attach_tooltip(self, widget: tk.Label, text: str) -> None:
+    def _attach_tooltip(self, widget: tk.Misc, text: str) -> None:
         """Show *text* in a small frameless window while hovering the widget."""
         if not text:
             return
@@ -1055,13 +1135,15 @@ class LauncherApp:
         handler), so hovering always shows current data.
         """
         row = self._rows[workspace.id][0]
-        row.name_label.config(text=workspace.name)
         git_status = display.git_row_status(workspace)
+        # Re-cut the name (and refresh its tooltip) instead of writing the raw
+        # text, so a rename that no longer fits the row is shortened right away.
+        self._fit_row_name(workspace.id, workspace=workspace)
 
         row.dirty_dot.config(text="•" if git_status.dirty else "")
         if git_status.dirty:
             row.dirty_dot.config(bg=CHIP_WARN[0], fg=CHIP_WARN[1])
-            row.dirty_dot.pack(side="left", padx=(8, 0))
+            row.dirty_dot.pack(side="left", padx=(_CHIP_GAP, 0))
         else:
             row.dirty_dot.config(bg=SURFACE, fg=SURFACE)
             row.dirty_dot.pack_forget()
@@ -1194,10 +1276,6 @@ class LauncherApp:
             workspace=self._selected_workspace(),
         )
 
-    def _refresh_monitor(self) -> None:
-        """Request a fresh journal snapshot from the background poller."""
-        self._monitor_tick()
-
     def _export_monitor(self) -> None:
         """Export the complete retained journal without blocking the GUI."""
         store = self.monitor
@@ -1213,15 +1291,15 @@ class LauncherApp:
             exported = store.export_events(target)
 
         def done() -> None:
-            """Report the completed journal export."""
+            """Report the completed journal export and reveal where it landed."""
             count = exported or 0
             self.set_status(f"{count} événement(s) exportés vers {target}")
+            # The export path is a hidden dot-directory under the log dir: show
+            # the folder, otherwise the status line is the only hint of where
+            # the file went.
+            open_folder(target)
 
         self._run_async(export, on_success=done)
-
-    def _clear_selected_workspace(self) -> None:
-        """Clear the workspace scope from the integrated journal."""
-        self._set_selected_workspace(None)
 
     def _set_selected_workspace(self, workspace_id: str | None) -> None:
         """Set the selected workspace and refresh the journal scope."""
@@ -1337,6 +1415,19 @@ class LauncherApp:
 
     def _select_row(self, workspace_id: str) -> None:
         self._set_selected_workspace(workspace_id)
+
+    def _on_row_click(self, workspace_id: str) -> None:
+        """Select the clicked row, or clear the selection when it is re-clicked.
+
+        Clicking the selected row again is the only way back to the global
+        journal now that the panel has no "Tous les workspaces" button (a click
+        on the list's free area opens the creation wizard instead). The toggle
+        lives here and not in ``_select_row``, which the double-click and
+        context-menu paths call to *ensure* a selection.
+        """
+        self._set_selected_workspace(
+            None if workspace_id == self._selected_id else workspace_id,
+        )
 
     def _handle_double(self, workspace_id: str) -> None:
         # A double-click fires twice; the second event must not restart a

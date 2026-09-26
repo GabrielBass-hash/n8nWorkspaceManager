@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -39,7 +40,7 @@ def fake_gui():
 def _clear_fake_widgets():
     """Keep the shared fake widget registries from leaking across tests."""
     FakeTtk.Button.instances.clear()
-    FakeTtk.Radiobutton.instances.clear()
+    FakeTk.Canvas.instances.clear()
     FakeTk.Toplevel.instances.clear()
     yield
 
@@ -174,14 +175,9 @@ def test_summary_text_without_store():
 
 
 # ------------------------------------------------------------------ filters
-def test_filter_events_by_level():
+def test_filter_events_without_query_keeps_everything():
     events = [make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")]
-    assert [event.id for event in monitoring.filter_events(events, level="error")] == [2]
-
-
-def test_filter_events_without_level_keeps_everything():
-    events = [make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")]
-    assert len(monitoring.filter_events(events)) == 2
+    assert monitoring.filter_events(events) == events
 
 
 def test_filter_events_matches_message_case_insensitively():
@@ -200,20 +196,16 @@ def test_filter_events_searches_source_context_and_exception():
     assert monitoring.filter_events(events, query="   ") == list(events)
 
 
-def test_filter_events_combines_level_and_query():
+def test_filter_events_matches_the_level():
+    # No level control exists: the severity is simply part of the searched
+    # text, so typing its name narrows the table to that severity.
     events = [
-        make_event(id=1, level="ERROR", message="docker down"),
-        make_event(id=2, level="ERROR", message="git push"),
-        make_event(id=3, level="INFO", message="docker up"),
+        make_event(id=1, level="INFO", message="ok"),
+        make_event(id=2, level="ERROR", message="ko"),
+        make_event(id=3, level="WARNING", message="meh"),
     ]
-    matches = monitoring.filter_events(events, level="ERROR", query="docker")
-    assert [event.id for event in matches] == [1]
-
-
-def test_filter_options_offer_every_level_plus_all():
-    assert any(value == "" for _label, value in monitoring.filter_options())
-    values = {value for _label, value in monitoring.filter_options()}
-    assert {"CRITICAL", "ERROR", "WARNING", "INFO"} <= values
+    assert [event.id for event in monitoring.filter_events(events, query="error")] == [2]
+    assert [event.id for event in monitoring.filter_events(events, query="warning")] == [3]
 
 
 # ------------------------------------------------------------- critical gate
@@ -257,6 +249,49 @@ def test_critical_gate_forget_clears_a_signature():
 
 def test_critical_gate_default_window_is_a_minute():
     assert monitoring.DEFAULT_GROUP_WINDOW_SECONDS == 60.0
+
+
+# ------------------------------------------------------------ download icon
+def test_download_icon_draws_a_muted_glyph():
+    with fake_gui():
+        icon = monitoring._download_icon(FakeTk.Frame(None), command=lambda: None)
+    assert icon._options["width"] == 24
+    assert icon._options["cursor"] == "hand2"
+    assert icon._options["takefocus"] is True
+    assert len(icon.lines()) == len(monitoring._ICON_STROKES)
+    assert all(line["fill"] == monitoring.TEXT_MUTED for line in icon.lines())
+
+
+def test_download_icon_runs_its_command_on_click_and_from_the_keyboard():
+    calls: list[str] = []
+    with fake_gui():
+        icon = monitoring._download_icon(FakeTk.Frame(None), command=lambda: calls.append("x"))
+        for sequence in ("<Button-1>", "<Return>", "<Key-space>"):
+            icon._bindings[sequence](None)
+    assert calls == ["x", "x", "x"]
+
+
+def test_download_icon_highlights_its_strokes_on_hover():
+    with fake_gui():
+        icon = monitoring._download_icon(FakeTk.Frame(None), command=lambda: None)
+        icon._bindings["<Enter>"](None)
+        hovered = icon.lines()
+        icon._bindings["<Leave>"](None)
+        left = icon.lines()
+    assert all(line["fill"] == monitoring.TEXT_PRIMARY for line in hovered)
+    assert all(line["fill"] == monitoring.TEXT_MUTED for line in left)
+
+
+def test_download_icon_raises_a_tooltip_only_when_the_host_provides_one():
+    hints: list[tuple[str, str]] = []
+    with fake_gui():
+        monitoring._download_icon(
+            FakeTk.Frame(None),
+            command=lambda: None,
+            tooltip=lambda widget, text: hints.append((widget.__class__.__name__, text)),
+        )
+        monitoring._download_icon(FakeTk.Frame(None), command=lambda: None)
+    assert hints == [("Canvas", "Exporter le journal (JSON)")]
 
 
 # -------------------------------------------------------------------- panel
@@ -325,8 +360,8 @@ def test_panel_selected_event_is_none_without_selection():
 def test_panel_apply_filters_rows():
     with fake_gui():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
-        events = [make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")]
-        panel.apply(events, store=None, level="ERROR")
+        events = [make_event(id=1, message="docker up"), make_event(id=2, message="git push")]
+        panel.apply(events, store=None, query="git")
     assert panel.tree.get_children() == ["event-2"]
 
 
@@ -621,24 +656,10 @@ def test_monitoring_panel_can_return_to_global_scope(tmp_path):
             workspace=None,
         )
     assert panel.tree.get_children() == ["event-1", "event-2"]
-    # Back to the global scope: the header label is emptied because the
-    # "Tous les workspaces" button already names that scope.
+    # Back to the global scope: the header label is emptied because the global
+    # scope needs no wording — it is the default one.
     assert panel._scope.text == ""
     assert "Tous les workspaces · 2 événement(s)" in panel._summary.text
-
-
-def test_monitoring_panel_radio_filter_reuses_cached_events(tmp_path):
-    with fake_gui():
-        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
-        panel.apply([make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")])
-        error = next(
-            button
-            for button in FakeTtk.Radiobutton.instances
-            if button.text == "Erreur" and button.value == "ERROR"
-        )
-        error.select()
-        error.command()
-    assert panel.tree.get_children() == ["event-2"]
 
 
 def test_monitoring_panel_search_reuses_cached_events():
@@ -651,7 +672,215 @@ def test_monitoring_panel_search_reuses_cached_events():
     assert panel.tree.get_children() == ["event-2"]
 
 
-def test_monitoring_panel_clear_callback_is_optional():
+def test_monitoring_panel_search_filters_by_level():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")])
+        entry = next(widget for widget in _walk(panel) if isinstance(widget, FakeTk.Entry))
+        entry.insert(0, "ERROR")
+        entry._bindings["<Return>"](None)
+    assert panel.tree.get_children() == ["event-2"]
+
+
+def test_monitoring_panel_has_a_search_field_and_no_filter_buttons():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+    entry = next(widget for widget in _walk(panel) if isinstance(widget, FakeTk.Entry))
+    # The dark entry blends into the panel; a raw Tk entry would be white.
+    assert entry._options["bg"] == monitoring.SURFACE
+    assert entry._options["fg"] == monitoring.TEXT_PRIMARY
+    assert entry._options["insertbackground"] == monitoring.TEXT_PRIMARY
+    # A single field replaces the five level radio buttons.
+    assert not FakeTtk.Button.instances
+
+
+def test_monitoring_panel_placeholder_hides_as_soon_as_the_field_is_used():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        assert panel._placeholder._options["text"] == "Rechercher…"
+        assert panel._placeholder._place_options is not None
+        panel._entry.insert(0, "docker")
+        panel._render()
+    assert panel._placeholder._place_options is None
+
+
+def test_monitoring_panel_placeholder_click_focuses_the_search_field():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel._placeholder._bindings["<Button-1>"](None)
+    assert panel._entry._focused is True
+
+
+def test_monitoring_panel_export_callback_is_optional():
     with fake_gui():
         monitoring.MonitoringPanel(FakeTk.Frame(None))
-    assert all(button.text != "Tous les workspaces" for button in FakeTtk.Button.instances)
+    assert not FakeTk.Canvas.instances
+
+
+def test_monitoring_panel_exports_through_the_download_icon():
+    exports: list[str] = []
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(
+            FakeTk.Frame(None),
+            on_export=lambda: exports.append("json"),
+            tooltip=lambda widget, _text: None,
+        )
+        assert FakeTk.Canvas.instances == [panel._export_icon]
+        panel._export_icon._bindings["<Button-1>"](None)
+    assert exports == ["json"]
+
+
+def test_panel_tree_is_requested_at_its_minimum_widths():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+
+    # The journal opens on the room the four columns really need, not on the
+    # ~1060px a fixed set of widths used to ask for before a character was shown.
+    assert panel.tree.column_widths() == dict(monitoring._JOURNAL_MINIMUMS)
+    for name, width in panel.tree.column_widths().items():
+        assert width == monitoring._JOURNAL_MINIMUMS[name]
+
+
+def test_panel_tree_columns_fit_the_pane_once_it_is_mapped():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.tree._width = 900
+        panel.apply([make_event(id=1, message="démarrage du workspace")], store=None)
+
+    widths = panel.tree.column_widths()
+    # The message column carries the prose: it is the one that grows, while the
+    # short columns stay at the width of what they hold.
+    assert widths["message"] == 900 - widths["time"] - widths["level"] - widths["name"]
+    assert widths["message"] > monitoring._JOURNAL_MINIMUMS["message"]
+    assert (
+        monitoring._JOURNAL_MINIMUMS["name"]
+        <= widths["name"]
+        < monitoring._JOURNAL_MAXIMUMS["name"]
+    )
+    # Every column stays inside its declared bounds.
+    for name, width in widths.items():
+        assert monitoring._JOURNAL_MINIMUMS[name] <= width <= monitoring._JOURNAL_MAXIMUMS[name]
+
+
+def test_panel_tree_refits_when_the_sash_moves():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1)], store=None)
+        panel.tree._width = 600
+        panel.tree._bindings["<Configure>"](SimpleNamespace(width=600))
+        narrow = panel.tree.column_widths()["message"]
+
+        panel.tree._width = 1200
+        panel.tree._bindings["<Configure>"](SimpleNamespace(width=1200))
+
+    # The journal pane follows the sash instead of clipping the message.
+    assert panel.tree.column_widths()["message"] > narrow
+
+
+def test_panel_detail_wraps_at_its_own_width():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel._detail._width = 524
+
+    panel._detail._bindings["<Configure>"](SimpleNamespace(width=524))
+
+    # 500 = 524 - 24 of padding: the detail never wraps at a stale hard-coded px.
+    assert panel._detail._options["wraplength"] == 500
+
+
+def test_server_panel_label_wraps_at_its_own_width():
+    with fake_gui():
+        panel = monitoring.ServerPanel(FakeTk.Frame(None))
+        panel.apply(ServerSnapshot(health=_health(), logs="ready"))
+        panel._label._width = 628
+
+    panel._label._bindings["<Configure>"](SimpleNamespace(width=628))
+
+    assert panel._label._options["wraplength"] == 600
+
+
+# --- Ctrl+C: copy the selected event ----------------------------------------
+
+
+def test_ctrl_c_is_bound_on_the_table_only():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        entry = panel._entry
+
+    # Tk delivers a key to the focused widget, its class and the toplevel, so the
+    # shortcut is bound on the table — a binding on the panel would never fire,
+    # and one bound more widely would take the search field's own Ctrl+C away.
+    assert "<Control-c>" in panel.tree._bindings
+    assert "<Control-c>" not in panel._bindings
+    assert "<Control-c>" not in entry._bindings
+
+
+def test_ctrl_c_copies_the_selected_event_whole():
+    event = make_event(
+        id=2,
+        level="ERROR",
+        name="publish",
+        message="git push refusé",
+        context={"workspace": "demo", "port": 5678},
+        exception="Traceback:\n  push failed",
+    )
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1), event], store=None)
+        # A click on a row selects it and refreshes the detail pane, as Tk does.
+        panel.tree.selection_set("event-2")
+        panel.tree._bindings["<<TreeviewSelect>>"](None)
+        copied: list[str] = []
+        panel.clipboard_clear = lambda: copied.clear()
+        panel.clipboard_append = copied.append
+
+        result = panel.tree._bindings["<Control-c>"](None)
+
+    # Exactly one event, and the whole of it: the same text the detail pane shows.
+    assert result == "break"
+    assert copied == [monitoring.event_detail(event)]
+    assert copied[0] == panel._detail.text
+    # The other row is not part of it: one event, not the table.
+    assert "premier" not in copied[0]
+
+
+def test_ctrl_c_without_a_selection_leaves_the_clipboard_alone():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1)], store=None)
+        copied: list[str] = []
+        panel.clipboard_clear = lambda: copied.clear()
+        panel.clipboard_append = copied.append
+
+        result = panel.tree._bindings["<Control-c>"](None)
+
+    assert result == "break"
+    assert copied == []
+
+
+def test_ctrl_c_follows_the_current_selection():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        first, second = make_event(id=1, message="premier"), make_event(id=2, message="deuxième")
+        panel.apply([first, second], store=None)
+        # A clipboard that keeps every append, so both copies are visible.
+        copied: list[str] = []
+        panel.clipboard_clear = lambda: None
+        panel.clipboard_append = copied.append
+
+        panel.tree.selection_set("event-1")
+        panel.tree._bindings["<Control-c>"](None)
+        panel.tree.selection_set("event-2")
+        panel.tree._bindings["<Control-c>"](None)
+
+    assert [text.splitlines()[1] for text in copied] == ["premier", "deuxième"]
+
+
+def test_copy_survives_a_clipboard_that_is_unavailable():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1)], store=None)
+        panel.tree.selection_set("event-1")
+        panel.clipboard_clear = lambda: (_ for _ in ()).throw(RuntimeError("no clipboard"))
+
+        assert panel.tree._bindings["<Control-c>"](None) == "break"
