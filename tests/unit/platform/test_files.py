@@ -3,7 +3,7 @@
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,7 +22,9 @@ def _patch_platform(monkeypatch: pytest.MonkeyPatch, *, platform: str, name: str
     """Force the platform branch of ``_opener`` regardless of the runner OS."""
     monkeypatch.setattr("n8n_launcher.platform.files.sys.platform", platform)
     monkeypatch.setattr("n8n_launcher.platform.files.os.name", name)
-    monkeypatch.setattr("n8n_launcher.platform.files.shutil.which", lambda _name: "/usr/bin/xdg-open")
+    monkeypatch.setattr(
+        "n8n_launcher.platform.files.shutil.which", lambda _name: "/usr/bin/xdg-open"
+    )
 
 
 def test_opener_is_platform_specific(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,9 +58,7 @@ def test_open_folder_uses_the_directory_itself(tmp_path: Path, popen: MagicMock)
     assert popen.call_args.args[0][1] == str(tmp_path)
 
 
-def test_open_folder_detaches_the_file_manager(
-    tmp_path: Path, popen: MagicMock
-) -> None:
+def test_open_folder_detaches_the_file_manager(tmp_path: Path, popen: MagicMock) -> None:
     """The file manager outlives the launcher, so it must not share its stdio."""
     open_folder(tmp_path / "events-export.json")
 
@@ -79,9 +79,7 @@ def test_open_folder_is_a_no_op_without_a_file_manager(
     popen.assert_not_called()
 
 
-def test_open_folder_never_raises_when_the_launch_fails(
-    tmp_path: Path, popen: MagicMock
-) -> None:
+def test_open_folder_never_raises_when_the_launch_fails(tmp_path: Path, popen: MagicMock) -> None:
     popen.side_effect = OSError("no file manager here")
 
     open_folder(tmp_path / "events-export.json")

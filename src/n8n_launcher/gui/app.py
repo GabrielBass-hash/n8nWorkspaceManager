@@ -35,7 +35,7 @@ from ..platform.files import open_folder
 from ..workspaces import ci, ci_runs
 from ..workspaces.ci_runs import RunsSnapshot
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
-from . import ci_edit, display, monitoring
+from . import ci_edit, ci_page, display, monitoring, pages, server_page
 from .ci_runs import RunsPanel
 from .close import CloseController
 from .dialogs import (
@@ -58,6 +58,7 @@ from .dialogs import (
     prompt_server_config,
 )
 from .layout import ellipsize, screen_fraction_size, screen_size
+from .pages import PageKind
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
@@ -118,6 +119,13 @@ DEFAULT_WINDOW_HEIGHT = 600
 _CHIP_PADX = 6
 _CHIP_GAP = 4
 
+# The narrowest the workspace list may be squeezed to when the journal's table
+# needs the rest of the window: the sash is moved to give the journal its
+# columns, and the list is a column of ellipsized names and chips that stays
+# usable down to this. Below it the window is grown instead (once), and on a
+# display too small for both the table keeps its columns and is simply cut.
+_LIST_PANE_MINIMUM = 240
+
 # Concurrent workspace starts are bounded by a semaphore: allowing eight
 # "Démarrer" clicks to spawn eight ``docker compose up`` at once would thresh
 # on image pulls and saturate the daemon. Three in flight is a reasonable
@@ -149,12 +157,11 @@ CI_RUNS_TTL_SECONDS = 30.0
 _CI_LOG_WORKERS = 4
 
 
-def _server_panel_of(window: tk.Toplevel) -> monitoring.ServerPanel:
-    """Return the :class:`ServerPanel` packed inside a supervision window."""
-    panel = getattr(window, "server_panel", None)
-    if not isinstance(panel, monitoring.ServerPanel):
-        raise ValueError("supervision window has no server panel")
-    return panel
+# Freshness window for a cached server snapshot: a read is four SSH commands
+# (compose ps, logs, the deploy marker, the execution status), so returning to
+# a tab, walking the list and coming back must not pay for it again. "Actualiser"
+# forces the read anyway.
+SERVER_SNAPSHOT_TTL_SECONDS = 20.0
 
 
 def window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
@@ -253,6 +260,9 @@ class LauncherApp:
         # journal is available instead of failing to start.
         self.monitor = monitor
         self._monitor_panel: monitoring.MonitoringPanel | None = None
+        # Notebook of the left pane: the workspace list plus one tab per open
+        # information page. Built in ``_build_ui``, so it is absent until then.
+        self._pages: pages.PageHost | None = None
         self._monitor_events_cache: list[Event] = []
         self._monitor_gate = monitoring.CriticalGate()
         self._monitor_last_id: int | None = None
@@ -260,6 +270,11 @@ class LauncherApp:
         self._monitor_after_id: str | None = None
         self._owns_root = root is None
         self.root = root or tk.Tk()
+        # The width the launcher sized the window to at startup, and the one it
+        # may still grow to once for the journal (see ``_fit_width_to_journal``).
+        self._owned_width = 0
+        self._journal_card: tk.Frame | None = None
+        self._paned: ttk.PanedWindow | None = None
         self.browser_opener = browser_opener
         self.events: queue.Queue[tuple[Callable[[], None], Exception | None]] = queue.Queue()
         self._closing = False
@@ -302,6 +317,16 @@ class LauncherApp:
         # instead of spending the API budget on every 5s tick.
         self._github_session = requests.Session()
         self._ci_runs_fetched_at: dict[str, float] = {}
+        # Server supervision cache, keyed by workspace id: the page serves the
+        # last snapshot instantly and only re-reads once it is older than
+        # ``SERVER_SNAPSHOT_TTL_SECONDS``. ``_server_fetch_in_flight`` holds the
+        # workspace being read so a retarget mid-read cannot stack a second one.
+        self._server_cache: dict[str, monitoring.ServerSnapshot] = {}
+        self._server_fetched_at: dict[str, float] = {}
+        self._server_fetch_in_flight: str | None = None
+        # A read asked for while another one was in flight, served on its
+        # release (last request wins: the user only cares about the current one).
+        self._server_pending: tuple[Workspace, server_page.ServerPage] | None = None
         # Text metrics for the row layout: the workspace name is cut to whatever
         # width the status chips leave over (see ``_fit_row_name``). Resolved by
         # ``_apply_theme`` through ``text_measure``'s lazy lookup, so the named
@@ -458,9 +483,88 @@ class LauncherApp:
                 x = (self.root.winfo_screenwidth() - width) // 2
                 y = max((self.root.winfo_screenheight() - height) // 3, 0)
                 self.root.geometry(f"+{x}+{y}")
+                self._owned_width = width
             except Exception:
                 pass
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _fit_width_to_journal(self) -> None:
+        """Give the journal's pane the width its table asks for.
+
+        A ``ttk.PanedWindow`` does not size a pane from its content: once laid
+        out, a pane keeps the width it was given and only the *sash* moves it
+        (measured: an unweighted journal pane stayed at its 491px first layout
+        in every window, 1000px or 1600px, so the table was cut whatever the
+        window's size). So the split is driven from the table's own footprint on
+        every fit, and it is one-directional: the journal is never given *less*
+        than its table, and any extra the user leaves it (or takes for the list
+        with the sash) is left alone.
+
+        When the window cannot hold both — a 1366px screen opens the launcher at
+        1000px and a long message needs 1114 — the launcher still owns the window
+        at that point, so it grows it once, by exactly the shortfall and never
+        past the display. After that the window is the user's: any width the
+        launcher did not set itself (a resize, a drag of the edge) ends the grow
+        for good, so a longer message arriving later never drags the window
+        along.
+        """
+        if self._journal_card is None or self._paned is None:
+            return
+        with contextlib.suppress(Exception):
+            card = self._journal_card
+            paned = self._paned
+            # The card *is* the paned window's pane (ttk manages the widget handed
+            # to ``add`` directly), so its own request is the table's footprint and
+            # its own width is what the split gave it.
+            need = int(card.winfo_reqwidth())
+            if int(card.winfo_width()) >= need:
+                return
+            available = int(paned.winfo_width())
+            if available - need < _LIST_PANE_MINIMUM:
+                # The root's own chrome (the paned window's padding) is measured,
+                # not guessed: the grow has to buy the list its floor too.
+                chrome = max(int(self.root.winfo_width()) - available, 0)
+                self._grow_window_for(need + _LIST_PANE_MINIMUM + chrome)
+                available = int(paned.winfo_width())
+            if available < need:
+                # Too narrow even for the table alone (a 1024px display): the
+                # columns stay exact, the last one is cut, and the sash remains the
+                # escape hatch.
+                return
+            paned.sashpos(0, max(available - need, 0))
+            # A pane is what the window has left *minus* the sash handle and its own
+            # border, so the split lands a few pixels short of what the card asked
+            # for. That chrome is measured, never guessed, and taken off the sash
+            # in one correction — after the split has been flushed, since a widget
+            # answers a geometry question from the layout it last computed.
+            self.root.update_idletasks()
+            chrome = available - int(paned.sashpos(0)) - int(card.winfo_width())
+            if chrome > 0:
+                paned.sashpos(0, max(available - need - chrome, 0))
+
+    def _grow_window_for(self, needed: int) -> None:
+        """Widen the window to *needed* pixels, once, and only while we own it."""
+        if not self._owns_root:
+            return
+        with contextlib.suppress(Exception):
+            width = int(self.root.winfo_width())
+            if width != self._owned_width or needed <= width:
+                return
+            screen_width, _ = screen_size(self.root)
+            target = needed
+            if screen_width > 1:
+                target = min(target, screen_width)
+            if target <= width:
+                return
+            self.root.geometry(f"{target}x{int(self.root.winfo_height())}")
+            self.root.update_idletasks()
+            self._owned_width = target
+            # A size-only geometry keeps the corner, so the window only moves
+            # when growing would push its right edge off the display.
+            x, y = int(self.root.winfo_x()), int(self.root.winfo_y())
+            if screen_width > 1 and x + target > screen_width:
+                self.root.geometry(f"+{max(screen_width - target, 0)}+{y}")
+            self.root.update_idletasks()
 
     def _build_ui(self) -> None:
         accent_bar = tk.Frame(self.root, bg=ACCENT, height=4)
@@ -504,9 +608,24 @@ class LauncherApp:
 
         content = ttk.PanedWindow(self.root, orient="horizontal")
         content.pack(fill="both", expand=True, padx=18, pady=(8, 16))
+        self._paned = content
 
-        card = tk.Frame(content, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
-        content.add(card, weight=3)
+        # The left pane is a notebook: the workspace list is its permanent home
+        # tab, and every information view (CI, server supervision) opens as a
+        # tab of its own next to it — see gui.pages. The journal panel stays on
+        # the right, so a page is read with the log that explains it.
+        self._pages = pages.PageHost(
+            content,
+            home_factory=lambda notebook: tk.Frame(
+                notebook,
+                bg=SURFACE,
+                highlightthickness=1,
+                highlightbackground=BORDER,
+            ),
+            on_activate=self._on_page_activated,
+        )
+        content.add(self._pages.notebook, weight=3)
+        card = self._pages.home
         self._list_canvas = tk.Canvas(card, bg=SURFACE, highlightthickness=0)
         self._list_canvas.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -516,10 +635,18 @@ class LauncherApp:
             highlightthickness=1,
             highlightbackground=BORDER,
         )
-        content.add(monitor_card, weight=4)
+        # The journal asks for exactly what its table needs (the panel follows
+        # the fitter's total), so it carries no weight: a pane with a weight is
+        # handed part of the room the content did not ask for, which is what
+        # stretched the table's header row past its columns, and part of the
+        # squeeze when the window is narrow, which cut them off. The workspace
+        # list takes the rest and the sash stays the user's to move.
+        content.add(monitor_card, weight=0)
+        self._journal_card = monitor_card
         self._monitor_panel = monitoring.MonitoringPanel(
             monitor_card,
             on_export=self._export_monitor,
+            on_fitted=self._fit_width_to_journal,
             tooltip=self._attach_tooltip,
         )
         self._monitor_panel.pack(fill="both", expand=True)
@@ -1306,14 +1433,28 @@ class LauncherApp:
         self._selected_id = workspace_id
         self._apply_selection_styles()
         self._render_monitor()
-        if workspace_id is None:
+        workspace = self._selected_workspace()
+        if self._pages is not None and workspace is not None:
+            # Open pages follow the list selection instead of pinning
+            # themselves to the workspace they were opened for.
+            self._pages.retarget(workspace)
+        if workspace is None:
             self.set_status("Journal — tous les workspaces")
             return
-        workspace = self._selected_workspace()
-        if workspace is not None:
-            self.set_status(
-                f"{workspace.name} · :{workspace.port} · {state_label(workspace.state)}"
-            )
+        self.set_status(f"{workspace.name} · :{workspace.port} · {state_label(workspace.state)}")
+
+    def _on_page_activated(self, page: pages.Page | None) -> None:
+        """Scope the journal to the page the user is looking at.
+
+        A page declares what it is about, so the log beside it narrows to the
+        same subject instead of the launcher showing an unrelated trail of
+        events while a CI tree or a server snapshot is on screen. The workspace
+        scope is untouched: the list is still there, and its selection is what
+        the user reads to understand the page.
+        """
+        subject = None if page is None else page.subject
+        if self._monitor_panel is not None:
+            self._monitor_panel.set_subject(subject)
 
     def _monitor_tick(self, initial: bool = False) -> None:
         """Poll the journal and render a fresh snapshot on the GUI thread."""
@@ -1675,75 +1816,172 @@ class LauncherApp:
         self._run_async(action, on_success=on_success)
 
     def supervise_server_selected(self) -> None:
-        """Open the read-only server supervision window for the selection.
+        """Open the read-only server supervision page for the selection.
 
-        The four SSH reads run in a background worker (``_run_async``) and each
-        failure degrades to an empty section: an unreachable server must leave
-        the rest of the view usable.
+        The four SSH reads run in a background worker and each failure degrades
+        to an empty section: an unreachable server must leave the rest of the
+        view usable. The page itself performs no I/O — it asks this host for a
+        snapshot, which is served from ``_server_cache`` while it is fresh.
         """
         workspace = self._selected_or_warn()
-        if workspace is None or not workspace.server.enabled:
+        if workspace is None:
             return
-        # The panel is created inside the dialog; the worker callback is queued
-        # on the Tk event loop, so this is always filled before it is read.
-        panel_slot: dict[str, monitoring.ServerPanel] = {}
+        self._open_server_page(workspace)
 
-        def collect() -> None:
-            error: str | None = None
-            health = None
-            logs = ""
-            marker: dict[str, object] | None = None
-            history: tuple[dict[str, object], ...] = ()
-            executions = None
-            try:
-                health = self.workspace_manager.server_health(workspace.id)
-            except Exception as exc:
-                error = str(exc)
-            try:
-                logs = self.workspace_manager.server_logs(workspace.id)
-            except Exception as exc:
-                error = error or str(exc)
-            try:
-                marker, history = self.workspace_manager.server_deploy_status(workspace.id)
-            except Exception as exc:
-                error = error or str(exc)
-            try:
-                executions = self.workspace_manager.server_execution_status(workspace.id)
-            except Exception as exc:
-                error = error or str(exc)
-            snapshot = monitoring.ServerSnapshot(
-                health=health,
-                logs=logs,
-                marker=marker,
-                history=history,
-                executions=executions,
-                error=error,
-            )
+    def _open_server_page(self, workspace: Workspace) -> None:
+        """Show the "Serveur" tab for *workspace*, building it on first use.
 
-            def apply() -> None:
-                panel = panel_slot.get("panel")
-                if panel is not None:
-                    panel.apply(snapshot)
-                state = "sain" if snapshot.healthy else "à vérifier"
-                self.set_status(f"Supervision « {workspace.name} » — {state}")
-
-            self.events.put((apply, None))
-
-        def read() -> None:
-            self._run_async(collect, on_error=self._server_supervision_failed)
-
-        window = monitoring.prompt_server_supervision(
-            self.root,
-            workspace.name,
-            workspace.server.host,
-            read,
-            set_status=self.set_status,
+        Bound to the app's supervision machinery directly rather than through
+        per-workspace closures: the page is retargeted when the list selection
+        moves, so every callback takes the workspace it is meant to read.
+        """
+        if self._pages is None:
+            return
+        notebook = self._pages.notebook
+        self._pages.open(
+            PageKind.SERVER,
+            workspace,
+            lambda _workspace: server_page.ServerPage(
+                notebook,
+                source=self._server_cached_snapshot,
+                refresh=self._refresh_server_snapshot,
+                available=lambda item: item.server.enabled,
+                on_status=self.set_status,
+            ),
         )
-        panel_slot["panel"] = _server_panel_of(window)
 
-    def _server_supervision_failed(self) -> None:
-        """Report that the server could not be read at all."""
-        self.set_status("Lecture du serveur impossible.")
+    def _server_cached_snapshot(self, workspace: Workspace) -> monitoring.ServerSnapshot:
+        """Return the last read server snapshot of *workspace*, without any I/O."""
+        return self._server_cache.get(workspace.id, monitoring.ServerSnapshot())
+
+    def _server_available(self, workspace: Workspace) -> bool:
+        """Return whether *workspace* has a server deployment to supervise."""
+        return workspace.server.enabled
+
+    def _refresh_server_snapshot(
+        self,
+        workspace: Workspace,
+        page: server_page.ServerPage,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Read the server of *workspace* in the background and render it.
+
+        Never stacks reads: a read for another workspace in flight is left alone
+        rather than cancelled — the SSH session is not interruptible, so a second
+        worker would only double the load — but the request is *kept* and served
+        when that read releases, so a selection change mid-read does not leave
+        the workspace now on screen with nothing but its (absent) cache. The
+        latest request wins: the user only cares about the one they are looking
+        at. A snapshot younger than ``SERVER_SNAPSHOT_TTL_SECONDS`` is served
+        from the cache; ``force=True`` (the "Actualiser" button) ignores that
+        window.
+        """
+        if self._closing or not workspace.server.enabled:
+            return
+        cached = self._server_cache.get(workspace.id)
+        last_fetched = self._server_fetched_at.get(workspace.id, 0.0)
+        if (
+            not force
+            and cached is not None
+            and time.monotonic() - last_fetched < SERVER_SNAPSHOT_TTL_SECONDS
+        ):
+            page.apply_snapshot(workspace.id, cached)
+            return
+        if self._server_fetch_in_flight is not None:
+            self._server_pending = (workspace, page)
+            return
+
+        def worker() -> None:
+            try:
+                snapshot = self._build_server_snapshot(workspace)
+            except Exception as exc:
+                # Every read failure is a value here: the page shows a partial
+                # snapshot, it does not raise into the worker.
+                snapshot = monitoring.ServerSnapshot(error=str(exc))
+            self.events.put(
+                (
+                    lambda snapshot=snapshot: self._apply_server_snapshot(
+                        workspace.id, page, snapshot
+                    ),
+                    None,
+                )
+            )
+            self.events.put((lambda: self._release_server_read(workspace.id), None))
+
+        self._server_fetch_in_flight = workspace.id
+        threading.Thread(target=worker, name="n8n-launcher-server", daemon=True).start()
+
+    def _release_server_read(self, workspace_id: str) -> None:
+        """Allow the next server read, on the main thread.
+
+        The release is queued on the event loop rather than done in the worker:
+        the next read is requested from a Tk callback, and the flag must never be
+        cleared while that callback is running. A request deferred by the
+        in-flight rule above is started here, so the workspace the user is now
+        looking at is read even though its read was asked for too early.
+        """
+        if self._server_fetch_in_flight == workspace_id:
+            self._server_fetch_in_flight = None
+        pending, self._server_pending = self._server_pending, None
+        if pending is not None:
+            workspace, page = pending
+            self._refresh_server_snapshot(workspace, page)
+
+    def _apply_server_snapshot(
+        self,
+        workspace_id: str,
+        page: server_page.ServerPage,
+        snapshot: monitoring.ServerSnapshot,
+    ) -> None:
+        """Cache and render a read snapshot, always on the main thread.
+
+        The read runs in a background thread and can outlive the tab: a snapshot
+        landing after the tab was closed is cached (the next visit shows it
+        instantly) but never rendered on destroyed widgets. The page itself drops
+        a snapshot belonging to a workspace the selection has moved away from.
+        """
+        self._server_cache[workspace_id] = snapshot
+        self._server_fetched_at[workspace_id] = time.monotonic()
+        page.apply_snapshot(workspace_id, snapshot)
+
+    def _build_server_snapshot(self, workspace: Workspace) -> monitoring.ServerSnapshot:
+        """Run the four server reads and normalise them into a snapshot.
+
+        Worker-thread safe and never raising: each read is independent, so a
+        failure degrades to an empty section and is reported once as
+        ``error``. Every value is redacted and bounded by the ``remote`` layer.
+        """
+        error: str | None = None
+        health = None
+        logs = ""
+        marker: dict[str, object] | None = None
+        history: tuple[dict[str, object], ...] = ()
+        executions = None
+        try:
+            health = self.workspace_manager.server_health(workspace.id)
+        except Exception as exc:
+            error = str(exc)
+        try:
+            logs = self.workspace_manager.server_logs(workspace.id)
+        except Exception as exc:
+            error = error or str(exc)
+        try:
+            marker, history = self.workspace_manager.server_deploy_status(workspace.id)
+        except Exception as exc:
+            error = error or str(exc)
+        try:
+            executions = self.workspace_manager.server_execution_status(workspace.id)
+        except Exception as exc:
+            error = error or str(exc)
+        return monitoring.ServerSnapshot(
+            health=health,
+            logs=logs,
+            marker=marker,
+            history=history,
+            executions=executions,
+            error=error,
+        )
 
     def publish_selected(self) -> None:
         """Deploy the current exports to the configured server."""
@@ -1811,7 +2049,7 @@ class LauncherApp:
         self.configure_server_selected()
 
     def configure_ci_selected(self) -> None:
-        """Enable CI if needed, then open the pipeline selection dialog."""
+        """Enable CI if needed, then open the CI page on its selection tab."""
         if self._closing:
             return
         workspace = self._selected_or_warn()
@@ -1820,10 +2058,10 @@ class LauncherApp:
         if not display.ci_enabled(workspace):
             self._enable_ci_selected(workspace)
         else:
-            self._show_ci_dialog(workspace)
+            self._open_ci_page(workspace)
 
     def _enable_ci_selected(self, workspace: Workspace) -> None:
-        """Generate the CI harness (async) then let the user pick pipelines."""
+        """Generate the CI harness (async), then open the page to pick pipelines."""
 
         def action() -> None:
             self.workspace_manager.enable_ci(workspace)
@@ -1833,36 +2071,36 @@ class LauncherApp:
             self.refresh()
             current = self._reload_workspace(workspace.id)
             if current is not None:
-                self._show_ci_dialog(current)
+                self._open_ci_page(current)
 
         self._run_async(action, on_success=on_success)
 
-    def _show_ci_dialog(self, workspace: Workspace) -> None:
-        """Open the pipeline tree; persist the result through the manager."""
-        runs_source: Callable[[], ci_runs.RunsSnapshot] | None = None
-        runs_refresh: Callable[[RunsPanel], None] | None = None
-        runs_open: Callable[[ci_runs.RunSummary], None] | None = None
-        runs_run: Callable[[RunsPanel], None] | None = None
-        remote = self.workspace_manager.git_remote_url(workspace)
-        if isinstance(remote, str) and remote and ci.github_repo_path(remote):
-            # Only a GitHub remote can expose Actions runs; other remotes keep
-            # the single-pane dialog.
-            runs_source = self._ci_runs_source(workspace)
-            runs_refresh = self._ci_runs_refresh(workspace)
-            runs_open = self._ci_runs_open()
-            runs_run = self._ci_runs_run_cb(workspace)
+    def _open_ci_page(self, workspace: Workspace) -> None:
+        """Show the CI tab for *workspace*, building it on first use.
 
-        result = ci_edit.prompt_ci_workflows(
-            self.root,
-            workspace,
-            runs_source=runs_source,
-            runs_refresh=runs_refresh,
-            runs_open=runs_open,
-            runs_run=runs_run,
-        )
-        if result is None:
+        The page is bound to this app's runs machinery directly rather than
+        through per-workspace closures: it is retargeted when the list selection
+        moves, so every callback takes the workspace it is meant to read for.
+        """
+        if self._pages is None:
             return
-        selected, push = result
+        notebook = self._pages.notebook
+        self._pages.open(
+            PageKind.CI,
+            workspace,
+            lambda _workspace: ci_page.CiPage(
+                notebook,
+                on_save=self._save_ci_selection,
+                runs_source=self._ci_cached_snapshot,
+                runs_refresh=self._refresh_ci_runs,
+                runs_open=self._ci_open_run,
+                runs_run=self._ci_runs_run,
+                runs_available=self._ci_runs_available,
+            ),
+        )
+
+    def _save_ci_selection(self, workspace: Workspace, selected: set[str], push: bool) -> None:
+        """Persist the ticked pipelines through the manager, off the main thread."""
         self._run_async(
             lambda: self.workspace_manager.save_ci_selection(workspace, selected, push=push),
             on_success=lambda: self._refresh_after_git_change(
@@ -1870,30 +2108,27 @@ class LauncherApp:
             ),
         )
 
-    def _ci_runs_source(self, workspace: Workspace) -> Callable[[], ci_runs.RunsSnapshot]:
-        """Return a synchronous, I/O-free closure over the cached snapshot."""
+    def _ci_runs_available(self, workspace: Workspace) -> bool:
+        """Return whether *workspace* has a GitHub remote to read runs from.
 
-        def source() -> ci_runs.RunsSnapshot:
-            return self._ci_runs_cache.get(workspace.id, ci_runs.RunsSnapshot(""))
+        The runs tab exists whatever the remote is, but a workspace without one
+        has nothing to fetch: this keeps the page from polling (and the worker
+        from spawning git) for runs that can never be there.
+        """
+        try:
+            remote = self.workspace_manager.git_remote_url(workspace)
+        except Exception:
+            return False
+        return ci.github_repo_path(remote) is not None
 
-        return source
+    def _ci_cached_snapshot(self, workspace: Workspace) -> ci_runs.RunsSnapshot:
+        """Return the last fetched runs of *workspace*, without any I/O."""
+        return self._ci_runs_cache.get(workspace.id, ci_runs.RunsSnapshot(""))
 
-    def _ci_runs_refresh(self, workspace: Workspace) -> Callable[[RunsPanel], None]:
-        """Bind the panel to a background refresh for the given workspace."""
-        return lambda panel: self._refresh_ci_runs(workspace, panel)
-
-    def _ci_runs_open(self) -> Callable[[ci_runs.RunSummary], None]:
-        """Return a callback opening a run's GitHub page in the browser."""
-
-        def open_run(run: ci_runs.RunSummary) -> None:
-            if run.url:
-                open_url(run.url)
-
-        return open_run
-
-    def _ci_runs_run_cb(self, workspace: Workspace) -> Callable[[RunsPanel], None]:
-        """Bind the panel's "Lancer la CI" button to the dispatch flow."""
-        return lambda panel: self._ci_runs_run(workspace, panel)
+    def _ci_open_run(self, run: ci_runs.RunSummary) -> None:
+        """Open a run's GitHub page in the browser, when it has one."""
+        if run.url:
+            open_url(run.url)
 
     def _ci_latest_branch(self, workspace: Workspace) -> str:
         """Branch of the most recent cached run, else the workspace's ``dev``."""
@@ -2108,10 +2343,11 @@ class LauncherApp:
         remote = self.workspace_manager.git_remote_url(workspace)
         repo_path = ci.github_repo_path(remote) if remote else None
         if repo_path is None:
+            # Not a failure: the page shows the note and stops polling.
             return ci_runs.compose_snapshot(
                 repo_path="",
                 runs=[],
-                error="Aucun dépôt GitHub configuré pour ce workspace.",
+                note=ci_page.NO_REMOTE_NOTE,
             )
         token = self._ci_token
         if not token:

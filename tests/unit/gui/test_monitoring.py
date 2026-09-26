@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import pytest
 from helpers import (
-    FakeRoot,
     FakeTk,
     FakeTtk,
     fake_monitoring_panel_bases,
@@ -17,8 +16,9 @@ from helpers import (
 )
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
-from n8n_launcher.gui import monitoring
+from n8n_launcher.gui import monitoring, theme
 from n8n_launcher.gui.monitoring import ServerSnapshot
+from n8n_launcher.gui.pages import PageSubject
 from n8n_launcher.monitoring.events import Event
 from n8n_launcher.monitoring.store import EventStore
 from n8n_launcher.remote import RemoteExecution, RemoteExecutionStatus, RemoteHealth
@@ -206,6 +206,153 @@ def test_filter_events_matches_the_level():
     ]
     assert [event.id for event in monitoring.filter_events(events, query="error")] == [2]
     assert [event.id for event in monitoring.filter_events(events, query="warning")] == [3]
+
+
+# ------------------------------------------------------- page subject filter
+CI_SUBJECT = PageSubject("Tests CI", ("CI", "GitHub"))
+SERVER_SUBJECT = PageSubject("Serveur", ("Published", "server"))
+
+
+def test_filter_events_narrows_on_the_page_subject():
+    events = [
+        make_event(id=1, name="workspaces.manager", message="Enabled CI for Demo"),
+        make_event(id=2, name="workspaces.manager", message="Published Demo to srv"),
+        make_event(id=3, name="workspaces.manager", message="Recorded 2 CI credential(s)"),
+    ]
+    assert [event.id for event in monitoring.filter_events(events, tokens=CI_SUBJECT.tokens)] == [
+        1,
+        3,
+    ]
+    assert [
+        event.id for event in monitoring.filter_events(events, tokens=SERVER_SUBJECT.tokens)
+    ] == [2]
+
+
+def test_filter_events_tokens_ignore_case_on_purpose():
+    # A case-insensitive match on a two-letter token would sweep in every event
+    # carrying "credential" or "spécifique", so the subject match is exact.
+    events = [make_event(id=1, message="ciblé sur un credential"), make_event(id=2, message="CI")]
+    assert [event.id for event in monitoring.filter_events(events, tokens=("CI",))] == [2]
+
+
+def test_filter_events_searches_the_whole_event_for_tokens():
+    event = make_event(id=1, name="n8n_launcher.remote.ssh", context={"host": "srv-ci-01"})
+    assert monitoring.filter_events([event], tokens=("srv-ci",)) == [event]
+    assert monitoring.matches_tokens(event, ()) is True
+
+
+def test_filter_events_combines_the_query_and_the_subject():
+    events = [
+        make_event(id=1, message="Enabled CI for Demo"),
+        make_event(id=2, message="Disabled CI for Demo"),
+        make_event(id=3, message="Enabled CI for other"),
+    ]
+    selected = monitoring.filter_events(events, query="demo", tokens=CI_SUBJECT.tokens)
+    assert [event.id for event in selected] == [1, 2]
+
+
+def test_summary_text_names_the_subject():
+    assert "sujet : Tests CI" in monitoring.summary_text(
+        [make_event()], store=None, subject=CI_SUBJECT.label
+    )
+    assert "sujet" not in monitoring.summary_text([make_event()], store=None)
+
+
+def test_panel_narrows_the_table_to_the_active_page():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply(
+            [
+                make_event(id=1, name="workspaces.manager", message="Enabled CI for Demo"),
+                make_event(id=2, name="workspaces.manager", message="Published Demo to srv"),
+            ],
+            store=None,
+            subject=CI_SUBJECT,
+        )
+    assert panel.tree.get_children() == ["event-1"]
+    assert panel.visible_subject() == CI_SUBJECT
+    assert "sujet : Tests CI" in panel._subject_text.text
+    assert panel._subject_chip.packed
+    # The caption is bounded by the table's width, so the line itself is the
+    # place to look for the subject.
+    assert "sujet : Tests CI" in panel._summary_text
+
+
+def test_panel_keeps_the_search_query_under_a_subject():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply(
+            [
+                make_event(id=1, message="Enabled CI for Demo"),
+                make_event(id=2, message="Enabled CI for Other"),
+            ],
+            store=None,
+            subject=CI_SUBJECT,
+        )
+        panel._entry.insert("end", "Other")
+        panel._render()
+    assert panel.tree.get_children() == ["event-2"]
+
+
+def test_dismissing_the_subject_restores_the_whole_log():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply(
+            [
+                make_event(id=1, message="Enabled CI for Demo"),
+                make_event(id=2, message="Published Demo to srv"),
+            ],
+            store=None,
+            subject=CI_SUBJECT,
+        )
+        panel.dismiss_subject()
+    assert panel.tree.get_children() == ["event-1", "event-2"]
+    assert panel.visible_subject() is None
+    assert not panel._subject_chip.packed
+
+
+def test_a_poll_does_not_undo_the_dismissal():
+    # The journal re-applies the same subject on every tick: a naive
+    # implementation would re-arm the filter the user just cleared.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1), make_event(id=2, message="Published")], subject=CI_SUBJECT)
+        panel.dismiss_subject()
+        panel.apply([make_event(id=1), make_event(id=2, message="Published")], subject=CI_SUBJECT)
+    assert panel.visible_subject() is None
+    assert panel.tree.get_children() == ["event-1", "event-2"]
+
+
+def test_clicking_another_page_re_arms_the_subject():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1), make_event(id=2, message="Published")], subject=CI_SUBJECT)
+        panel.dismiss_subject()
+        panel.set_subject(SERVER_SUBJECT)
+    assert panel.visible_subject() == SERVER_SUBJECT
+    assert panel.tree.get_children() == ["event-2"]
+
+
+def test_back_to_the_workspace_list_clears_the_chip():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1), make_event(id=2, message="Published")], subject=CI_SUBJECT)
+        panel.set_subject(None)
+    assert panel.visible_subject() is None
+    assert not panel._subject_chip.packed
+    assert panel.tree.get_children() == ["event-1", "event-2"]
+
+
+def test_the_subject_is_applied_on_open_and_never_again():
+    # set_subject re-renders only when the subject changes, so a page opened
+    # between two polls does not cost an extra table rebuild.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        renders: list[int] = []
+        panel._render = lambda **_kwargs: renders.append(1)  # type: ignore[method-assign]
+        panel.set_subject(CI_SUBJECT)
+        panel.set_subject(CI_SUBJECT)
+    assert len(renders) == 1
 
 
 # ------------------------------------------------------------- critical gate
@@ -513,117 +660,6 @@ def test_server_panel_ignores_a_snapshot_after_destroy():
     assert "Santé : inconnue." in panel._label.text
 
 
-def test_prompt_server_supervision_renders_a_synchronous_read():
-    statuses: list[str] = []
-    with fake_gui():
-        window = monitoring.prompt_server_supervision(
-            FakeRoot(),
-            "Demo",
-            "prod.example.test",
-            lambda: ServerSnapshot(health=_health(), logs="ready"),
-            set_status=statuses.append,
-        )
-    # The height is the screen-derived one; the width opens at the floor it had,
-    # and the position is part of the same geometry.
-    assert window._geometry == "900x680+0+0"
-    assert window.title_text == "Supervision du serveur — Demo"
-    assert window.server_panel is not None
-    assert any("sain" in status for status in statuses)
-
-
-def test_prompt_server_supervision_width_follows_the_snapshot():
-    # Container logs are long lines: a wider snapshot must widen the window, and
-    # the height must stay the screen-derived one.
-    with fake_gui():
-        root = FakeRoot()
-        root._width, root._height = 1920, 1080
-        root._screen = (1920, 1080)
-        window = monitoring.prompt_server_supervision(
-            root,
-            "Demo",
-            "prod.example.test",
-            lambda: ServerSnapshot(health=_health(), logs="ready"),
-        )
-        # A dialog knows the display it is on: the fake reports the same one.
-        window._screen = (1920, 1080)
-        assert window._geometry == "900x864+510+72"
-
-        # A wide log line lands: the window grows to hold it, height untouched.
-        window._reqwidth = 1300
-        window.server_panel.apply(ServerSnapshot(health=_health(), logs="x" * 400))
-        assert window._geometry == "1300x864+310+72"
-
-
-def test_prompt_server_supervision_never_shrinks_on_a_narrower_snapshot():
-    with fake_gui():
-        root = FakeRoot()
-        root._width, root._height = 1920, 1080
-        root._screen = (1920, 1080)
-        window = monitoring.prompt_server_supervision(
-            root,
-            "Demo",
-            "prod.example.test",
-            lambda: ServerSnapshot(health=_health(), logs="ready"),
-        )
-        window._screen = (1920, 1080)
-        window._reqwidth = 1300
-        window.server_panel.apply(ServerSnapshot(health=_health(), logs="x" * 400))
-        opened = window._geometry
-
-        # A short deploy history must not shrink the window under the reader.
-        window._reqwidth = 700
-        window.server_panel.apply(ServerSnapshot(health=_health(), logs="ok"))
-        assert window._geometry == opened
-
-
-def test_prompt_server_supervision_defers_to_an_async_read():
-    with fake_gui():
-        window = monitoring.prompt_server_supervision(
-            FakeRoot(),
-            "Demo",
-            "prod.example.test",
-            lambda: None,
-        )
-    assert "Santé : inconnue." in window.server_panel._label.text
-
-
-def test_prompt_server_supervision_renders_a_failing_read():
-    statuses: list[str] = []
-    with fake_gui():
-        window = monitoring.prompt_server_supervision(
-            FakeRoot(),
-            "Demo",
-            "prod.example.test",
-            lambda: (_ for _ in ()).throw(OSError("ssh exploded")),
-            set_status=statuses.append,
-        )
-    assert "ssh exploded" in window.server_panel._label.text
-    assert any("à vérifier" in status for status in statuses)
-
-
-def test_prompt_server_supervision_refresh_rereads():
-    reads = []
-
-    def read() -> ServerSnapshot:
-        reads.append(1)
-        return ServerSnapshot(health=_health(), logs=f"run {len(reads)}")
-
-    with fake_gui():
-        window = monitoring.prompt_server_supervision(FakeRoot(), "Demo", "host", read)
-        button = next(b for b in FakeTtk.Button.instances if b.text == "Actualiser")
-        button.command()
-    assert len(reads) == 2
-    assert "run 2" in window.server_panel._label.text
-
-
-def test_prompt_server_supervision_binds_escape():
-    with fake_gui():
-        window = monitoring.prompt_server_supervision(FakeRoot(), "Demo", "host", lambda: None)
-        window._bindings["<Escape>"](None)
-    assert window.destroyed
-
-
-# --------------------------------------------------------- workspace detail
 def _workspace(tmp_path, **kwargs):
     return Workspace(
         id=kwargs.pop("id", "ws-1"),
@@ -814,6 +850,83 @@ def test_panel_tree_columns_follow_their_own_content():
     for name, width in widths.items():
         assert monitoring._JOURNAL_MINIMUMS[name] <= width <= monitoring._JOURNAL_MAXIMUMS[name]
     assert all(request["stretch"] is False for request in panel.tree.column_requests().values())
+
+
+def test_the_panel_follows_the_table_and_never_stretches_it():
+    # The two halves of the sizing rule in one place: the table is packed without
+    # a horizontal fill, so its heading row sits over its own cells, and the
+    # panel asks its pane for the width of the whole table.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply(
+            [
+                make_event(
+                    id=1,
+                    message="démarrage du workspace terminé",
+                )
+            ],
+            store=None,
+        )
+
+    assert "x" not in str(panel.tree._pack_options.get("fill", ""))
+    assert panel._options["width"] == sum(panel.tree.column_widths().values())
+
+
+def test_the_caption_and_the_detail_never_out_request_the_table():
+    # A container's request is the largest of its children's, so a caption wider
+    # than the table would widen the card: the columns stay exact but the table
+    # stops meeting the card's outline, the slack landing on the right because the
+    # table is packed ``anchor="nw"``. Both labels are therefore kept within the
+    # table's own width — the caption cut with an ellipsis, the prose re-wrapped.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply(
+            [
+                make_event(
+                    id=1,
+                    message="docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s " * 3,
+                )
+            ],
+            store=None,
+        )
+
+    total = panel._fitter.total()
+    # Measured the same way the panel measures, so the assertion holds whether
+    # the host has font metrics or falls back to the per-character estimate.
+    measure = theme.text_measure(panel, monitoring.FONT_META)
+    assert measure(panel._summary._options["text"]) <= total
+    assert panel._detail._options["wraplength"] == max(total - 24, 200)
+
+    # A caption far longer than the table is cut with a trailing ellipsis.
+    panel._summary_text = "Tous les workspaces · " + "· ".join(["un événement"] * 40)
+    panel._bound_to_table()
+    shown = panel._summary._options["text"]
+    assert shown.endswith("…")
+    assert measure(shown) <= total
+
+
+def test_every_fit_tells_the_host_it_may_have_to_grow():
+    # The journal's pane carries no weight: when the window is too narrow the
+    # table is cut, and the window is the only thing that can give it room. The
+    # panel renders and calls back — it never resizes anything itself.
+    fitted: list[int] = []
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None), on_fitted=lambda: fitted.append(1))
+        panel.apply([make_event(id=1, message="un événement")], store=None)
+        panel.apply([make_event(id=2, message="un autre événement")], store=None)
+
+    # Once per fit, so a longer message arriving later is still measured.
+    assert len(fitted) == 2
+
+
+def test_the_table_is_packed_after_the_detail_pane():
+    # A container shorter than the sum of its children takes the shortfall from
+    # the last ones packed. The table is the elastic part — it shows fewer rows in
+    # a short pane — so it is packed last and the detail pane keeps its lines.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+
+    assert panel.children.index(panel.tree) > panel.children.index(panel._detail)
 
 
 def test_panel_tree_columns_do_not_depend_on_the_sash():

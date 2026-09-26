@@ -31,7 +31,7 @@ from tkinter import ttk
 from typing import ClassVar
 
 from ..workspaces import ci_runs
-from .layout import ColumnFitter, bind_wraplength
+from .layout import ColumnFitter, bind_wraplength, ellipsize, wrap_at
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -66,6 +66,10 @@ _RUNS_COLUMNS = ("detail",)
 _RUNS_HEADINGS = {"#0": "Run / job / pipeline", "detail": "Détails"}
 _RUNS_MINIMUMS = {"#0": 240, "detail": 160}
 _RUNS_MAXIMUMS = {"#0": 420, "detail": 520}
+
+# The margin the header, the table and the note below it are packed with, so the
+# panel's request is the table's width plus twice this and nothing else.
+_RUNS_PADX = 14
 
 # Human labels for the live *step* rows shown under an in-progress job.
 _STEP_LABELS: dict[str, str] = {
@@ -168,8 +172,12 @@ def runs_summary_text(snapshot: ci_runs.RunsSnapshot) -> str:
     Counts finished and in-flight runs and, when the host populated
     ``fetched_at``, appends the time of the last successful poll so the
     auto-refresh is visible without a button. Warnings and partial errors are
-    appended without suppressing the run tree.
+    appended without suppressing the run tree. A ``note`` replaces the header
+    entirely: it explains an empty tab that nobody asked for (no GitHub
+    remote), which is a configuration, not a failure.
     """
+    if snapshot.note:
+        return snapshot.note
     if snapshot.error and not snapshot.runs:
         return f"GitHub Actions indisponible : {snapshot.error}"
     if not snapshot.runs:
@@ -223,13 +231,6 @@ class RunsPanel(tk.Frame):
         self.refresh_cb = refresh
         self.open_run_cb = open_run
         self.run_cb = run
-        # Set by the host when the panel's width drives a window geometry. The
-        # runs tree is fed asynchronously, so a snapshot can arrive that is wider
-        # than the dialog that opened around it; the panel says so through this
-        # callback rather than reaching for the window manager itself. Same
-        # late-binding as the other callbacks: it can only be set once the panel
-        # exists, which is after the dialog it fits.
-        self.fitted_cb: Callable[[], None] | None = None
         self._expanded: set[str] = set()
         self._active: set[str] = set()
         self._row_runs: dict[str, ci_runs.RunSummary] = {}
@@ -237,7 +238,8 @@ class RunsPanel(tk.Frame):
         RunsPanel.instances.add(self)
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
-        header.pack(fill="x", padx=14, pady=(10, 4))
+        header.pack(fill="x", padx=_RUNS_PADX, pady=(10, 4))
+        self._summary_text = ""
         self._summary = tk.Label(
             header,
             text="",
@@ -285,6 +287,7 @@ class RunsPanel(tk.Frame):
             minimums=_RUNS_MINIMUMS,
             maximums=_RUNS_MAXIMUMS,
             measure=text_measure(self, FONT_META),
+            container=self,
         )
         for tag, color in (
             ("success", _TAG_SUCCESS),
@@ -293,7 +296,7 @@ class RunsPanel(tk.Frame):
             ("skipped", _TAG_SKIPPED),
         ):
             self.tree.tag_configure(tag, background=color)
-        self.tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        self.tree.pack(fill="y", anchor="nw", expand=True, padx=_RUNS_PADX, pady=(0, 10))
         self.tree.bind("<Double-1>", lambda _event: self._open_selected())
         self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
         self.tree.bind("<<TreeviewClose>>", self._on_tree_close)
@@ -306,12 +309,12 @@ class RunsPanel(tk.Frame):
             font=FONT_ROWS,
             anchor="w",
             justify="left",
-            wraplength=640,
+            wraplength=sum(_RUNS_MINIMUMS.values()),
         )
         # The message under the tree repeats a GitHub error verbatim: it wraps
         # at the panel's real width rather than a hard-coded 900 pixels.
-        bind_wraplength(self._empty, minimum=200, padding=28)
-        self._empty.pack(fill="x", padx=14, pady=(0, 10))
+        bind_wraplength(self._empty, minimum=200, padding=2 * _RUNS_PADX)
+        self._empty.pack(fill="x", padx=_RUNS_PADX, pady=(0, 10))
 
     # ------------------------------------------------------------------ API
 
@@ -334,7 +337,7 @@ class RunsPanel(tk.Frame):
             return
         selected = self.tree.selection()
         self._last = snapshot
-        self._summary.config(text=runs_summary_text(snapshot))
+        self._summary_text = runs_summary_text(snapshot)
 
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -345,7 +348,11 @@ class RunsPanel(tk.Frame):
         self.set_run_enabled(not self.has_active_run)
 
         if not snapshot.runs:
-            if snapshot.error:
+            if snapshot.note:
+                # An intentionally empty read (no GitHub remote) says why and
+                # stops there: no "indisponible", no "rafraîchissement en cours".
+                self._empty.config(text=snapshot.note)
+            elif snapshot.error:
                 self._empty.config(
                     text=f"GitHub Actions indisponible : {snapshot.error}\n"
                     "Le panneau s'actualise automatiquement dès que GitHub répond."
@@ -466,11 +473,16 @@ class RunsPanel(tk.Frame):
         """Size the columns to the rows just rendered, then let the host resize.
 
         Every label is in by the time this runs, so the nested step and pipeline
-        rows get the room their (indented) names ask for.
+        rows get the room their (indented) names ask for. The labels are then
+        bounded to that width: a label's request counts towards the panel's, so a
+        caption or a note wider than the table would leave the table clipped
+        inside a panel wider than itself.
         """
         self._fitter.rows()
-        if self.fitted_cb is not None:
-            self.fitted_cb()
+        self._summary.config(
+            text=ellipsize(self._summary_text, self._fitter.total(), text_measure(self, FONT_META))
+        )
+        wrap_at(self._empty, self._fitter.total(), minimum=200, padding=2 * _RUNS_PADX)
 
     def _restore_selection(self, selected: tuple[str, ...] | list[str]) -> None:
         """Restore a selected row when its stable id survived the refresh."""

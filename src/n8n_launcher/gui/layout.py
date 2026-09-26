@@ -14,7 +14,10 @@ The rule implemented here is the same everywhere:
 * the width does **not** depend on the pane. A table is never squeezed into
   whatever room the window happens to leave: the pane is the user's to give
   (window width, paned sash) and the declared maximums are the bound that keeps
-  a column — and the window asking for it — from growing without limit.
+  a column — and the window asking for it — from growing without limit;
+* the table's own widget is exactly that sum, and its **container asks for it**,
+  so the header row and the cells always describe the same table and a pane
+  that can hand the room over does.
 
 :class:`ColumnFitter` is the Tk half of that rule: it reads the rows back from
 the widget (never from the caller's data) and pushes the widths they ask for.
@@ -124,11 +127,28 @@ def ellipsize(text: str, width: int, measure: Callable[[str], int]) -> str:
 
 
 class ColumnFitter:
-    """Keep a ``ttk.Treeview``'s columns sized to their content.
+    """Keep a ``ttk.Treeview``'s columns — and its container — sized to content.
 
     One instance per table: declare the columns' headings and bounds, then call
     :meth:`rows` after every render. The fitter reads the rows back from the
     widget, so the widths always describe what is on screen.
+
+        The table is packed **without** a horizontal fill, which is what makes the
+        two halves of this work: a ``ttk.Treeview`` requests the sum of its columns,
+        so left unfilled it is exactly as wide as the table — the header row sits
+        over the cells instead of stretching past them — and *container* is given
+        that same width, so the widget holding the table asks its geometry manager
+        for the room the table needs. A pane that can give it does; a pane wider
+        than the table stretches nothing. That request only follows a push once the
+        table has been re-asked for it: see :meth:`_invalidate_request`.
+
+
+    The container is only as wide as its **widest child**, so a view that keeps a
+    caption or a prose block around its table must keep them within
+    :meth:`total` (see :func:`ellipsize` and :func:`wrap_at`): one label wider
+    than the table widens the container, and the table then keeps its exact
+    columns but stops meeting the container's outline, the slack landing on the
+    right because the table is packed ``anchor="nw"``.
 
     There is no ``<Configure>`` handler: the widths are a function of the rows,
     not of the widget's size, so a resize has nothing to recompute. That is also
@@ -145,13 +165,20 @@ class ColumnFitter:
         minimums: Mapping[str, int],
         maximums: Mapping[str, int],
         measure: Callable[[str], int],
+        container: tk.Misc | None = None,
     ) -> None:
-        """Bind the fitter to *tree* and the column bounds it must respect."""
+        """Bind the fitter to *tree* and the column bounds it must respect.
+
+        *container* is the widget whose width must follow the table (the panel,
+        the page or the dialog holding it). It is optional: a table in a window
+        that already sizes itself from ``winfo_reqwidth()`` needs no help.
+        """
         self._tree = tree
         self._headings = dict(headings)
         self._minimums = dict(minimums)
         self._maximums = dict(maximums)
         self._measure = measure
+        self._container = container
         # ``#0`` is the tree's own label column: its content is the item's text
         # rather than a slot of ``values``, hence the separate branch in
         # ``_rows``. Its display position is always first.
@@ -159,10 +186,15 @@ class ColumnFitter:
         self._value_columns = tuple(name for name in columns if name in self._headings)
         self._widths: dict[str, int] = {}
         self._applied: dict[str, int] = {}
+        self._applied_total = 0
 
     def widths(self) -> dict[str, int]:
         """Return the last computed widths (the state the fitter applied)."""
         return dict(self._widths)
+
+    def total(self) -> int:
+        """Return the width of the whole table: the sum of its column widths."""
+        return sum(self._widths.values())
 
     def rows(self) -> None:
         """Refit the columns to the rows the tree is currently showing."""
@@ -173,6 +205,7 @@ class ColumnFitter:
             maximums=self._maximums,
             measure=self._measure,
         )
+        changed = False
         for name, width in self._widths.items():
             if self._applied.get(name) == width:
                 continue
@@ -189,6 +222,51 @@ class ColumnFitter:
                     anchor="w",
                 )
             self._applied[name] = width
+            changed = True
+        if changed:
+            self._invalidate_request()
+        self._align_container()
+
+    def _invalidate_request(self) -> None:
+        """Make an **already mapped** table ask for the widths just pushed to it.
+
+        A ``ttk::treeview`` sizes itself from its columns, but the request it
+        handed to its geometry manager is cached and a ``column -width`` push
+        does not invalidate it: a table that was already on screen kept the box
+        of the widths it was *built* with (its columns' minimums) forever, so
+        every later push was invisible — the columns read back at their fitted
+        width while the widget stayed 434px wide, which is exactly a table whose
+        last column is cut with an empty hole to its right.
+
+        Re-setting an option to the value it already holds runs the widget's
+        ``Configure``, and that is what makes it re-ask its geometry manager.
+        Only a real change pays for it, so a poll that finds the same rows does
+        nothing.
+        """
+        with contextlib.suppress(Exception):
+            self._tree.configure(height=self._tree.cget("height"))
+
+    def _align_container(self) -> None:
+        """Ask *container* for the width of the whole table.
+
+        The         container's own request is what its geometry manager allocates from
+        (``ttk.PanedWindow`` for the journal, a dialog's ``WindowFitter``
+        through ``winfo_reqwidth()``), so this is the single place where "the
+        table needs this much" turns into "give it that much". It is set on
+        every fit rather than only on a change because the total is what the
+        container follows, not each column.
+        """
+        if self._container is None:
+            return
+        total = self.total()
+        if total == self._applied_total:
+            return
+        with contextlib.suppress(Exception):
+            # ``Misc.configure`` takes its options as a mapping and does not
+            # declare ``width``, which every real container here does have (a
+            # frame, a page, a toplevel).
+            self._container.configure(cnf={"width": total})
+        self._applied_total = total
 
     def _rows(self) -> list[dict[str, str]]:
         """Return the rendered rows as ``{column: text}`` maps.
@@ -226,6 +304,21 @@ class ColumnFitter:
             return None
 
 
+def wrap_at(
+    label: tk.Label, width: int, *, minimum: int = _MIN_WRAP_LENGTH, padding: int = 0
+) -> None:
+    """Re-wrap *label*'s text at *width* pixels, right now.
+
+    This is the computation :func:`bind_wraplength` runs on every
+    ``<Configure>``, for a caller that already knows the width — a view that has
+    just sized its table and must therefore re-wrap the prose around it *in the
+    same pass*, before the container counts that label's request.
+    """
+    target = max(width - padding, minimum)
+    with contextlib.suppress(Exception):
+        label.config(wraplength=target)
+
+
 def bind_wraplength(
     label: tk.Label, *, minimum: int = _MIN_WRAP_LENGTH, padding: int = 0
 ) -> tk.Label:
@@ -248,8 +341,7 @@ def bind_wraplength(
         if target == last:
             return
         last = target
-        with contextlib.suppress(Exception):
-            label.config(wraplength=target)
+        wrap_at(label, width, minimum=minimum, padding=padding)
 
     label.bind("<Configure>", on_resize)
     return label

@@ -16,7 +16,7 @@ from .. import git
 from ..core.models import DbConfig, DbMode, ServerConfig
 from ..database import has_db_layout
 from ..github import auth
-from .layout import ColumnFitter, WindowFitter, bind_wraplength
+from .layout import ColumnFitter, WindowFitter, bind_wraplength, wrap_at
 from .theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -1303,11 +1303,14 @@ def prompt_github_repo_picker(
         minimums=_REPO_MINIMUMS,
         maximums=_REPO_MAXIMUMS,
         measure=text_measure(dialog, FONT_META),
+        container=dialog,
     )
     # The dialog opens as wide as "owner/repo" plus its three fields really need,
     # bounded by the screen, and grows if a later page of repositories is wider.
     window_fitter = WindowFitter(dialog, parent=root)
-    tree.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+    # No horizontal fill: ``winfo_reqwidth`` above is the width of the table, so
+    # the dialog opens exactly as wide as the columns it holds.
+    tree.pack(fill="y", anchor="nw", expand=True, padx=18, pady=(0, 6))
 
     # Sorted most-recently-updated first: matches the GitHub web default.
     for repo in sorted(
@@ -1360,12 +1363,16 @@ def prompt_github_repo_picker(
         fg=TEXT_MUTED,
         font=FONT_SUBTITLE,
         anchor="w",
-        wraplength=480,
+        wraplength=sum(_REPO_MINIMUMS.values()),
         justify="left",
     )
     # The branch list echoes GitHub's answer verbatim, errors included: it wraps
-    # at the dialog's real width instead of a hard-coded 520 pixels.
+    # at the dialog's real width instead of a hard-coded 520 pixels. The seed is
+    # the table's narrowest width and the first pass uses the width it has just
+    # been given, so the note never widens the dialog past the table it explains
+    # — the dialog opens at the width of its content.
     bind_wraplength(status, minimum=200, padding=36)
+    wrap_at(status, fitter.total(), minimum=200, padding=36)
     status.pack(fill="x", padx=18)
 
     def pick(full_name: str) -> None:

@@ -1179,7 +1179,10 @@ def test_prompt_github_repo_picker_selects_repo_and_branch(gui_mocks) -> None:
         },
     ]
 
+    dialogs: list[object] = []
+
     def drive(dialog) -> None:
+        dialogs.append(dialog)
         tree = gui_mocks.ttk.Treeview.instances[0]
         tree.selection_set("octo/flows")
         tree._bindings["<<TreeviewSelect>>"](None)
@@ -1198,7 +1201,50 @@ def test_prompt_github_repo_picker_selects_repo_and_branch(gui_mocks) -> None:
             branches_loader=lambda _path: ["main", "feature/x"],
         )
 
+    # The dialog opens at the width of the table it holds: the tree asks for the
+    # sum of its columns, and it is not stretched past them by the dialog.
+    tree = gui_mocks.ttk.Treeview.instances[0]
+    assert "x" not in str(tree._pack_options.get("fill", ""))
+    assert dialogs[0]._options["width"] == sum(tree.column_widths().values())
+
     assert result == GitHubRepoPick(clone_url="https://github.com/octo/flows.git", branch="main")
+
+
+def test_the_repo_picker_note_never_out_requests_its_table(gui_mocks) -> None:
+    # The dialog opens at the width of its content, so a note wider than the table
+    # would widen the dialog and leave the table short of its outline: the note
+    # re-wraps at the table's width instead.
+    gui_mocks.tk.Toplevel.instances.clear()
+    gui_mocks.ttk.Treeview.instances.clear()
+    repos = [
+        {
+            "full_name": "octo/flows",
+            "clone_url": "https://github.com/octo/flows.git",
+            "private": True,
+            "default_branch": "main",
+        }
+    ]
+
+    with (
+        patch("n8n_launcher.gui.dialogs.tk", gui_mocks.tk),
+        patch("n8n_launcher.gui.dialogs.ttk", gui_mocks.ttk),
+        patch.object(FakeTk.Toplevel, "wait_window", lambda _self: None),
+    ):
+        prompt_github_repo_picker(
+            FakeRoot(),
+            repos=repos,
+            branches_loader=lambda _path: ["main", "feature/x"],
+        )
+
+    dialog = gui_mocks.tk.Toplevel.instances[0]
+    tree = gui_mocks.ttk.Treeview.instances[0]
+    total = sum(tree.column_widths().values())
+    note = next(
+        child
+        for child in dialog.children
+        if isinstance(child, gui_mocks.tk.Label) and int(child._options.get("wraplength", 0)) > 0
+    )
+    assert note._options["wraplength"] <= max(total - 36, 200)
 
 
 # --- Clone wired into the app creation flow ----------------------------------

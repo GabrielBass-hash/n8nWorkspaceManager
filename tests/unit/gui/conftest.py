@@ -1,5 +1,6 @@
 """GUI unit-test fixtures: shared mocks and the ``app`` harness."""
 
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -21,7 +22,10 @@ from helpers import (
     SyncThread,
     SyncThreadPoolExecutor,
     _safe_git_row_status,
+    fake_ci_page_bases,
     fake_monitoring_panel_bases,
+    fake_runs_panel_bases,
+    fake_server_page_bases,
     make_workspace,
 )
 
@@ -36,28 +40,34 @@ def gui_mocks():
     mocks.health_ok = SimpleNamespace(ok=True)
     FakeTtk.Button.instances.clear()
 
-    with (
-        fake_monitoring_panel_bases(),
-        patch("n8n_launcher.gui.app.tk", mocks.tk),
-        patch("n8n_launcher.gui.app.ttk", mocks.ttk),
-        patch("n8n_launcher.gui.monitoring.tk", mocks.tk),
-        patch("n8n_launcher.gui.monitoring.ttk", mocks.ttk),
-        patch("n8n_launcher.gui.app.messagebox", mocks.messagebox),
-        patch("n8n_launcher.gui.close.messagebox", mocks.messagebox),
-        patch("n8n_launcher.gui.update_flow.messagebox", mocks.messagebox),
-        patch("n8n_launcher.gui.app.threading.Thread", SyncThread),
-        patch("n8n_launcher.gui.close.threading.Thread", SyncThread),
-        patch("n8n_launcher.gui.update_flow.threading.Thread", SyncThread),
-        patch("n8n_launcher.gui.app.requests.get", return_value=mocks.health_ok),
-        patch("n8n_launcher.gui.app.time.sleep"),
-        patch("n8n_launcher.gui.close.N8nApiClient"),
-        patch("n8n_launcher.gui.close.SyncRunner"),
-        patch(
-            "n8n_launcher.gui.app.ThreadPoolExecutor",
-            SyncThreadPoolExecutor,
-        ),
-        patch("n8n_launcher.gui.display.git_row_status", side_effect=_safe_git_row_status),
-    ):
+    # Entered through an ExitStack: one ``with`` holding every fake would exceed
+    # the compiler's block budget (CO_MAXBLOCKS) and fail to compile.
+    with ExitStack() as stack:
+        stack.enter_context(fake_monitoring_panel_bases())
+        stack.enter_context(fake_ci_page_bases())
+        stack.enter_context(fake_runs_panel_bases())
+        stack.enter_context(fake_server_page_bases())
+        # The page host and the CI page build their own widgets, so the app's
+        # fakes have to reach those modules too or the real Tk would be created.
+        for module in ("app", "monitoring", "pages", "ci_page", "ci_runs", "server_page"):
+            for kind, fake in (("tk", mocks.tk), ("ttk", mocks.ttk)):
+                stack.enter_context(patch(f"n8n_launcher.gui.{module}.{kind}", fake))
+        for module in ("app", "close", "update_flow"):
+            stack.enter_context(patch(f"n8n_launcher.gui.{module}.messagebox", mocks.messagebox))
+        for module in ("app", "close", "update_flow"):
+            stack.enter_context(patch(f"n8n_launcher.gui.{module}.threading.Thread", SyncThread))
+        stack.enter_context(
+            patch("n8n_launcher.gui.app.requests.get", return_value=mocks.health_ok)
+        )
+        stack.enter_context(patch("n8n_launcher.gui.app.time.sleep"))
+        stack.enter_context(patch("n8n_launcher.gui.close.N8nApiClient"))
+        stack.enter_context(patch("n8n_launcher.gui.close.SyncRunner"))
+        stack.enter_context(
+            patch("n8n_launcher.gui.app.ThreadPoolExecutor", SyncThreadPoolExecutor)
+        )
+        stack.enter_context(
+            patch("n8n_launcher.gui.display.git_row_status", side_effect=_safe_git_row_status)
+        )
         yield mocks
 
 

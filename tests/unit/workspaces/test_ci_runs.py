@@ -294,6 +294,21 @@ def test_runs_snapshot_without_runs_has_no_data() -> None:
     assert ci_runs.RunsSnapshot("octo/repo").has_data is False
 
 
+def test_compose_snapshot_carries_a_note_without_an_error() -> None:
+    # A note explains an intentionally empty read (no GitHub remote); it must
+    # never read as a failure.
+    snapshot = ci_runs.compose_snapshot(repo_path="", runs=[], note="  pas de dépôt  ")
+
+    assert snapshot.note == "pas de dépôt"
+    assert snapshot.error is None
+    assert snapshot.has_data is False
+
+
+def test_runs_snapshot_normalises_a_blank_note_to_none() -> None:
+    assert ci_runs.RunsSnapshot("octo/repo", note="   ").note is None
+    assert ci_runs.RunsSnapshot("octo/repo").note is None
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [("success", "réussie"), ("waiting", "en attente"), ("failure", "en échec")],

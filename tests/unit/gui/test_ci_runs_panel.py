@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from helpers import FakeTk, FakeTtk, fake_runs_panel_bases
 
 from n8n_launcher.gui import ci_runs as ci_runs_panel
+from n8n_launcher.gui import theme
 from n8n_launcher.gui.ci_runs import RunsPanel, _format_fetched_at, runs_summary_text
 from n8n_launcher.workspaces import ci_runs
 
@@ -75,6 +76,7 @@ def _snapshot(
     fetched_at=None,
     warnings=(),
     partial_errors=(),
+    note=None,
 ):
     return ci_runs.RunsSnapshot(
         repo_path="octo/repo",
@@ -85,6 +87,7 @@ def _snapshot(
         fetched_at=fetched_at,
         warnings=tuple(warnings),
         partial_errors=tuple(partial_errors),
+        note=note,
     )
 
 
@@ -94,6 +97,50 @@ def _build(refresh=None, open_run=None, run=None):
     open_run = open_run or MagicMock()
     panel = RunsPanel(FakeTk.Frame(None), refresh=refresh, open_run=open_run, run=run)
     return panel, refresh, open_run
+
+
+def test_the_table_is_packed_unfilled_and_the_panel_follows_its_width() -> None:
+    # A tree packed with a horizontal fill is stretched to its pane, so its
+    # heading row no longer sits over the cells of the very same table.
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(
+            _snapshot(runs=[_run(11)], jobs={11: (_job(21),)}, pipelines={21: (_pipeline(),)})
+        )
+
+    assert "x" not in str(panel.tree._pack_options.get("fill", ""))
+    assert panel._options["width"] == sum(panel._fitter.widths().values())
+
+
+def test_the_header_and_the_note_never_out_request_the_table() -> None:
+    # A container's request is the largest of its children's: a header caption
+    # or a note wider than the table would leave the table clipped inside a panel
+    # wider than itself. The caption is cut to the table's width and the note
+    # re-wraps at it.
+    with (
+        fake_runs_panel_bases(),
+        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
+        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
+    ):
+        panel, _refresh, _open = _build()
+        panel.apply(
+            _snapshot(runs=[_run(11)], jobs={11: (_job(21),)}, pipelines={21: (_pipeline(),)})
+        )
+        total = sum(panel._fitter.widths().values())
+        measure = theme.text_measure(panel, ci_runs_panel.FONT_META)
+
+        assert measure(panel._summary._options["text"]) <= total
+        assert panel._empty._options["wraplength"] == max(total - 28, 200)
+
+        # A caption far longer than the table is cut with a trailing ellipsis.
+        panel._summary_text = " · ".join(["un run terminé"] * 30)
+        panel._refit()
+        assert panel._summary._options["text"].endswith("…")
+        assert measure(panel._summary._options["text"]) <= total
 
 
 def _local_timestamp(iso_timestamp: str) -> str:
@@ -167,7 +214,7 @@ def test_apply_empty_snapshot_shows_placeholder() -> None:
 
     assert panel.tree.get_children() == []
     assert panel._empty._options["text"] == "Aucun run GitHub Actions pour ce workspace."
-    assert panel._summary._options["text"] == "Aucun run GitHub Actions pour ce workspace."
+    assert panel._summary_text == "Aucun run GitHub Actions pour ce workspace."
 
 
 def test_apply_error_snapshot_shows_message() -> None:
@@ -309,6 +356,9 @@ def test_open_without_selection_does_nothing() -> None:
 def test_runs_summary_text_variants() -> None:
     assert runs_summary_text(_snapshot(error="boom")) == "GitHub Actions indisponible : boom"
     assert runs_summary_text(_snapshot()) == "Aucun run GitHub Actions pour ce workspace."
+    # A note replaces the header: the empty tab is a configuration, not a failure.
+    assert runs_summary_text(_snapshot(note="pas de dépôt")) == "pas de dépôt"
+    assert runs_summary_text(_snapshot(error="boom", note="pas de dépôt")) == "pas de dépôt"
     summary = runs_summary_text(
         _snapshot(
             runs=[

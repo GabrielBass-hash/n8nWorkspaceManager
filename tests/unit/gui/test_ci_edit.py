@@ -4,28 +4,21 @@ from __future__ import annotations
 
 import time
 from contextlib import ExitStack, contextmanager
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from helpers import (
     FakeRoot,
     FakeTk,
     FakeTtk,
-    all_labels,
     fake_runs_panel_bases,
     make_workspace,
 )
 
 from n8n_launcher.github.api import GitHubError
-from n8n_launcher.gui import ci_edit
 from n8n_launcher.gui.app import CI_RUNS_TTL_SECONDS
 from n8n_launcher.gui.ci_edit import (
-    RUNS_POLL_ACTIVE_MS,
-    RUNS_POLL_IDLE_MS,
     _finish_dialog_setup,
-    _schedule_runs_poll,
     prompt_ci_credentials,
-    prompt_ci_workflows,
     prompt_run_ci,
 )
 from n8n_launcher.gui.ci_runs import RunsPanel
@@ -106,117 +99,6 @@ _HOOK = (
     ' "type": "n8n-nodes-base.webhookTrigger", "typeVersion": 1}],'
     ' "connections": {}, "settings": {}}'
 )
-
-
-def test_prompt_ci_workflows_escape_returns_none(tmp_path) -> None:
-    root = tmp_path / "ws"
-    (root / "n8nPipelines").mkdir(parents=True)
-    (root / "n8nPipelines" / "manual.json").write_text(_MANUAL, encoding="utf-8")
-    workspace = make_workspace(tmp_path, "CI", 5678)
-    workspace.workflows_dir = root
-
-    with _patch_ci_editor(FakeTk()) as (_, _, _):
-        result = prompt_ci_workflows(FakeRoot(), workspace)
-
-    assert result is None
-
-
-def test_prompt_ci_workflows_save_returns_selection_and_push(tmp_path) -> None:
-    root = tmp_path / "ws"
-    (root / "n8nPipelines").mkdir(parents=True)
-    (root / "n8nPipelines" / "manual.json").write_text(_MANUAL, encoding="utf-8")
-    selection = root / ".n8n-tests" / "tests.json"
-    selection.parent.mkdir(parents=True)
-    selection.write_text('{"selected": ["n8nPipelines/manual.json"]}', encoding="utf-8")
-    workspace = make_workspace(tmp_path, "CI", 5678)
-    workspace.workflows_dir = root
-
-    tk_fake = _ReturnTk()
-    _ReturnTk.Toplevel.press_return = True
-    try:
-        with _patch_ci_editor(tk_fake) as (_, _, messagebox):
-            messagebox.askyesno = lambda *args, **_kwargs: True
-            result = prompt_ci_workflows(FakeRoot(), workspace)
-    finally:
-        _ReturnTk.Toplevel.press_return = False
-
-    assert result == ({"n8nPipelines/manual.json"}, True)
-
-
-def test_prompt_ci_workflows_save_asks_push_even_when_empty(tmp_path) -> None:
-    """Clearing every pipeline must still offer pushing the empty selection."""
-    root = tmp_path / "ws"
-    (root / "n8nPipelines").mkdir(parents=True)
-    (root / "n8nPipelines" / "manual.json").write_text(_MANUAL, encoding="utf-8")
-    workspace = make_workspace(tmp_path, "CI", 5678)
-    workspace.workflows_dir = root
-
-    tk_fake = _ReturnTk()
-    _ReturnTk.Toplevel.press_return = True
-    try:
-        with _patch_ci_editor(tk_fake) as (_, _, messagebox):
-            messagebox.askyesno.return_value = True
-            result = prompt_ci_workflows(FakeRoot(), workspace)
-    finally:
-        _ReturnTk.Toplevel.press_return = False
-
-    assert result == (set(), True)
-    messagebox.askyesno.assert_called_once()
-
-
-def test_prompt_ci_workflows_greys_ineligible_and_toggles(tmp_path) -> None:
-    root = tmp_path / "ws"
-    (root / "n8nPipelines").mkdir(parents=True)
-    # Sort key controls which row identify_row() reports: 'a' before 'z'.
-    (root / "n8nPipelines" / "aa-manual.json").write_text(_MANUAL, encoding="utf-8")
-    (root / "n8nPipelines" / "zz-hook.json").write_text(_HOOK, encoding="utf-8")
-    workspace = make_workspace(tmp_path, "CI", 5678)
-    workspace.workflows_dir = root
-
-    FakeTtk.Treeview.instances.clear()
-    with _patch_ci_editor(FakeTk()):
-        prompt_ci_workflows(FakeRoot(), workspace)
-
-    tree = FakeTtk.Treeview.instances[0]
-    eligible = tree.item("n8nPipelines/aa-manual.json")
-    blocked = tree.item("n8nPipelines/zz-hook.json")
-    assert "disabled" not in eligible.get("tags", [])
-    assert "disabled" in blocked.get("tags", [])
-    assert blocked["text"].startswith("-")
-
-    click = tree._bindings["<Button-1>"]
-    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("[ ]")
-    click(SimpleNamespace(x=5, y=5))
-    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("[x]")
-    click(SimpleNamespace(x=5, y=5))
-    assert tree.item("n8nPipelines/aa-manual.json")["text"].startswith("[ ]")
-
-
-def test_prompt_ci_workflows_expander_click_does_not_toggle(tmp_path) -> None:
-    """Clicking the expander triangle must expand/collapse, not tick the pipeline."""
-    root = tmp_path / "ws"
-    (root / "n8nPipelines").mkdir(parents=True)
-    (root / "n8nPipelines" / "manual.json").write_text(_MANUAL, encoding="utf-8")
-    workspace = make_workspace(tmp_path, "CI", 5678)
-    workspace.workflows_dir = root
-
-    FakeTtk.Treeview.instances.clear()
-    with _patch_ci_editor(FakeTk()):
-        prompt_ci_workflows(FakeRoot(), workspace)
-
-    tree = FakeTtk.Treeview.instances[0]
-    click = tree._bindings["<Button-1>"]
-    rel = "n8nPipelines/manual.json"
-    before = tree.item(rel)["text"]
-
-    tree.element = "Treeitem.indicator"
-    click(SimpleNamespace(x=5, y=5))
-
-    assert tree.item(rel)["text"] == before
-    # A plain row click still toggles.
-    tree.element = "Treeitem.text"
-    click(SimpleNamespace(x=5, y=5))
-    assert tree.item(rel)["text"] != before
 
 
 def test_prompt_ci_credentials_warns_when_never_started(tmp_path) -> None:
@@ -359,66 +241,6 @@ def _workspace_with_manual(tmp_path):
     return workspace
 
 
-def test_prompt_ci_workflows_adds_runs_tab_when_source_provided(tmp_path) -> None:
-    workspace = _workspace_with_manual(tmp_path)
-    snapshot = _runs_snapshot()
-    refreshed: list[RunsPanel] = []
-    opened: list[ci_runs.RunSummary] = []
-    ran: list[RunsPanel] = []
-
-    FakeTtk.Notebook.instances.clear()
-    RunsPanel.instances.clear()
-
-    with (
-        fake_runs_panel_bases(),
-        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
-        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
-        _patch_ci_editor(FakeTk()),
-    ):
-        result = prompt_ci_workflows(
-            FakeRoot(),
-            workspace,
-            runs_source=lambda: snapshot,
-            runs_refresh=refreshed.append,
-            runs_open=opened.append,
-            runs_run=ran.append,
-        )
-
-    assert result is None  # Escape closes the dialog
-    notebook = FakeTtk.Notebook.instances[0]
-    tabs = [notebook._tabs[index]["text"] for index in sorted(notebook._tabs)]
-    assert tabs == ["Sélection", "Déroulement"]
-
-    panel = next(iter(RunsPanel.instances))
-    assert panel.tree.item("run-11")["text"].startswith("+")
-    assert refreshed == [panel]
-
-    panel.refresh()
-    assert refreshed == [panel, panel]
-
-    panel.open_run_cb(snapshot.runs[0])
-    assert opened == [snapshot.runs[0]]
-
-    panel.run()
-    assert ran == [panel]
-
-
-def test_prompt_ci_workflows_without_source_has_no_notebook(tmp_path) -> None:
-    workspace = _workspace_with_manual(tmp_path)
-    FakeTtk.Notebook.instances.clear()
-    RunsPanel.instances.clear()
-
-    with _patch_ci_editor(FakeTk()):
-        result = prompt_ci_workflows(FakeRoot(), workspace)
-
-    assert result is None
-    assert FakeTtk.Notebook.instances == []
-    assert not RunsPanel.instances
-
-
-# --- Auto-refresh polling (gui/ci_edit.py) ----------------------------------
-
-
 def _active_run_snapshot() -> ci_runs.RunsSnapshot:
     run = ci_runs.RunSummary(
         id=12,
@@ -443,44 +265,6 @@ def _panel_for_poll(snapshot):
         panel = RunsPanel(dialog, refresh=lambda: None, open_run=lambda _r: None)
         panel.apply(snapshot)
     return dialog, panel
-
-
-def test_schedule_runs_poll_refreshes_then_reschedules_active() -> None:
-    dialog, panel = _panel_for_poll(_active_run_snapshot())
-    refreshed: list[RunsPanel] = []
-
-    _schedule_runs_poll(dialog, panel, refreshed.append)
-
-    assert len(dialog._after_callbacks) == 1
-    dialog._after_callbacks[0][1]()
-    assert refreshed == [panel]
-    # An in-flight run keeps the fast cadence.
-    assert dialog._after_callbacks[-1][0] == RUNS_POLL_ACTIVE_MS
-
-
-def test_schedule_runs_poll_reschedules_idle_without_active_run() -> None:
-    dialog, panel = _panel_for_poll(_runs_snapshot())
-    refreshed: list[RunsPanel] = []
-
-    _schedule_runs_poll(dialog, panel, refreshed.append)
-    dialog._after_callbacks[0][1]()
-
-    assert refreshed == [panel]
-    assert dialog._after_callbacks[-1][0] == RUNS_POLL_IDLE_MS
-
-
-def test_schedule_runs_poll_stops_when_dialog_destroyed() -> None:
-    dialog, panel = _panel_for_poll(_runs_snapshot())
-    refreshed: list[RunsPanel] = []
-
-    _schedule_runs_poll(dialog, panel, refreshed.append)
-    tick = dialog._after_callbacks[0][1]
-    dialog.destroy()
-    # Fire the now-stale tick: the winfo_exists guard must stop the loop.
-    tick()
-
-    assert refreshed == []
-    assert dialog._after_callbacks == []
 
 
 def _drive_run_dialog(ref: str | None):
@@ -537,52 +321,14 @@ def test_prompt_run_ci_returns_none_on_blank_ref() -> None:
     assert ref is None
 
 
-def test_show_ci_dialog_passes_runs_closures_for_github_remote(app) -> None:
-    workspace = app.manager.list.return_value[1]
-    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
-    captured: dict[str, object] = {}
-
-    def fake_prompt(_root, _workspace, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    with patch("n8n_launcher.gui.app.ci_edit.prompt_ci_workflows", fake_prompt):
-        app.app._show_ci_dialog(workspace)
-
-    source = captured["runs_source"]
-    assert callable(source)
-    assert source() == ci_runs.RunsSnapshot("")
-    assert callable(captured["runs_refresh"])
-    assert callable(captured["runs_open"])
-    assert callable(captured["runs_run"])
-
-
-def test_show_ci_dialog_without_github_remote_uses_single_pane(app) -> None:
-    workspace = app.manager.list.return_value[1]
-    app.manager.git_remote_url.return_value = None
-    captured: dict[str, object] = {}
-
-    def fake_prompt(_root, _workspace, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    with patch("n8n_launcher.gui.app.ci_edit.prompt_ci_workflows", fake_prompt):
-        app.app._show_ci_dialog(workspace)
-
-    assert captured["runs_source"] is None
-    assert captured["runs_refresh"] is None
-    assert captured["runs_open"] is None
-    assert captured["runs_run"] is None
-
-
-def test_ci_runs_source_returns_cached_snapshot(app) -> None:
+def test_ci_cached_snapshot_returns_the_cached_one(app) -> None:
     cached_workspace = app.manager.list.return_value[1]
     other_workspace = app.manager.list.return_value[0]
     cached = _runs_snapshot()
     app.app._ci_runs_cache[cached_workspace.id] = cached
 
-    assert app.app._ci_runs_source(cached_workspace)() is cached
-    assert app.app._ci_runs_source(other_workspace)() == ci_runs.RunsSnapshot("")
+    assert app.app._ci_cached_snapshot(cached_workspace) is cached
+    assert app.app._ci_cached_snapshot(other_workspace) == ci_runs.RunsSnapshot("")
 
 
 def test_build_ci_runs_snapshot_composes_payloads(app) -> None:
@@ -615,14 +361,37 @@ def test_build_ci_runs_snapshot_composes_payloads(app) -> None:
     assert snapshot.pipelines[21][0].rel == "n8nPipelines/a.json"
 
 
-def test_build_ci_runs_snapshot_without_remote_reports_error(app) -> None:
+def test_build_ci_runs_snapshot_without_remote_reports_a_note(app) -> None:
+    # A workspace with no GitHub remote is a configuration, not a failure: the
+    # panel shows the note and the page stops polling.
     workspace = app.manager.list.return_value[1]
     app.manager.git_remote_url.return_value = None
 
     snapshot = app.app._build_ci_runs_snapshot(workspace)
 
-    assert snapshot.error is not None
-    assert "dépôt GitHub" in snapshot.error
+    assert snapshot.error is None
+    assert snapshot.note is not None
+    assert "dépôt GitHub" in snapshot.note
+
+
+def test_ci_runs_available_follows_the_github_remote(app) -> None:
+    workspace = app.manager.list.return_value[1]
+
+    app.manager.git_remote_url.return_value = None
+    assert app.app._ci_runs_available(workspace) is False
+
+    app.manager.git_remote_url.return_value = "https://gitlab.com/octo/repo.git"
+    assert app.app._ci_runs_available(workspace) is False
+
+    app.manager.git_remote_url.return_value = "https://github.com/octo/repo.git"
+    assert app.app._ci_runs_available(workspace) is True
+
+
+def test_ci_runs_available_is_false_when_the_remote_cannot_be_read(app) -> None:
+    workspace = app.manager.list.return_value[1]
+    app.manager.git_remote_url.side_effect = OSError("git is missing")
+
+    assert app.app._ci_runs_available(workspace) is False
 
 
 def test_build_ci_runs_snapshot_without_token_reports_error(app) -> None:
@@ -699,16 +468,16 @@ def test_refresh_ci_runs_skips_when_token_cancelled(app) -> None:
     panel.apply.assert_not_called()
 
 
-def test_ci_runs_open_opens_run_url(app) -> None:
+def test_ci_open_run_opens_the_url(app) -> None:
     run = _runs_snapshot().runs[0]
 
     with patch("n8n_launcher.gui.app.open_url") as opener:
-        app.app._ci_runs_open()(run)
+        app.app._ci_open_run(run)
 
     opener.assert_called_once_with(run.url)
 
 
-def test_ci_runs_open_without_url_is_noop(app) -> None:
+def test_ci_open_run_without_url_is_a_noop(app) -> None:
     run = ci_runs.RunSummary(
         id=1,
         run_number=1,
@@ -721,7 +490,7 @@ def test_ci_runs_open_without_url_is_noop(app) -> None:
     )
 
     with patch("n8n_launcher.gui.app.open_url") as opener:
-        app.app._ci_runs_open()(run)
+        app.app._ci_open_run(run)
 
     opener.assert_not_called()
 
@@ -990,110 +759,3 @@ def test_refresh_ci_runs_force_bypasses_freshness_window(app) -> None:
     client.list_workflow_runs.assert_called_once_with("octo/repo")
     app.app._drain_events()
     panel.apply.assert_called_once()
-
-
-# ------------------------------------------------------- selection tree sizing
-def _pipeline_tree(workspace_root, tmp_path, exports):
-    """Open the selection dialog and return its pipeline Treeview."""
-    (workspace_root / "n8nPipelines").mkdir(parents=True, exist_ok=True)
-    for rel, body in exports.items():
-        (workspace_root / rel).write_text(body, encoding="utf-8")
-    workspace = make_workspace(tmp_path, "CI", 5678)
-    workspace.workflows_dir = workspace_root
-    FakeTtk.Treeview.instances.clear()
-    with _patch_ci_editor(FakeTk()):
-        prompt_ci_workflows(FakeRoot(), workspace)
-    return next(
-        tree for tree in FakeTtk.Treeview.instances if tree._options.get("columns") == ("detail",)
-    )
-
-
-def test_pipeline_tree_is_built_at_its_minimum_widths(tmp_path) -> None:
-    # The tree asks Tk for its minimums and nothing more, instead of a fixed
-    # 360 + 460 that was wide enough for nothing in particular on every host: the
-    # width it really needs is pushed once the rows are in.
-    root = tmp_path / "ws"
-    tree = _pipeline_tree(root, tmp_path, {"n8nPipelines/manual.json": _MANUAL})
-
-    requests = tree.column_requests()
-    assert requests["#0"]["minwidth"] == ci_edit._SELECTION_MINIMUMS["#0"]
-    assert requests["detail"]["minwidth"] == ci_edit._SELECTION_MINIMUMS["detail"]
-    # Nothing may stretch to fill a pane: the columns are sized, not elastic.
-    assert all(request["stretch"] is False for request in requests.values())
-
-
-def test_pipeline_tree_columns_follow_the_pipeline_names(tmp_path) -> None:
-    long_name = "n8nPipelines/" + "very-long-pipeline-name" * 2 + ".json"
-    root = tmp_path / "ws"
-    tree = _pipeline_tree(
-        root,
-        tmp_path,
-        {"n8nPipelines/manual.json": _MANUAL, long_name: _MANUAL},
-    )
-
-    widths = tree.column_widths()
-    # A long export name is fully readable instead of being cut to a fixed 360px,
-    # and it does not matter how wide the pane happens to be.
-    assert widths["#0"] > ci_edit._SELECTION_MINIMUMS["#0"]
-    # The details column keeps the room its own reasons ask for.
-    assert widths["detail"] >= ci_edit._SELECTION_MINIMUMS["detail"]
-
-
-def test_ci_dialog_opens_at_the_width_its_tables_need(tmp_path) -> None:
-    # The pipeline names were clipped because the dialog opened at the sum of the
-    # *minimum* column widths: it must open at the content width instead.
-    workspace = _workspace_with_manual(tmp_path)
-
-    with (
-        patch.object(FakeTk.Toplevel, "winfo_reqwidth", lambda _self: 1180),
-        patch.object(FakeTk.Toplevel, "winfo_screenwidth", lambda _self: 1920),
-    ):
-        _pipeline_tree(tmp_path / "ws", tmp_path, {"n8nPipelines/manual.json": _MANUAL})
-
-    dialog = FakeTk.Toplevel.instances[-1]
-    assert dialog._geometry.startswith("1180x")
-
-
-def test_the_runs_tab_grows_the_dialog_it_opened_in(tmp_path) -> None:
-    # The runs tree is fed asynchronously and is usually wider than the pipeline
-    # tree: a snapshot that arrives after the dialog opened must widen it rather
-    # than be clipped.
-    workspace = _workspace_with_manual(tmp_path)
-    snapshot = _runs_snapshot()
-    FakeTtk.Notebook.instances.clear()
-    RunsPanel.instances.clear()
-
-    widths = iter([700, 700, 1300])
-    with (
-        fake_runs_panel_bases(),
-        patch("n8n_launcher.gui.ci_runs.tk", FakeTk()),
-        patch("n8n_launcher.gui.ci_runs.ttk", FakeTtk()),
-        _patch_ci_editor(FakeTk()),
-        patch.object(FakeTk.Toplevel, "winfo_reqwidth", lambda _self: next(widths, 1300)),
-        patch.object(FakeTk.Toplevel, "winfo_screenwidth", lambda _self: 1920),
-    ):
-        prompt_ci_workflows(FakeRoot(), workspace, runs_source=lambda: snapshot)
-        dialog = FakeTk.Toplevel.instances[-1]
-        panel = next(iter(RunsPanel.instances))
-        # A later, wider snapshot (the tree grew a long pipeline label).
-        panel.apply(snapshot)
-
-    assert dialog._geometry.startswith("1300x")
-
-
-def test_pipeline_hint_wraps_at_the_dialog_width(tmp_path) -> None:
-    # The hint explains why a pipeline is blocked: it must wrap at the dialog's
-    # real width rather than at a hard-coded 820px.
-    root = tmp_path / "ws"
-    FakeTk.Label.instances.clear()
-    _pipeline_tree(root, tmp_path, {"n8nPipelines/manual.json": _MANUAL})
-
-    hint = next(
-        label
-        for label in all_labels()
-        if "pipeline non testable" in str(label._options.get("text", ""))
-    )
-    hint._bindings["<Configure>"](SimpleNamespace(width=900))
-
-    # 864 = 900 - the 18px padding on each side of the dialog.
-    assert hint._options["wraplength"] == 864

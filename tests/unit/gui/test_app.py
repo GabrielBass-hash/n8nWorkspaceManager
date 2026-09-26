@@ -1,6 +1,7 @@
 """GUI shell tests: row rendering, selection, launch, poll and delete."""
 
 import contextlib
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -34,10 +35,11 @@ from helpers import (
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
-from n8n_launcher.gui import LauncherApp
+from n8n_launcher.gui import LauncherApp, pages, server_page
 from n8n_launcher.gui.app import (
     _CHIP_GAP,
     _CHIP_PADX,
+    SERVER_SNAPSHOT_TTL_SECONDS,
     _api_router_mounted,
     window_minsize,
     window_size,
@@ -109,6 +111,209 @@ def test_configure_root_sizes_window_from_screen(app) -> None:
     assert fake_root._geometry_calls[0] == "1600x900"
     # Centred with a slight upward bias; 0.72 fractions of 3840x2160, capped.
     assert fake_root._geometry_calls[1] == "+1120+420"
+
+
+class GrowRoot(ScreenRoot):
+    """ScreenRoot that also *applies* the geometry, as a window manager would.
+
+    A resize moves the paned window with the root (it fills the root minus its
+    own padding), so the fakes see the same chain the real layout does.
+    """
+
+    paned: FakeTtk.PanedWindow | None = None
+    chrome = 36
+
+    def geometry(self, value: str) -> None:
+        super().geometry(value)
+        if "x" in value and not value.startswith("+"):
+            self._width, _, rest = value.partition("x")
+            self._height, _, self._y = rest.partition("+")
+            self._width, self._height = int(self._width), int(self._height)
+            self._y = int(self._y or 0)
+            if self.paned is not None:
+                self.paned._width = self._width - self.chrome
+
+
+class FakeCard:
+    """The journal card, which is also the paned window's pane.
+
+    ``winfo_reqwidth`` is the table's footprint (columns + the panel's padding +
+    the card's border) and ``winfo_width`` what the current split gave it, which
+    is exactly the pair the host measures.
+    """
+
+    def __init__(self, width: int, requested: int) -> None:
+        self._width = width
+        self._requested = requested
+
+    def winfo_width(self) -> int:
+        return self._width
+
+    def winfo_reqwidth(self) -> int:
+        return self._requested
+
+
+def _journal_app(
+    app, *, screen=(1366, 768), root_width=1000, paned_width=None, card_width=491, need=1114
+):
+    """Wire a launcher whose journal pane is narrower than its table.
+
+    ``paned_width`` defaults to the root minus the paned window's own padding,
+    which is what the real layout gives it.
+    """
+    root = GrowRoot()
+    # ``ScreenRoot`` reports a 3840px display; these cases are about the smaller
+    # laptops where 72% of the screen is not enough for the table.
+    root.winfo_screenwidth = lambda: screen[0]  # type: ignore[method-assign]
+    root.winfo_screenheight = lambda: screen[1]  # type: ignore[method-assign]
+    root._width = root_width
+    root._height = 600
+    root._x = 183
+    app.app.root = root
+    app.app._owns_root = True
+    app.app._owned_width = root_width
+    card = FakeCard(card_width, need)
+    app.app._journal_card = card
+    paned = app.app._paned
+    assert paned is not None
+    # The paned window manages the card as one of its panes, so the split sizes
+    # the very card the host measures.
+    paned._items[-1] = (card, dict(paned._items[-1][1]))
+    root.paned = paned
+    paned._width = paned_width if paned_width is not None else root_width - 36
+    return root, paned, card
+
+
+def test_the_sash_gives_the_journal_pane_its_table_width(app) -> None:
+    # A ttk paned window does not size a pane from its content: the journal pane
+    # stayed at the 491px of its first layout whatever the window's size, so the
+    # table was cut even in a 1600px window. The split is driven from the table's
+    # own footprint instead, and the list — which can ellipsize a name — takes the
+    # rest. The window is wide enough, so nothing is resized.
+    root, paned, _card = _journal_app(app, root_width=1600)
+
+    app.app._fit_width_to_journal()
+
+    # 1564 - 1114 leaves 1114 for the journal, less the 12px the sash handle and
+    # the pane's border keep out of the split, which the host measures and takes
+    # off the split rather than cutting the table's last column.
+    assert paned.sashpos(0) == 1564 - 1114 - 12
+    assert root._geometry_calls == []
+
+
+def test_a_journal_pane_wider_than_its_table_is_left_alone(app) -> None:
+    # One-directional: extra room (the user dragged the sash their way) is never
+    # taken back, and a pane that already holds its table is left alone.
+    root, paned, _card = _journal_app(app, root_width=1600, card_width=1400)
+
+    app.app._fit_width_to_journal()
+
+    assert paned.sashpos(0) == 0
+    assert root._geometry_calls == []
+
+
+def test_the_split_settles_and_never_creeps_on_the_next_poll(app) -> None:
+    # The journal's fitter runs on every tick, so a split that kept "correcting"
+    # itself would walk the list a few pixels to the right, then to the left, for
+    # as long as the window stays open. One split, then nothing.
+    root, paned, _card = _journal_app(app, root_width=1600)
+
+    app.app._fit_width_to_journal()
+    settled = paned.sashpos(0)
+    app.app._fit_width_to_journal()
+    app.app._fit_width_to_journal()
+
+    assert paned.sashpos(0) == settled
+    assert root._geometry_calls == []
+
+
+def test_the_window_grows_once_so_the_table_fits_next_to_the_list(app) -> None:
+    # A 1366px screen opens the launcher at 1000px (72% clamped to the minimum)
+    # and a long message needs 1114. The launcher still owns the window there, so
+    # it grows it just enough for the table *and* the list's floor (240), with the
+    # paned window's own padding measured rather than guessed.
+    root, paned, card = _journal_app(app, screen=(1920, 1080))
+
+    app.app._fit_width_to_journal()
+
+    assert root._geometry_calls == ["1390x600"]
+    assert root._width == 1390
+
+    # Once the split is applied, the next fit (a poll tick, a longer message)
+    # finds a pane that holds its table and stops touching the window.
+    paned._width = 1390 - 36
+    card._width = 1114
+    app.app._fit_width_to_journal()
+
+    assert root._geometry_calls == ["1390x600"]
+
+
+def test_the_table_wins_over_the_list_floor_when_the_display_is_short(app) -> None:
+    # The list's floor is what makes the window grow, not what blocks the split:
+    # a 1366px display can hold 1114 + 216 and the table still gets its columns,
+    # because the list is a set of ellipsized names while the journal is columns.
+    root, paned, _card = _journal_app(app, screen=(1366, 768))
+
+    app.app._fit_width_to_journal()
+
+    # The window stops at the display's width, and the sash gives the journal all
+    # the paned window has left: 1330 - 1114 = 216 (204 once the sash's own 12px
+    # are taken off) for a list that wanted 240.
+    assert root._width == 1366
+    assert paned.sashpos(0) == 1330 - 1114 - 12
+
+
+def test_a_display_too_narrow_for_the_table_alone_leaves_the_columns(app) -> None:
+    # A 1024px display cannot even hold the table: the window stops at the
+    # display's width, the sash is not moved, and the columns stay exact (the last
+    # one is cut, and the sash is the user's escape hatch).
+    root, paned, _card = _journal_app(app, screen=(1024, 768))
+
+    app.app._fit_width_to_journal()
+
+    assert root._width == 1024
+    assert paned.sashpos(0) == 0
+
+
+def test_the_window_is_moved_back_onto_the_display_when_it_grows(app) -> None:
+    root, _paned, _card = _journal_app(app)
+    root._x = 900
+
+    app.app._fit_width_to_journal()
+
+    # The grow is capped by the 1366px display, and a window dragged to the right
+    # would leave the display entirely, so it slides back to its left edge.
+    assert root._geometry_calls == ["1366x600", "+0+0"]
+
+
+def test_a_resized_window_is_the_users_and_never_grows_again(app) -> None:
+    root, _paned, _card = _journal_app(app, root_width=900)
+    app.app._owned_width = 1000  # the user dragged the window edge narrower
+
+    app.app._fit_width_to_journal()
+
+    assert root._geometry_calls == []
+
+
+def test_an_embedded_launcher_never_resizes_someone_elses_window(app) -> None:
+    # A test harness (or an embedder) owns the geometry: the split is still ours,
+    # the window's size is not.
+    root, paned, _card = _journal_app(app, paned_width=1564)
+    app.app._owns_root = False
+
+    app.app._fit_width_to_journal()
+
+    assert paned.sashpos(0) == 1564 - 1114 - 12
+    assert root._geometry_calls == []
+
+
+def test_the_journal_fit_reaches_the_host(app) -> None:
+    # The panel renders and calls back; the split and the window are the host's.
+    _root, paned, _card = _journal_app(app, root_width=1600)
+
+    app.app._monitor_panel._on_fitted()
+
+    assert paned.sashpos(0) == 1600 - 36 - 1114 - 12
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -1120,36 +1325,44 @@ def test_ci_chip_palette_tracks_config_and_selection(app, tmp_path) -> None:
     assert row_chip_colors(app, "ws-stopped", "ci_chip") == CHIP_ACTIVE
 
 
-def test_configure_ci_enables_then_persists_selection(app) -> None:
+def test_configure_ci_enables_then_opens_the_page(app) -> None:
     stopped = _stopped(app)
     app.app._select_row(stopped.id)
 
-    with patch(
-        "n8n_launcher.gui.app.ci_edit.prompt_ci_workflows",
-        return_value=({"n8nPipelines/a.json"}, True),
-    ) as prompt:
-        app.app.configure_ci_selected()
-        app.app._drain_events()
+    app.app.configure_ci_selected()
+    app.app._drain_events()
 
     app.manager.enable_ci.assert_called_once_with(stopped)
-    prompt.assert_called_once()
-    app.manager.save_ci_selection.assert_called_once_with(
-        stopped, {"n8nPipelines/a.json"}, push=True
-    )
+    assert app.app._pages.page(pages.PageKind.CI) is not None
 
 
-def test_configure_ci_opens_dialog_directly_when_already_enabled(app) -> None:
+def test_configure_ci_opens_the_page_directly_when_already_enabled(app) -> None:
     stopped = _stopped(app)
     stopped.git = GitConfig(ci_enabled=True)
     app.app._select_row(stopped.id)
 
-    with patch("n8n_launcher.gui.app.ci_edit.prompt_ci_workflows", return_value=None) as prompt:
-        app.app.configure_ci_selected()
-        app.app._drain_events()
+    app.app.configure_ci_selected()
+    app.app._drain_events()
 
     app.manager.enable_ci.assert_not_called()
-    prompt.assert_called_once()
-    app.manager.save_ci_selection.assert_not_called()
+    assert app.app._pages.page(pages.PageKind.CI) is not None
+
+
+def test_saving_from_the_ci_page_persists_through_the_manager(app) -> None:
+    # The page owns no git call: it hands the ticked paths and the push answer
+    # to the manager, off the main thread.
+    stopped = _stopped(app)
+    app.app._select_row(stopped.id)
+    app.app._open_ci_page(stopped)
+    page = app.app._pages.page(pages.PageKind.CI)
+
+    page.selection._selection = {"n8nPipelines/a.json"}
+    app.app._save_ci_selection(page.workspace, page.selection.selection(), True)
+    app.app._drain_events()
+
+    app.manager.save_ci_selection.assert_called_once_with(
+        stopped, {"n8nPipelines/a.json"}, push=True
+    )
 
 
 def test_disable_ci_selected_requires_confirmation(app) -> None:
@@ -1375,9 +1588,11 @@ def _fake_monitoring_gui():
         yield
 
 
-def window_text() -> str:
-    """Return the text rendered by the last supervision window's panel."""
-    return FakeTk.Toplevel.instances[-1].server_panel._label.text
+def server_page_text(app) -> str:
+    """Return the text rendered by the open server page."""
+    page = app.app._pages.page(pages.PageKind.SERVER)
+    assert page is not None
+    return page.note_text()
 
 
 def _monitor_app(app, tmp_path, events=()):
@@ -1410,6 +1625,114 @@ def test_main_window_embeds_the_monitoring_panel(app) -> None:
     # The journal header is a bare download icon: no "Tous les workspaces"
     # button and no "Actualiser" one (the panel polls on its own timer).
     assert app.app._monitor_panel._export_icon is not None
+
+
+# ------------------------------------------------------------------ pages
+class StubPage:
+    """A page the app-level tests can open without building a real view."""
+
+    def __init__(self, workspace, subject):
+        self.workspace = workspace
+        self.subject = subject
+        self.retargets: list[object] = []
+        self.shown = 0
+        self.hidden = 0
+        self.closed = 0
+
+    def retarget(self, workspace) -> None:
+        self.workspace = workspace
+        self.retargets.append(workspace)
+
+    def on_show(self) -> None:
+        self.shown += 1
+
+    def on_hide(self) -> None:
+        self.hidden += 1
+
+    def on_close(self) -> None:
+        self.closed += 1
+
+    def destroy(self) -> None:
+        self.closed += 1
+
+
+CI_SUBJECT = pages.PageSubject("Tests CI", ("CI", "GitHub"))
+
+
+def _open_page(app, kind: pages.PageKind, subject: pages.PageSubject = CI_SUBJECT) -> StubPage:
+    """Open a stub page of *kind* for the selected workspace."""
+    workspace = app.app._selected_workspace()
+    assert workspace is not None
+    return app.app._pages.open(kind, workspace, lambda ws: StubPage(ws, subject))
+
+
+def test_the_left_pane_is_a_notebook_starting_with_the_workspace_list(app) -> None:
+    host = app.app._pages
+    assert host is not None
+    # The list card is a tab of the notebook, not a bare pane: a page opens
+    # *next* to it, so the journal never loses the list.
+    assert [tab["frame"] for tab in host.notebook._tabs] == [host.home]
+    assert host.home._parent is host.notebook
+    assert app.app._list_canvas._parent is host.home
+
+
+def test_the_journal_pane_is_sized_by_its_table_not_by_a_weight(app) -> None:
+    # A pane with a weight is handed part of the room its content did not ask
+    # for — which stretched the journal's header row past its columns — and part
+    # of the squeeze when the window is narrow, which cut them off. The journal
+    # asks for exactly what its table needs, and the list takes the rest.
+    paned = FakeTtk.PanedWindow.instances[-1]
+    (list_pane, list_options), (journal_pane, journal_options) = paned._items
+
+    assert list_pane is app.app._pages.notebook
+    assert list_options["weight"] == 3
+    # The journal card is the pane the panel is packed in: it asks for what its
+    # table needs, so it takes no share of the room left over.
+    assert journal_pane is app.app._monitor_panel._parent
+    assert journal_options["weight"] == 0
+
+
+def test_opening_a_page_filters_the_journal_on_its_subject(app) -> None:
+    app.app._select_row("ws-running")
+    page = _open_page(app, pages.PageKind.CI)
+    panel = app.app._monitor_panel
+    assert panel is not None
+    assert panel.visible_subject() == CI_SUBJECT
+    assert panel._subject_chip is not None and panel._subject_chip.packed
+
+
+def test_coming_back_to_the_list_restores_the_whole_log(app) -> None:
+    app.app._select_row("ws-running")
+    _open_page(app, pages.PageKind.CI)
+    app.app._pages.notebook.select(app.app._pages.home)
+    app.app._pages.notebook.fire_tab_changed()
+    panel = app.app._monitor_panel
+    assert panel is not None
+    assert panel.visible_subject() is None
+    assert not panel._subject_chip.packed
+
+
+def test_selecting_another_workspace_retargets_open_pages(app) -> None:
+    app.app._select_row("ws-running")
+    page = _open_page(app, pages.PageKind.CI)
+    app.app._select_row("ws-stopped")
+    assert page.workspace is not None
+    assert page.workspace.id == "ws-stopped"
+    # Opened for "ws-running", then retargeted for the newly selected one.
+    assert [item.id for item in page.retargets] == ["ws-running", "ws-stopped"]
+
+
+def test_a_second_workspace_reuses_the_open_tab(app) -> None:
+    app.app._select_row("ws-running")
+    page = _open_page(app, pages.PageKind.CI)
+    app.app._select_row("ws-stopped")
+    # The list selection already retargeted the page; opening it again must not
+    # stack a second CI tab.
+    reopened = app.app._pages.open(
+        pages.PageKind.CI, app.app._selected_workspace(), lambda _ws: pytest.fail("rebuilt")
+    )
+    assert reopened is page
+    assert len(app.app._pages.notebook._tabs) == 2
 
 
 def test_monitor_events_are_bounded_and_absent_without_a_store(app, tmp_path) -> None:
@@ -1588,7 +1911,7 @@ def test_context_menu_hides_server_supervision_without_a_server(app, tmp_path) -
     assert "Superviser le serveur…" not in labels
 
 
-def test_supervise_server_opens_the_window_and_reads_in_background(app, tmp_path) -> None:
+def test_supervise_server_opens_the_page_and_reads_in_background(app, tmp_path) -> None:
     workspace = _server_workspace(app, tmp_path)
     health = RemoteHealth(available=True, healthy=True, services={"n8n": "running"})
     app.manager.server_health.return_value = health
@@ -1601,13 +1924,12 @@ def test_supervise_server_opens_the_window_and_reads_in_background(app, tmp_path
         ),
     )
 
-    with _fake_monitoring_gui():
-        app.app.supervise_server_selected()
-        app.app._drain_events()
+    app.app.supervise_server_selected()
+    app.app._drain_events()
 
-    assert "Santé : ok." in window_text()
-    assert "n8n ready" in window_text()
-    assert "#9001 · terminé" in window_text()
+    assert "Santé : ok." in server_page_text(app)
+    assert "n8n ready" in server_page_text(app)
+    assert "#9001 · terminé" in server_page_text(app)
     assert "Supervision « Running » — sain" in app.app._status_label._options["text"]
     app.manager.server_health.assert_called_once_with(workspace.id)
     app.manager.server_execution_status.assert_called_once_with(workspace.id)
@@ -1621,9 +1943,8 @@ def test_supervise_server_reports_a_degraded_stack(app, tmp_path) -> None:
     app.manager.server_logs.return_value = ""
     app.manager.server_deploy_status.return_value = (None, ())
 
-    with _fake_monitoring_gui():
-        app.app.supervise_server_selected()
-        app.app._drain_events()
+    app.app.supervise_server_selected()
+    app.app._drain_events()
 
     assert "à vérifier" in app.app._status_label._options["text"]
 
@@ -1635,38 +1956,250 @@ def test_supervise_server_degrades_to_a_partial_read(app, tmp_path) -> None:
     app.manager.server_deploy_status.side_effect = OSError("marker unreadable")
     app.manager.server_execution_status.side_effect = OSError("status unreachable")
 
-    with _fake_monitoring_gui():
-        app.app.supervise_server_selected()
-        app.app._drain_events()
+    app.app.supervise_server_selected()
+    app.app._drain_events()
 
-    assert "ssh timeout" in window_text()
-    assert "Santé : ok." in window_text()
+    assert "ssh timeout" in server_page_text(app)
+    assert "Santé : ok." in server_page_text(app)
     # The failed fourth read drops its own section only.
-    assert "Exécutions n8n" not in window_text()
+    assert "Exécutions n8n" not in server_page_text(app)
     app.manager.server_logs.assert_called_once_with(workspace.id)
 
 
-def test_supervise_server_without_a_server_does_nothing(app, tmp_path) -> None:
+def test_supervise_server_without_a_server_opens_the_note(app, tmp_path) -> None:
+    # The tab opens whatever the workspace looks like — it never appears and
+    # disappears under the user — but a workspace with no server is not read.
     workspace = make_workspace(tmp_path, "Running", 5678)
     app.manager.list.return_value = [workspace]
     app.app.refresh()
     app.app._select_row(workspace.id)
 
     app.app.supervise_server_selected()
+    app.app._drain_events()
 
+    assert server_page.NO_SERVER_NOTE in server_page_text(app)
     app.manager.server_health.assert_not_called()
 
 
 def test_supervise_server_reports_a_failed_read(app, tmp_path) -> None:
     _server_workspace(app, tmp_path)
     app.manager.server_health.side_effect = OSError("no route to host")
+    app.manager.server_logs.side_effect = OSError("no route to host")
+    app.manager.server_deploy_status.side_effect = OSError("no route to host")
+    app.manager.server_execution_status.side_effect = OSError("no route to host")
 
-    with _fake_monitoring_gui():
-        app.app.supervise_server_selected()
-        app.app._drain_events()
+    app.app.supervise_server_selected()
+    app.app._drain_events()
 
-    # The worker raised: the error dialog path ran and no snapshot was applied.
-    assert "Santé : inconnue." in window_text()
+    # An unreachable server is a rendered partial read, never a raised worker.
+    assert "Santé : inconnue." in server_page_text(app)
+    assert "no route to host" in server_page_text(app)
+
+
+# ------------------------------------------------- server page freshness
+def _stub_server_reads(app) -> None:
+    """Give the manager sane server reads so a snapshot renders as text."""
+    app.manager.server_health.return_value = RemoteHealth(available=True, healthy=True)
+    app.manager.server_logs.return_value = ""
+    app.manager.server_deploy_status.return_value = (None, ())
+    app.manager.server_execution_status.return_value = RemoteExecutionStatus(supported=True)
+
+
+def _server_page_of(app):
+    """Return the open server page, asserting the tab exists."""
+    page = app.app._pages.page(pages.PageKind.SERVER)
+    assert page is not None
+    return page
+
+
+def test_a_read_within_the_freshness_window_is_served_from_the_cache(app, tmp_path) -> None:
+    # A read is four SSH commands: coming back to the tab, or walking the list
+    # and returning, must not pay for it again.
+    workspace = _server_workspace(app, tmp_path)
+    _stub_server_reads(app)
+    app.app.supervise_server_selected()
+    app.app._drain_events()
+    page = _server_page_of(app)
+
+    page.on_hide()
+    page.on_show()
+    app.app._drain_events()
+
+    app.manager.server_health.assert_called_once_with(workspace.id)
+
+
+def test_an_expired_snapshot_is_read_again(app, tmp_path) -> None:
+    workspace = _server_workspace(app, tmp_path)
+    _stub_server_reads(app)
+    app.app.supervise_server_selected()
+    app.app._drain_events()
+    page = _server_page_of(app)
+
+    app.app._server_fetched_at[workspace.id] = time.monotonic() - (SERVER_SNAPSHOT_TTL_SECONDS + 1)
+    page.on_hide()
+    page.on_show()
+    app.app._drain_events()
+
+    assert app.manager.server_health.call_count == 2
+
+
+def test_the_manual_refresh_bypasses_the_freshness_window(app, tmp_path) -> None:
+    _server_workspace(app, tmp_path)
+    _stub_server_reads(app)
+    app.app.supervise_server_selected()
+    app.app._drain_events()
+    page = _server_page_of(app)
+
+    page.force_refresh()
+    app.app._drain_events()
+
+    assert app.manager.server_health.call_count == 2
+
+
+def test_a_read_in_flight_is_never_stacked(app, tmp_path) -> None:
+    # The release is queued on the Tk loop, so a second request made before the
+    # drain finds the read still in flight and does nothing.
+    _server_workspace(app, tmp_path)
+    _stub_server_reads(app)
+    app.app.supervise_server_selected()
+    page = _server_page_of(app)
+
+    page.force_refresh()
+    page.force_refresh()
+    app.app._drain_events()
+
+    app.manager.server_health.assert_called_once()
+
+
+def test_a_selection_change_mid_read_is_read_when_the_read_releases(app, tmp_path) -> None:
+    # The first read is still on the wire when the selection moves: the second
+    # workspace is queued, not dropped, so the tab is not left empty.
+    first = _server_workspace(app, tmp_path)
+    second = _server_workspace(app, tmp_path)
+    second.id = "ws-second"
+    app.manager.list.return_value = [first, second]
+    app.manager.git_remote_url.return_value = None
+    _stub_server_reads(app)
+    app.app._select_row(first.id)
+    app.app.supervise_server_selected()
+
+    app.app._select_row(second.id)
+    # Nothing started yet: the first read still owns the worker slot.
+    assert app.manager.server_health.call_count == 1
+
+    app.app._drain_events()
+
+    assert [call.args[0] for call in app.manager.server_health.call_args_list] == [
+        first.id,
+        second.id,
+    ]
+    page = _server_page_of(app)
+    assert page.workspace is not None
+    assert page.workspace.id == "ws-second"
+    assert "Santé : ok." in page.note_text()
+
+
+def test_only_the_latest_deferred_read_is_served(app, tmp_path) -> None:
+    first = _server_workspace(app, tmp_path)
+    others = []
+    for index in range(2):
+        other = _server_workspace(app, tmp_path)
+        other.id = f"ws-{index}"
+        others.append(other)
+    app.manager.list.return_value = [first, *others]
+    app.manager.git_remote_url.return_value = None
+    _stub_server_reads(app)
+    app.app._select_row(first.id)
+    app.app.supervise_server_selected()
+
+    app.app._select_row(others[0].id)
+    app.app._select_row(others[1].id)
+    app.app._drain_events()
+
+    # Walking three workspaces in one read is one queued request, not two.
+    assert [call.args[0] for call in app.manager.server_health.call_args_list] == [
+        first.id,
+        others[1].id,
+    ]
+
+
+def test_a_deferred_read_is_dropped_when_the_launcher_closes(app, tmp_path) -> None:
+    first = _server_workspace(app, tmp_path)
+    second = _server_workspace(app, tmp_path)
+    second.id = "ws-second"
+    app.manager.list.return_value = [first, second]
+    app.manager.git_remote_url.return_value = None
+    _stub_server_reads(app)
+    app.app._select_row(first.id)
+    app.app.supervise_server_selected()
+    app.app._select_row(second.id)
+
+    app.app._set_closing(True)
+    app.app._drain_events()
+
+    assert app.manager.server_health.call_count == 1
+    assert app.app._server_pending is None
+
+
+def test_a_snapshot_landing_after_the_tab_closed_is_cached(app, tmp_path) -> None:
+    # The read outlives the tab: cache it so the next visit is instant, but
+    # never render it on destroyed widgets.
+    workspace = _server_workspace(app, tmp_path)
+    _stub_server_reads(app)
+    app.manager.server_logs.return_value = "n8n ready"
+    app.app.supervise_server_selected()
+
+    app.app._pages.close(pages.PageKind.SERVER)
+    app.app._drain_events()
+
+    assert app.app._pages.page(pages.PageKind.SERVER) is None
+    assert app.app._server_cache[workspace.id].logs == "n8n ready"
+    assert app.mocks.messagebox.errors == []
+
+
+def test_the_server_page_follows_the_list_selection(app, tmp_path) -> None:
+    first = _server_workspace(app, tmp_path)
+    second = _server_workspace(app, tmp_path)
+    second.id = "ws-second"
+    second.name = "Second"
+    app.manager.list.return_value = [first, second]
+    app.manager.git_remote_url.return_value = None
+    _stub_server_reads(app)
+    app.app._select_row(first.id)
+    app.app.supervise_server_selected()
+    app.app._drain_events()
+
+    app.app._select_row(second.id)
+    app.app._drain_events()
+
+    page = _server_page_of(app)
+    assert page.workspace is not None
+    assert page.workspace.id == "ws-second"
+    # The tab was visible, so the workspace that just changed under the user is
+    # read: one read per workspace, never for the previous one.
+    assert [call.args[0] for call in app.manager.server_health.call_args_list] == [
+        first.id,
+        second.id,
+    ]
+
+
+def test_a_hidden_server_page_only_serves_its_cache(app, tmp_path) -> None:
+    first = _server_workspace(app, tmp_path)
+    second = _server_workspace(app, tmp_path)
+    second.id = "ws-second"
+    app.manager.list.return_value = [first, second]
+    app.manager.git_remote_url.return_value = None
+    _stub_server_reads(app)
+    app.app._select_row(first.id)
+    app.app.supervise_server_selected()
+    app.app._drain_events()
+
+    page = _server_page_of(app)
+    page.on_hide()  # the user went back to the workspace list
+    app.app._select_row(second.id)
+    app.app._drain_events()
+
+    app.manager.server_health.assert_called_once_with(first.id)
 
 
 # ---------------------------------------------------------- context menu

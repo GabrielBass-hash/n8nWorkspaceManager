@@ -207,7 +207,7 @@ def test_screen_size_reports_an_unmapped_screen_as_one_pixel():
 
 
 # ----------------------------------------------------------- ColumnFitter
-def make_fitter(tree=None, **kwargs):
+def make_fitter(tree=None, container=None, **kwargs):
     """Return a fitter over a fake tree, with the runs-tree shape."""
     tree = tree or FakeTtk.Treeview(None, columns=("detail",))
     fitter = layout.ColumnFitter(
@@ -217,6 +217,7 @@ def make_fitter(tree=None, **kwargs):
         minimums=kwargs.get("minimums", {"#0": 100, "detail": 60}),
         maximums=kwargs.get("maximums", {"#0": 300, "detail": 3000}),
         measure=measure,
+        container=container,
     )
     return tree, fitter
 
@@ -231,6 +232,83 @@ def test_column_fitter_sizes_the_columns_to_the_rows_it_reads_back():
     assert widths["#0"] == len("✓  build (success)") * CHAR_WIDTH + layout._CELL_PADDING
     assert widths["detail"] == natural("success")
     assert tree.column_widths() == widths
+
+
+def test_a_changed_column_makes_the_table_ask_its_geometry_manager_again():
+    # A ttk table caches the request it handed to its geometry manager, and a
+    # ``column -width`` push does not invalidate it: a table already on screen
+    # kept the box it was built with while its columns read back at their fitted
+    # width, which is a table cut at its last column with a hole to the right.
+    tree, fitter = make_fitter()
+    tree.insert("", "end", iid="run-1", text="run", values=("success",))
+
+    fitter.rows()
+
+    assert tree._options["height"] == tree.cget("height")
+
+
+def test_an_unchanged_table_is_not_asked_again():
+    # The journal's fitter runs on every poll tick; re-asking a table whose rows
+    # did not move would be a needless geometry pass 500-row snapshots cannot
+    # afford.
+    tree, fitter = make_fitter()
+    tree.insert("", "end", iid="run-1", text="run", values=("success",))
+    fitter.rows()
+    tree._options.pop("height")
+
+    fitter.rows()
+
+    assert "height" not in tree._options
+
+
+def test_the_fitter_gives_its_container_the_width_of_the_whole_table():
+    # The container is what the geometry manager allocates from, so it is the one
+    # place where "the table needs this much" has to become "give it that much":
+    # a pane narrower than the total is what cuts a heading and its column.
+    container = FakeTk.Frame(None)
+    tree, fitter = make_fitter(container=container)
+    tree.insert("", "end", iid="run-1", text="run", values=("success",))
+
+    fitter.rows()
+
+    assert container._options["width"] == fitter.total()
+    assert fitter.total() == fitter.widths()["#0"] + fitter.widths()["detail"]
+
+
+def test_the_container_follows_the_table_as_the_rows_change():
+    container = FakeTk.Frame(None)
+    tree, fitter = make_fitter(container=container)
+    tree.insert("", "end", iid="run-1", text="run", values=("success",))
+    fitter.rows()
+    first = container._options["width"]
+
+    tree.insert("", "end", iid="run-2", text="a much longer run label", values=("success",))
+    fitter.rows()
+
+    assert container._options["width"] > first
+    assert container._options["width"] == fitter.total()
+
+
+def test_the_container_is_left_alone_while_the_total_does_not_move():
+    container = FakeTk.Frame(None)
+    tree, fitter = make_fitter(container=container)
+    tree.insert("", "end", iid="run-1", text="run", values=("success",))
+    fitter.rows()
+    container._options["width"] = "sized by the user"
+
+    fitter.rows()
+
+    # Nothing changed, so the fitter does not rewrite what it already pushed.
+    assert container._options["width"] == "sized by the user"
+
+
+def test_a_fitter_without_a_container_fits_the_table_all_the_same():
+    tree, fitter = make_fitter()
+    tree.insert("", "end", iid="run-1", text="run", values=("success",))
+
+    fitter.rows()
+
+    assert tree.column_widths() == fitter.widths()
 
 
 def test_column_fitter_walks_a_nested_tree():
@@ -313,6 +391,31 @@ def test_no_column_is_stretchable():
     assert tree._columns["#0"]["stretch"] is False
     assert tree._columns["detail"]["stretch"] is False
     assert tree._columns["detail"]["minwidth"] == 60
+
+
+# ------------------------------------------------------------------- wrap_at
+def test_wrap_at_sets_the_wraplength_from_a_measured_width():
+    label = FakeTk.Label(None, text="x", wraplength=480)
+
+    layout.wrap_at(label, 700, padding=24)
+
+    assert label._options["wraplength"] == 676
+
+
+def test_wrap_at_never_goes_below_the_minimum():
+    label = FakeTk.Label(None, text="x", wraplength=480)
+
+    # A table narrower than the minimum: the label keeps a readable width and
+    # the *table* is the one that stays on its own rule.
+    layout.wrap_at(label, 40, minimum=120, padding=0)
+
+    assert label._options["wraplength"] == 120
+
+
+def test_wrap_at_survives_a_widget_that_cannot_be_configured():
+    # Tk raises when a destroyed widget is still asked for its option; a fit
+    # that lands after a teardown must stay silent.
+    layout.wrap_at(object(), 700)  # type: ignore[arg-type]
 
 
 # -------------------------------------------------------- bind_wraplength

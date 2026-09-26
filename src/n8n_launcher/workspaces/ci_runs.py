@@ -463,7 +463,9 @@ class RunsSnapshot:
     ``error`` means that the run list could not be obtained. ``warnings`` and
     ``partial_errors`` describe failures that happened while enriching an
     otherwise usable run list, so the panel can render the partial tree rather
-    than silently dropping it.
+    than silently dropping it. A ``note`` is the opposite of an ``error``: the
+    read was skipped on purpose (no GitHub remote, say), so the panel shows
+    why the tab is empty instead of reporting a failure.
     """
 
     repo_path: str
@@ -474,11 +476,14 @@ class RunsSnapshot:
     fetched_at: str | None = None  # ISO timestamp of the last successful poll
     warnings: tuple[str, ...] = ()
     partial_errors: tuple[str, ...] = ()
+    note: str | None = None  # why there is nothing to show (never a failure)
 
     def __post_init__(self) -> None:
-        """Normalise message collections for direct dataclass construction."""
+        """Normalise the message collections and the note for direct construction."""
         object.__setattr__(self, "warnings", _normalise_messages(self.warnings))
         object.__setattr__(self, "partial_errors", _normalise_messages(self.partial_errors))
+        note = self.note.strip() if self.note else ""
+        object.__setattr__(self, "note", note or None)
 
     @property
     def has_data(self) -> bool:
@@ -518,6 +523,7 @@ def compose_snapshot(
     warnings: Iterable[str] | str | None = None,
     partial_errors: Iterable[str] | str | None = None,
     errors: Iterable[str] | str | None = None,
+    note: str | None = None,
 ) -> RunsSnapshot:
     """Assemble a :class:`RunsSnapshot` from already-fetched API payloads.
 
@@ -529,6 +535,8 @@ def compose_snapshot(
     non-empty ``error`` is preserved alongside any runs that were fetched, and
     ``warnings``/``partial_errors`` make enrichment failures explicit.
     ``errors`` is accepted as a compatibility spelling for partial errors.
+    ``note`` explains an intentionally empty result (no GitHub remote) and is
+    not a failure.
     """
     run_summaries = tuple(run_summary(run) for run in runs if isinstance(run, dict))
     jobs_by_run: dict[int, tuple[JobSummary, ...]] = {}
@@ -561,4 +569,5 @@ def compose_snapshot(
         fetched_at=fetched_at,
         warnings=_normalise_messages(warnings),
         partial_errors=_normalise_messages(combined_errors),
+        note=note,
     )

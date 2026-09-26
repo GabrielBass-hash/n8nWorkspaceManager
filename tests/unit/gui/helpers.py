@@ -1,7 +1,7 @@
 """Shared fakes and helpers for the GUI unit tests."""
 
 from concurrent.futures import Future
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import ClassVar
 
@@ -22,6 +22,31 @@ class FakeTk:
             self._options = dict(kwargs)
             self.destroyed = False
             self._bindings: dict[str, object] = {}
+            # Pages own their own poll timers (``self.after``), so the fake
+            # frame schedules them exactly like the fake root does.
+            self.after_callbacks: list[tuple[int, object]] = []
+            self._after_ids: list[int] = []
+            self._next_after_id = 0
+
+        def after(self, delay: int, callback) -> int:
+            after_id = self._next_after_id
+            self._next_after_id += 1
+            self._after_ids.append(after_id)
+            self.after_callbacks.append((delay, callback))
+            return after_id
+
+        def after_cancel(self, after_id: int) -> None:
+            with suppress(ValueError):
+                index = self._after_ids.index(after_id)
+                self._after_ids.pop(index)
+                self.after_callbacks.pop(index)
+
+        def winfo_toplevel(self):
+            """Return the topmost ancestor, as Tk's ``winfo_toplevel`` does."""
+            node = self
+            while getattr(node, "_parent", None) is not None:
+                node = node._parent
+            return node
 
         def pack(self, *_args, **_kwargs) -> None:
             if hasattr(self._parent, "children"):
@@ -37,8 +62,15 @@ class FakeTk:
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
 
-        def configure(self, **kwargs) -> None:
+        def configure(self, cnf=None, **kwargs) -> None:
+            """Record options the way Tk does: a mapping, keywords, or both."""
+            if isinstance(cnf, dict):
+                self._options.update(cnf)
             self._options.update(kwargs)
+
+        def cget(self, option: str):
+            """Read back an option, as Tk's ``cget`` does."""
+            return self._options.get(option, "")
 
         def destroy(self) -> None:
             self.destroyed = True
@@ -92,8 +124,15 @@ class FakeTk:
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
 
-        def configure(self, **kwargs) -> None:
+        def configure(self, cnf=None, **kwargs) -> None:
+            """Record options the way Tk does: a mapping, keywords, or both."""
+            if isinstance(cnf, dict):
+                self._options.update(cnf)
             self._options.update(kwargs)
+
+        def cget(self, option: str):
+            """Read back an option, as Tk's ``cget`` does."""
+            return self._options.get(option, "")
 
         def bind(self, sequence: str, handler) -> None:
             self._bindings[sequence] = handler
@@ -132,6 +171,7 @@ class FakeTk:
         instances: ClassVar[list["FakeTk.Canvas"]] = []
 
         def __init__(self, _parent, **kwargs):
+            self._parent = _parent
             self._options = dict(kwargs)
             self._bindings: dict[str, object] = {}
             self._window_id = 0
@@ -265,8 +305,15 @@ class FakeTk:
         def minsize(self, *_args) -> None:
             self._minsize = _args
 
-        def configure(self, **kwargs) -> None:
+        def configure(self, cnf=None, **kwargs) -> None:
+            """Record options the way Tk does: a mapping, keywords, or both."""
+            if isinstance(cnf, dict):
+                self._options.update(cnf)
             self._options.update(kwargs)
+
+        def cget(self, option: str):
+            """Read back an option, as Tk's ``cget`` does."""
+            return self._options.get(option, "")
 
         def resizable(self, *_args) -> None:
             pass
@@ -411,6 +458,19 @@ class FakeTk:
         def tk_popup(self, _x, _y) -> None:
             pass
 
+    # ``tkinter`` type names the layout code references at runtime through
+    # ``typing.cast`` (a page is handed to the notebook as a widget). A cast
+    # evaluates its first argument, so the fakes must expose the names even
+    # though nothing here is type-checked.
+    Misc = Frame
+    Widget = Frame
+
+
+# What a ttk pane loses to the sash handle and its own border: a pane is the
+# window's remainder, not the remainder plus this, and a split that forgot it
+# left the table's last column a few pixels short.
+_PANE_CHROME = 12
+
 
 class FakeTtk:
     class Frame:
@@ -430,8 +490,14 @@ class FakeTtk:
         def __init__(self, _parent, **_kwargs):
             self._parent = _parent
             self.children: list[object] = []
-            self._items: list[object] = []
+            self._items: list[tuple[object, dict[str, object]]] = []
             self.packed = False
+            # The split, and the width it is applied to: the fakes cannot lay
+            # panes out, so a test sets them and reads back what the view asked
+            # for. ``sashpos`` also records the request, which is the only way a
+            # ttk paned window resizes an unweighted pane.
+            self._sashpos = 0
+            self._width = 0
             FakeTtk.PanedWindow.instances.append(self)
 
         def pack(self, *_args, **_kwargs) -> None:
@@ -442,6 +508,28 @@ class FakeTtk:
         def add(self, child, **_kwargs) -> None:
             self.children.append(child)
             self._items.append((child, dict(_kwargs)))
+
+        def panes(self) -> tuple[object, ...]:
+            return tuple(child for child, _weights in self._items)
+
+        def sashpos(self, index: int, position: int | None = None) -> int:
+            """Report the split, or move it the way ``wm``-style panes do."""
+            if position is not None:
+                self._sashpos = position
+                for pane in self.panes()[1:]:
+                    # A real ttk pane is what the window has left once the first
+                    # pane took the split, less the sash handle and the pane's own
+                    # border. The fakes cannot lay panes out, so the ones after the
+                    # first are sized the same way, chrome included: a pane that
+                    # ignored it would hide the split's own arithmetic.
+                    pane._width = max(self._width - self._sashpos - _PANE_CHROME, 0)
+            return self._sashpos
+
+        def winfo_width(self) -> int:
+            return self._width
+
+        def winfo_reqwidth(self) -> int:
+            return self._width
 
     class Button:
         instances: ClassVar[list["FakeTtk.Button"]] = []
@@ -474,6 +562,7 @@ class FakeTtk:
         instances: ClassVar[list["FakeTtk.Treeview"]] = []
 
         def __init__(self, _parent, **kwargs):
+            self._parent = _parent
             self._options = dict(kwargs)
             self._items: dict[str, dict[str, object]] = {}
             self._bindings: dict[str, object] = {}
@@ -483,6 +572,7 @@ class FakeTtk:
             self._width = 1
             self.element = "Treeitem.text"
             self.packed = False
+            self._pack_options: dict[str, object] = {}
             FakeTtk.Treeview.instances.append(self)
 
         def heading(self, column: str, **kwargs) -> None:
@@ -512,8 +602,15 @@ class FakeTtk:
         def tag_configure(self, _tag: str, **_kwargs) -> None:
             pass
 
-        def configure(self, **kwargs) -> None:
+        def configure(self, cnf=None, **kwargs) -> None:
+            """Record options the way Tk does: a mapping, keywords, or both."""
+            if isinstance(cnf, dict):
+                self._options.update(cnf)
             self._options.update(kwargs)
+
+        def cget(self, option: str):
+            """Read back an option, as Tk's ``cget`` does."""
+            return self._options.get(option, "")
 
         def insert(self, parent: str, index: int, iid=None, text="", values=(), tags=(), **kwargs):
             item_id = iid if iid is not None else f"item{len(self._items)}"
@@ -565,8 +662,17 @@ class FakeTtk:
         def identify_row(self, _y: int) -> str | None:
             return next(iter(self._items), None)
 
-        def pack(self, *_args, **_kwargs) -> None:
+        def pack(self, *_args, **kwargs) -> None:
             self.packed = True
+            # The pack options are the table's own half of the sizing rule: a
+            # tree packed with a horizontal fill is stretched to its pane, so
+            # its heading row no longer sits over its columns.
+            self._pack_options = dict(kwargs)
+            # Tk registers a packed slave with its parent, in packing order, and
+            # that order decides who takes the shortfall when a container is
+            # shorter than the sum of its children.
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
 
         def set(self, iid: str, column: str, value: object) -> None:
             entry = self._items[iid]
@@ -578,9 +684,9 @@ class FakeTtk:
         def __init__(self, _parent, **kwargs):
             self._parent = _parent
             self.children: list[object] = []
-            self._tabs: dict[int, dict[str, object]] = {}
-            self._next_index = 0
+            self._tabs: list[dict[str, object]] = []
             self._selected: int | None = None
+            self._bindings: dict[str, object] = {}
             self.packed = False
             FakeTtk.Notebook.instances.append(self)
 
@@ -589,38 +695,79 @@ class FakeTtk:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
+        def bind(self, sequence: str, handler) -> None:
+            """Record a binding so a test can fire the notebook's virtual event."""
+            self._bindings[sequence] = handler
+
         def add(self, frame, **kwargs) -> None:
-            self._tabs[self._next_index] = {"frame": frame, **dict(kwargs)}
-            self._next_index += 1
+            self._tabs.append({"frame": frame, **dict(kwargs)})
             self.children.append(frame)
             if self._selected is None:
                 self._selected = 0
+
+        def forget(self, frame) -> None:
+            """Remove *frame*'s tab, selecting another one like Tk does.
+
+            Tk moves the selection when the visible tab disappears, so the fake
+            does too: a page closing must leave the notebook on some tab, and
+            the host asserts which one.
+            """
+            index = self.index(frame)
+            if index is None:
+                return
+            was_selected = index == self._selected
+            self._tabs.pop(index)
+            if frame in self.children:
+                self.children.remove(frame)
+            if not self._tabs:
+                self._selected = None
+                return
+            if was_selected:
+                self._selected = min(index, len(self._tabs) - 1)
+                self.fire_tab_changed()
+            elif self._selected is not None and self._selected > index:
+                # A tab above the visible one goes away, so the visible one
+                # slides down a row and keeps the selection.
+                self._selected -= 1
+
+        def index(self, tab_id) -> int | None:
+            """Return the index of a tab (by index or child frame)."""
+            if isinstance(tab_id, int):
+                return tab_id if 0 <= tab_id < len(self._tabs) else None
+            return next(
+                (i for i, tab in enumerate(self._tabs) if tab["frame"] is tab_id),
+                None,
+            )
 
         def select(self, tab_id=None):
             """Select a tab by index or frame; return the selected widget when asked."""
             if tab_id is None:
                 selected = self._tab(self._selected)
                 return selected.get("frame") if selected is not None else None
-            if not isinstance(tab_id, int):
-                tab_id = next(
-                    (idx for idx, tab in self._tabs.items() if tab["frame"] is tab_id),
-                    tab_id,
-                )
-            self._selected = tab_id
+            index = self.index(tab_id)
+            if index is not None:
+                self._selected = index
 
         def tab(self, tab_id, option=None, **kwargs):
             """Get/update the options of one tab (by index or child frame)."""
             entry = self._tab(tab_id)
+            if entry is None:
+                return None
             if kwargs:
                 entry.update(kwargs)
             if option is None:
                 return dict(entry)
             return entry.get(option)
 
+        def fire_tab_changed(self) -> None:
+            """Simulate a user clicking a tab, as Tk's virtual event would."""
+            handler = self._bindings.get("<<NotebookTabChanged>>")
+            if handler is not None:
+                handler(None)
+
         def _tab(self, tab_id):
-            if isinstance(tab_id, int):
-                return self._tabs.get(tab_id)
-            return next((tab for tab in self._tabs.values() if tab["frame"] is tab_id), None)
+            index = self.index(tab_id)
+            return self._tabs[index] if index is not None else None
 
 
 class FakeRoot:
@@ -635,6 +782,8 @@ class FakeRoot:
         self._width = 1
         self._height = 1
         self._screen = (1, 1)
+        self._x = 0
+        self._y = 0
 
     def after(self, delay: int, callback) -> int:
         after_id = self._next_after_id
@@ -665,6 +814,18 @@ class FakeRoot:
 
     def geometry(self, _value: str) -> None:
         pass
+
+    def nametowidget(self, name):
+        """Return the widget a path names; the fakes hand out the widget itself."""
+        return name
+
+    def winfo_x(self) -> int:
+        """Report the window's left edge, as a window manager would."""
+        return self._x
+
+    def winfo_y(self) -> int:
+        """Report the window's top edge, as a window manager would."""
+        return self._y
 
     def minsize(self, *_args) -> None:
         pass
@@ -891,6 +1052,37 @@ def fake_server_panel_bases():
 
     with _rebase(ServerPanel) as panel:
         yield panel
+
+
+@contextmanager
+def fake_server_page_bases():
+    """Rebind the server page's ``tk.Frame`` base to :class:`FakeTk.Frame`.
+
+    The page and the :class:`ServerPanel` it owns both capture their base class
+    at import time, so both have to be swapped to build one on the fakes.
+    """
+    from n8n_launcher.gui.monitoring import ServerPanel
+    from n8n_launcher.gui.server_page import ServerPage
+
+    with ExitStack() as stack:
+        for cls in (ServerPage, ServerPanel):
+            stack.enter_context(_rebase(cls))
+        yield ServerPage
+
+
+@contextmanager
+def fake_ci_page_bases():
+    """Rebind the CI page's ``tk.Frame`` bases to :class:`FakeTk.Frame`.
+
+    The page and the selection panel it owns both capture their base class at
+    import time, so both have to be swapped to build one on the fakes.
+    """
+    from n8n_launcher.gui.ci_page import CiPage, CiSelectionPanel
+
+    with ExitStack() as stack:
+        for cls in (CiPage, CiSelectionPanel):
+            stack.enter_context(_rebase(cls))
+        yield CiPage
 
 
 @contextmanager
