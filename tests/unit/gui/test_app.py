@@ -35,12 +35,18 @@ from helpers import (
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
-from n8n_launcher.gui import LauncherApp, pages, server_page
+from n8n_launcher.gui import LauncherApp, board, display, pages, server_page
 from n8n_launcher.gui.app import (
     _CHIP_GAP,
     _CHIP_PADX,
+    _FLOAT_MARGIN,
+    _ROW_NAME_MINIMUM,
+    BOARD_FLOOR,
+    MIN_WINDOW_WIDTH,
     SERVER_SNAPSHOT_TTL_SECONDS,
     _api_router_mounted,
+    _ChipOverflow,
+    clamp_to_screen,
     window_minsize,
     window_size,
 )
@@ -63,9 +69,10 @@ def test_window_size_scales_with_screen() -> None:
 
 
 def test_window_size_never_exceeds_a_small_screen() -> None:
-    # The 1000px floor is a floor for a large screen only: an 800px-wide display
-    # still gets a window that fits on it.
-    assert window_size(800, 600) == (800, 460)
+    # The 760px floor is a floor for a large screen only: an 800px-wide display
+    # still gets a window that fits on it, decorations included.
+    assert window_size(800, 600) == (760, 440)
+    assert window_size(600, 400) == (600, 400)
 
 
 def test_window_size_falls_back_on_unknown_screen() -> None:
@@ -73,12 +80,22 @@ def test_window_size_falls_back_on_unknown_screen() -> None:
     assert window_size(1, 1) == (1000, 600)
 
 
-def test_window_minsize_is_the_column_floor() -> None:
-    assert window_minsize(3840, 2160) == (1000, 460)
+def test_window_minsize_is_the_dashboard_floor() -> None:
+    # Below this the list, the dock, the journal and the panes' own chrome no
+    # longer fit together, so the window stops shrinking. The floor is *derived*
+    # from the board's breakpoints: a breakpoint edited on one side would
+    # otherwise silently make the floor impossible, and the symptom would be a
+    # column that can only ever be cut.
+    assert BOARD_FLOOR == (
+        board.LIST_MINIMUM + board.DOCK_MINIMUM + board.JOURNAL_RAIL + 2 * board.PANE_CHROME
+    )
+    assert MIN_WINDOW_WIDTH >= BOARD_FLOOR
+    assert window_minsize(3840, 2160) == (760, 440)
     # A screen narrower than the floor gets its own width back.
-    assert window_minsize(1024, 768) == (1000, 460)
-    assert window_minsize(800, 600) == (800, 460)
-    assert window_minsize(1, 1) == (1000, 460)
+    assert window_minsize(1024, 768) == (760, 440)
+    assert window_minsize(800, 600) == (760, 440)
+    assert window_minsize(700, 600) == (700, 440)
+    assert window_minsize(1, 1) == (760, 440)
 
 
 class ScreenRoot(FakeRoot):
@@ -113,207 +130,80 @@ def test_configure_root_sizes_window_from_screen(app) -> None:
     assert fake_root._geometry_calls[1] == "+1120+420"
 
 
-class GrowRoot(ScreenRoot):
-    """ScreenRoot that also *applies* the geometry, as a window manager would.
-
-    A resize moves the paned window with the root (it fills the root minus its
-    own padding), so the fakes see the same chain the real layout does.
-    """
-
-    paned: FakeTtk.PanedWindow | None = None
-    chrome = 36
-
-    def geometry(self, value: str) -> None:
-        super().geometry(value)
-        if "x" in value and not value.startswith("+"):
-            self._width, _, rest = value.partition("x")
-            self._height, _, self._y = rest.partition("+")
-            self._width, self._height = int(self._width), int(self._height)
-            self._y = int(self._y or 0)
-            if self.paned is not None:
-                self.paned._width = self._width - self.chrome
+def _boarded_app(app, *, width: int = 1400):
+    """Give the launcher's dashboard a room of *width* pixels and reflow it."""
+    board_ = app.app._board
+    assert board_ is not None
+    board_.pane._width = width
+    board_.reflow()
+    return board_
 
 
-class FakeCard:
-    """The journal card, which is also the paned window's pane.
-
-    ``winfo_reqwidth`` is the table's footprint (columns + the panel's padding +
-    the card's border) and ``winfo_width`` what the current split gave it, which
-    is exactly the pair the host measures.
-    """
-
-    def __init__(self, width: int, requested: int) -> None:
-        self._width = width
-        self._requested = requested
-
-    def winfo_width(self) -> int:
-        return self._width
-
-    def winfo_reqwidth(self) -> int:
-        return self._requested
+def test_the_main_window_is_a_dashboard_not_a_notebook(app) -> None:
+    # One paned window, three columns, no tab bar: the list, the dock of open
+    # pages and the journal are read together.
+    the_board = app.app._board
+    assert the_board is not None
+    assert the_board.pane.packed
+    assert list(the_board.pane.panes()) == [the_board.list_card, the_board.journal_card]
+    assert not FakeTtk.Notebook.instances
 
 
-def _journal_app(
-    app, *, screen=(1366, 768), root_width=1000, paned_width=None, card_width=491, need=1114
-):
-    """Wire a launcher whose journal pane is narrower than its table.
+def test_a_wide_window_gives_the_journal_its_columns(app) -> None:
+    # A pane is never given its request by Tk, so the board drives the split
+    # itself: the journal gets its floor and the list — which can ellipsize a
+    # name — takes the rest.
+    the_board = _boarded_app(app, width=1400)
+    assert the_board.pane.panes()[0] is the_board.list_card
+    assert the_board.pane.pane_width_of(the_board.journal_card) >= board.JOURNAL_MINIMUM - 2
 
-    ``paned_width`` defaults to the root minus the paned window's own padding,
-    which is what the real layout gives it.
-    """
-    root = GrowRoot()
-    # ``ScreenRoot`` reports a 3840px display; these cases are about the smaller
-    # laptops where 72% of the screen is not enough for the table.
-    root.winfo_screenwidth = lambda: screen[0]  # type: ignore[method-assign]
-    root.winfo_screenheight = lambda: screen[1]  # type: ignore[method-assign]
-    root._width = root_width
-    root._height = 600
-    root._x = 183
+
+def test_a_narrow_window_collapses_the_journal_to_its_rail(app) -> None:
+    # Nothing is ever clipped: the list keeps its floor, and when the room runs
+    # out the journal becomes a rail — one control to bring it back.
+    the_board = _boarded_app(app, width=560)
+    assert the_board.journal_rail is True
+    assert the_board.journal_pane_width() == board.JOURNAL_RAIL
+    # The last pane is the room the split left, which the plan holds one handle's
+    # worth above, so the rail is measured a chrome wider than its budget.
+    assert the_board.pane.pane_width_of(the_board.journal_card) <= (
+        board.JOURNAL_RAIL + board.PANE_CHROME
+    )
+    assert app.app._monitor_panel is not None
+
+
+def test_the_window_is_never_resized_behind_the_users_back(app) -> None:
+    # The board collapses columns instead of growing the window: a resize the
+    # user made is the window they want, and the sash is theirs to move.
+    root = ScreenRoot()
     app.app.root = root
     app.app._owns_root = True
-    app.app._owned_width = root_width
-    card = FakeCard(card_width, need)
-    app.app._journal_card = card
-    paned = app.app._paned
-    assert paned is not None
-    # The paned window manages the card as one of its panes, so the split sizes
-    # the very card the host measures.
-    paned._items[-1] = (card, dict(paned._items[-1][1]))
-    root.paned = paned
-    paned._width = paned_width if paned_width is not None else root_width - 36
-    return root, paned, card
-
-
-def test_the_sash_gives_the_journal_pane_its_table_width(app) -> None:
-    # A ttk paned window does not size a pane from its content: the journal pane
-    # stayed at the 491px of its first layout whatever the window's size, so the
-    # table was cut even in a 1600px window. The split is driven from the table's
-    # own footprint instead, and the list — which can ellipsize a name — takes the
-    # rest. The window is wide enough, so nothing is resized.
-    root, paned, _card = _journal_app(app, root_width=1600)
-
-    app.app._fit_width_to_journal()
-
-    # 1564 - 1114 leaves 1114 for the journal, less the 12px the sash handle and
-    # the pane's border keep out of the split, which the host measures and takes
-    # off the split rather than cutting the table's last column.
-    assert paned.sashpos(0) == 1564 - 1114 - 12
+    _boarded_app(app, width=560)
     assert root._geometry_calls == []
 
 
-def test_a_journal_pane_wider_than_its_table_is_left_alone(app) -> None:
-    # One-directional: extra room (the user dragged the sash their way) is never
-    # taken back, and a pane that already holds its table is left alone.
-    root, paned, _card = _journal_app(app, root_width=1600, card_width=1400)
-
-    app.app._fit_width_to_journal()
-
-    assert paned.sashpos(0) == 0
-    assert root._geometry_calls == []
+def test_the_journal_rail_is_announced_to_the_panel(app) -> None:
+    _boarded_app(app, width=560)
+    panel = app.app._monitor_panel
+    assert panel is not None
+    assert panel.rail is True
 
 
-def test_the_split_settles_and_never_creeps_on_the_next_poll(app) -> None:
-    # The journal's fitter runs on every tick, so a split that kept "correcting"
-    # itself would walk the list a few pixels to the right, then to the left, for
-    # as long as the window stays open. One split, then nothing.
-    root, paned, _card = _journal_app(app, root_width=1600)
-
-    app.app._fit_width_to_journal()
-    settled = paned.sashpos(0)
-    app.app._fit_width_to_journal()
-    app.app._fit_width_to_journal()
-
-    assert paned.sashpos(0) == settled
-    assert root._geometry_calls == []
+def test_a_wide_window_keeps_the_journal_open(app) -> None:
+    _boarded_app(app, width=1400)
+    panel = app.app._monitor_panel
+    assert panel is not None
+    assert panel.rail is False
 
 
-def test_the_window_grows_once_so_the_table_fits_next_to_the_list(app) -> None:
-    # A 1366px screen opens the launcher at 1000px (72% clamped to the minimum)
-    # and a long message needs 1114. The launcher still owns the window there, so
-    # it grows it just enough for the table *and* the list's floor (240), with the
-    # paned window's own padding measured rather than guessed.
-    root, paned, card = _journal_app(app, screen=(1920, 1080))
-
-    app.app._fit_width_to_journal()
-
-    assert root._geometry_calls == ["1390x600"]
-    assert root._width == 1390
-
-    # Once the split is applied, the next fit (a poll tick, a longer message)
-    # finds a pane that holds its table and stops touching the window.
-    paned._width = 1390 - 36
-    card._width = 1114
-    app.app._fit_width_to_journal()
-
-    assert root._geometry_calls == ["1390x600"]
-
-
-def test_the_table_wins_over_the_list_floor_when_the_display_is_short(app) -> None:
-    # The list's floor is what makes the window grow, not what blocks the split:
-    # a 1366px display can hold 1114 + 216 and the table still gets its columns,
-    # because the list is a set of ellipsized names while the journal is columns.
-    root, paned, _card = _journal_app(app, screen=(1366, 768))
-
-    app.app._fit_width_to_journal()
-
-    # The window stops at the display's width, and the sash gives the journal all
-    # the paned window has left: 1330 - 1114 = 216 (204 once the sash's own 12px
-    # are taken off) for a list that wanted 240.
-    assert root._width == 1366
-    assert paned.sashpos(0) == 1330 - 1114 - 12
-
-
-def test_a_display_too_narrow_for_the_table_alone_leaves_the_columns(app) -> None:
-    # A 1024px display cannot even hold the table: the window stops at the
-    # display's width, the sash is not moved, and the columns stay exact (the last
-    # one is cut, and the sash is the user's escape hatch).
-    root, paned, _card = _journal_app(app, screen=(1024, 768))
-
-    app.app._fit_width_to_journal()
-
-    assert root._width == 1024
-    assert paned.sashpos(0) == 0
-
-
-def test_the_window_is_moved_back_onto_the_display_when_it_grows(app) -> None:
-    root, _paned, _card = _journal_app(app)
-    root._x = 900
-
-    app.app._fit_width_to_journal()
-
-    # The grow is capped by the 1366px display, and a window dragged to the right
-    # would leave the display entirely, so it slides back to its left edge.
-    assert root._geometry_calls == ["1366x600", "+0+0"]
-
-
-def test_a_resized_window_is_the_users_and_never_grows_again(app) -> None:
-    root, _paned, _card = _journal_app(app, root_width=900)
-    app.app._owned_width = 1000  # the user dragged the window edge narrower
-
-    app.app._fit_width_to_journal()
-
-    assert root._geometry_calls == []
-
-
-def test_an_embedded_launcher_never_resizes_someone_elses_window(app) -> None:
-    # A test harness (or an embedder) owns the geometry: the split is still ours,
-    # the window's size is not.
-    root, paned, _card = _journal_app(app, paned_width=1564)
-    app.app._owns_root = False
-
-    app.app._fit_width_to_journal()
-
-    assert paned.sashpos(0) == 1564 - 1114 - 12
-    assert root._geometry_calls == []
-
-
-def test_the_journal_fit_reaches_the_host(app) -> None:
-    # The panel renders and calls back; the split and the window are the host's.
-    _root, paned, _card = _journal_app(app, root_width=1600)
-
-    app.app._monitor_panel._on_fitted()
-
-    assert paned.sashpos(0) == 1600 - 36 - 1114 - 12
+def test_a_resize_is_debounced_into_one_reflow(app) -> None:
+    the_board = app.app._board
+    assert the_board is not None
+    the_board.pane.fire_configure(1200)
+    the_board.pane.fire_configure(900)
+    assert len(the_board.pane.after_callbacks) == 1
+    the_board.pane.run_after()
+    assert the_board.widths["list"] == the_board._plan(900).list
 
 
 def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
@@ -344,19 +234,15 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
         app.app.refresh()
 
     assert row_text(app, "ws-gitws") == "GitWs"
-    assert row_chip_text(app, "ws-gitws", "port_chip") == ":5700"
     assert row_chip_text(app, "ws-gitws", "db_chip") == "locale"
     assert row_chip_colors(app, "ws-gitws", "db_chip") == ACTIVE_CHIP
     assert row_chip_text(app, "ws-gitws", "git_chip") == "git"
     assert row_chip_colors(app, "ws-gitws", "git_chip") == ACTIVE_CHIP
-    assert row_chip_text(app, "ws-gitws", "pipelines_chip") == "1"
     assert row_action_text(app, "ws-gitws") == "Arrêter"
     assert row_text(app, "ws-plain") == "Plain"
-    assert row_chip_text(app, "ws-plain", "port_chip") == ":5680"
     assert row_chip_text(app, "ws-plain", "db_chip") == "locale"
     assert row_chip_colors(app, "ws-plain", "db_chip") == INACTIVE_CHIP
     assert row_chip_colors(app, "ws-plain", "git_chip") == INACTIVE_CHIP
-    assert row_chip_text(app, "ws-plain", "pipelines_chip") == "0"
     assert row_action_text(app, "ws-plain") == "Démarrer"
     ws_ws = app.app._rows["ws-gitws"][0]
     assert "<Enter>" in ws_ws.git_chip._bindings
@@ -436,7 +322,7 @@ def test_refresh_drops_removed_workspace(app) -> None:
 def test_row_chips_are_packed_tightly(app) -> None:
     # The name is the elastic field of the row, so the chips around it take as
     # little room as they can: one 4px gap between them, 6px of inner padding.
-    for attr in ("port_chip", "db_chip", "git_chip", "ci_chip", "server_chip", "pipelines_chip"):
+    for attr in ("overflow_chip", "db_chip", "git_chip", "ci_chip", "server_chip"):
         options = row_chip_pack(app, "ws-running", attr)
         assert options["side"] == "right"
         # One 4px gap between the chips, and 6px of padding inside each of them.
@@ -1333,7 +1219,7 @@ def test_configure_ci_enables_then_opens_the_page(app) -> None:
     app.app._drain_events()
 
     app.manager.enable_ci.assert_called_once_with(stopped)
-    assert app.app._pages.page(pages.PageKind.CI) is not None
+    assert app.app._board.dock.page(pages.PageKind.CI) is not None
 
 
 def test_configure_ci_opens_the_page_directly_when_already_enabled(app) -> None:
@@ -1345,7 +1231,7 @@ def test_configure_ci_opens_the_page_directly_when_already_enabled(app) -> None:
     app.app._drain_events()
 
     app.manager.enable_ci.assert_not_called()
-    assert app.app._pages.page(pages.PageKind.CI) is not None
+    assert app.app._board.dock.page(pages.PageKind.CI) is not None
 
 
 def test_saving_from_the_ci_page_persists_through_the_manager(app) -> None:
@@ -1354,7 +1240,7 @@ def test_saving_from_the_ci_page_persists_through_the_manager(app) -> None:
     stopped = _stopped(app)
     app.app._select_row(stopped.id)
     app.app._open_ci_page(stopped)
-    page = app.app._pages.page(pages.PageKind.CI)
+    page = app.app._board.dock.page(pages.PageKind.CI)
 
     page.selection._selection = {"n8nPipelines/a.json"}
     app.app._save_ci_selection(page.workspace, page.selection.selection(), True)
@@ -1540,6 +1426,33 @@ def test_tooltip_leave_recovers_from_tip_destroyed_under_cursor(app) -> None:
     assert len(FakeTk.Toplevel.instances) == 1
 
 
+def test_a_tooltip_is_kept_inside_the_display(app) -> None:
+    # The last row on the right is exactly where a free-text tip (the full name
+    # plus the metadata line) would run off the edge of a narrow display, and a
+    # tip that is off screen is worse than no tip: the name stays cut and its
+    # full text is nowhere to be read.
+    app.mocks.tk._screen = (1024, 768)
+    widget = app.mocks.tk.Label(None)
+    widget._rootx = 940
+    widget._rooty = 700
+    widget._height = 30
+    app.app._attach_tooltip(widget, "a very long workspace name and its summary line")
+
+    FakeTk.Toplevel.instances.clear()
+    widget._bindings["<Enter>"](None)
+    tip = FakeTk.Toplevel.instances[0]
+    label = next(child for child in tip.children if isinstance(child, app.mocks.tk.Label))
+    label._reqwidth = 600
+    label._reqheight = 40
+
+    # The width is measured after the label is packed, so the geometry the
+    # handler computed is recomputed here with the measured text.
+    _x, y = map(int, app.app._tooltip_geometry(widget, label).lstrip("+").split("+"))
+    assert 0 < _x <= 1024 - 600
+    # No room below the row on the bottom of the screen: the tip goes above it.
+    assert y < widget._rooty
+
+
 def test_configure_github_token_updates_and_persists_when_ticked(app) -> None:
     with patch(
         "n8n_launcher.gui.app.prompt_github_token",
@@ -1590,7 +1503,7 @@ def _fake_monitoring_gui():
 
 def server_page_text(app) -> str:
     """Return the text rendered by the open server page."""
-    page = app.app._pages.page(pages.PageKind.SERVER)
+    page = app.app._board.dock.page(pages.PageKind.SERVER)
     assert page is not None
     return page.note_text()
 
@@ -1631,9 +1544,10 @@ def test_main_window_embeds_the_monitoring_panel(app) -> None:
 class StubPage:
     """A page the app-level tests can open without building a real view."""
 
-    def __init__(self, workspace, subject):
+    def __init__(self, workspace, subject, parent=None):
         self.workspace = workspace
         self.subject = subject
+        self.parent = parent
         self.retargets: list[object] = []
         self.shown = 0
         self.hidden = 0
@@ -1659,57 +1573,69 @@ class StubPage:
 CI_SUBJECT = pages.PageSubject("Tests CI", ("CI", "GitHub"))
 
 
+SERVER_SUBJECT = pages.PageSubject("Serveur", ("Published", "server"))
+
+
 def _open_page(app, kind: pages.PageKind, subject: pages.PageSubject = CI_SUBJECT) -> StubPage:
-    """Open a stub page of *kind* for the selected workspace."""
+    """Open a stub page of *kind* for the selected workspace, in the dock."""
     workspace = app.app._selected_workspace()
     assert workspace is not None
-    return app.app._pages.open(kind, workspace, lambda ws: StubPage(ws, subject))
+    dock = app.app._board.dock  # type: ignore[union-attr]
+    page = dock.open(kind, workspace, lambda _ws, parent: StubPage(_ws, subject, parent))
+    app.app._board.pane._width = 1400  # type: ignore[union-attr]
+    return page
 
 
-def test_the_left_pane_is_a_notebook_starting_with_the_workspace_list(app) -> None:
-    host = app.app._pages
-    assert host is not None
-    # The list card is a tab of the notebook, not a bare pane: a page opens
-    # *next* to it, so the journal never loses the list.
-    assert [tab["frame"] for tab in host.notebook._tabs] == [host.home]
-    assert host.home._parent is host.notebook
-    assert app.app._list_canvas._parent is host.home
+def test_a_page_is_built_into_a_card_beside_the_list(app) -> None:
+    # A card is the dock's pane, and the list is the column on its left: a page
+    # opens *beside* the list, so the journal never loses either of them.
+    the_board = app.app._board
+    assert the_board is not None
+    app.app._select_row("ws-running")
+    page = _open_page(app, pages.PageKind.CI)
+    assert page.parent is the_board.dock.card(pages.PageKind.CI).body()
+    panes = list(the_board.pane.panes())
+    assert panes.index(the_board.dock.pane) == 1
+    assert app.app._list_canvas._parent is the_board.list_card
 
 
-def test_the_journal_pane_is_sized_by_its_table_not_by_a_weight(app) -> None:
+def test_the_dock_takes_no_share_of_the_room_left_over(app) -> None:
     # A pane with a weight is handed part of the room its content did not ask
     # for — which stretched the journal's header row past its columns — and part
-    # of the squeeze when the window is narrow, which cut them off. The journal
-    # asks for exactly what its table needs, and the list takes the rest.
-    paned = FakeTtk.PanedWindow.instances[-1]
-    (list_pane, list_options), (journal_pane, journal_options) = paned._items
-
-    assert list_pane is app.app._pages.notebook
-    assert list_options["weight"] == 3
-    # The journal card is the pane the panel is packed in: it asks for what its
-    # table needs, so it takes no share of the room left over.
-    assert journal_pane is app.app._monitor_panel._parent
-    assert journal_options["weight"] == 0
+    # of the squeeze when the window is narrow, which cut them off. Every column
+    # here carries no weight: the board's split is the only thing that sizes it.
+    the_board = app.app._board
+    assert the_board is not None
+    for index in range(len(the_board.pane.panes())):
+        assert the_board.pane.pane(index, "weight") == 0
+    app.app._select_row("ws-running")
+    _open_page(app, pages.PageKind.CI)
+    for index in range(len(the_board.pane.panes())):
+        assert the_board.pane.pane(index, "weight") == 0
 
 
 def test_opening_a_page_filters_the_journal_on_its_subject(app) -> None:
     app.app._select_row("ws-running")
-    page = _open_page(app, pages.PageKind.CI)
+    _open_page(app, pages.PageKind.CI)
     panel = app.app._monitor_panel
     assert panel is not None
     assert panel.visible_subject() == CI_SUBJECT
     assert panel._subject_chip is not None and panel._subject_chip.packed
 
 
-def test_coming_back_to_the_list_restores_the_whole_log(app) -> None:
+def test_the_journal_subject_follows_the_focused_card(app) -> None:
+    # Two cards are on screen at once, so the *focused* one is what the log is
+    # scoped to — and the other one stops polling while it is not.
     app.app._select_row("ws-running")
-    _open_page(app, pages.PageKind.CI)
-    app.app._pages.notebook.select(app.app._pages.home)
-    app.app._pages.notebook.fire_tab_changed()
+    ci = _open_page(app, pages.PageKind.CI)
+    server = _open_page(app, pages.PageKind.SERVER, SERVER_SUBJECT)
     panel = app.app._monitor_panel
     assert panel is not None
-    assert panel.visible_subject() is None
-    assert not panel._subject_chip.packed
+    assert panel.visible_subject() is SERVER_SUBJECT
+    assert ci.hidden == 1
+    app.app._board.dock.focus(pages.PageKind.CI)  # type: ignore[union-attr]
+    assert panel.visible_subject() == CI_SUBJECT
+    assert server.hidden == 1
 
 
 def test_selecting_another_workspace_retargets_open_pages(app) -> None:
@@ -1722,17 +1648,18 @@ def test_selecting_another_workspace_retargets_open_pages(app) -> None:
     assert [item.id for item in page.retargets] == ["ws-running", "ws-stopped"]
 
 
-def test_a_second_workspace_reuses_the_open_tab(app) -> None:
+def test_a_second_workspace_reuses_the_open_card(app) -> None:
     app.app._select_row("ws-running")
     page = _open_page(app, pages.PageKind.CI)
     app.app._select_row("ws-stopped")
     # The list selection already retargeted the page; opening it again must not
-    # stack a second CI tab.
-    reopened = app.app._pages.open(
-        pages.PageKind.CI, app.app._selected_workspace(), lambda _ws: pytest.fail("rebuilt")
+    # stack a second card of the same kind.
+    dock = app.app._board.dock  # type: ignore[union-attr]
+    reopened = dock.open(
+        pages.PageKind.CI, app.app._selected_workspace(), lambda *_: pytest.fail("rebuilt")
     )
     assert reopened is page
-    assert len(app.app._pages.notebook._tabs) == 2
+    assert len(dock.pane.panes()) == 1
 
 
 def test_monitor_events_are_bounded_and_absent_without_a_store(app, tmp_path) -> None:
@@ -2007,7 +1934,7 @@ def _stub_server_reads(app) -> None:
 
 def _server_page_of(app):
     """Return the open server page, asserting the tab exists."""
-    page = app.app._pages.page(pages.PageKind.SERVER)
+    page = app.app._board.dock.page(pages.PageKind.SERVER)
     assert page is not None
     return page
 
@@ -2149,10 +2076,10 @@ def test_a_snapshot_landing_after_the_tab_closed_is_cached(app, tmp_path) -> Non
     app.manager.server_logs.return_value = "n8n ready"
     app.app.supervise_server_selected()
 
-    app.app._pages.close(pages.PageKind.SERVER)
+    app.app._board.dock.close(pages.PageKind.SERVER)
     app.app._drain_events()
 
-    assert app.app._pages.page(pages.PageKind.SERVER) is None
+    assert app.app._board.dock.page(pages.PageKind.SERVER) is None
     assert app.app._server_cache[workspace.id].logs == "n8n ready"
     assert app.mocks.messagebox.errors == []
 
@@ -2208,3 +2135,423 @@ def test_context_menu_no_longer_offers_a_workspace_journal(app, tmp_path) -> Non
     app.app._build_context_menu(workspace)
     labels = [label for label, _command in app.app._menu._items if label]
     assert "Journal du workspace…" not in labels
+
+
+def test_clamp_to_screen_anchors_below_and_to_the_right() -> None:
+    # The plain case first: the window hangs off the chip, with a small offset so
+    # it does not sit flush against it.
+    assert clamp_to_screen(
+        anchor_x=100,
+        anchor_y=200,
+        anchor_height=20,
+        width=80,
+        height=40,
+        screen_width=1000,
+        screen_height=800,
+    ) == (112, 224)
+
+
+def test_clamp_to_screen_pulls_the_window_back_inside_the_display() -> None:
+    # A chip near the right edge would push the window off the display, so it is
+    # pulled back to keep its margin.
+    x, _y = clamp_to_screen(
+        anchor_x=990,
+        anchor_y=100,
+        anchor_height=20,
+        width=200,
+        height=40,
+        screen_width=1000,
+        screen_height=800,
+    )
+    assert x == 1000 - 200 - _FLOAT_MARGIN
+
+
+def test_clamp_to_screen_flips_above_when_there_is_no_room_below() -> None:
+    # A chip on the last row would open the window off the bottom of the display,
+    # so it opens above the chip instead.
+    x, y = clamp_to_screen(
+        anchor_x=100,
+        anchor_y=770,
+        anchor_height=20,
+        width=80,
+        height=40,
+        screen_width=1000,
+        screen_height=800,
+    )
+    assert (x, y) == (112, 770 - 40 - 4)
+
+
+def test_clamp_to_screen_pins_a_window_bigger_than_the_display() -> None:
+    # There is no placement that fits, so the margin wins rather than pushing the
+    # window off the far edge where it could not be reached at all.
+    assert clamp_to_screen(
+        anchor_x=100,
+        anchor_y=200,
+        anchor_height=20,
+        width=1400,
+        height=900,
+        screen_width=1000,
+        screen_height=800,
+    ) == (_FLOAT_MARGIN, _FLOAT_MARGIN)
+
+
+def test_overflow_popover_opens_under_the_chip_and_closes_on_escape(gui_mocks) -> None:
+    # The popover is a frameless window of its own, placed from the chip's real
+    # position, and Escape is the keyboard way out of it.
+    root = FakeRoot()
+    root._screen = (1000, 800)
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+2")
+    chip._rootx, chip._rooty, chip._height = 100, 200, 20
+
+    popover = _ChipOverflow(root, chip, ["Port : 5680", "Pipelines : 3"])
+
+    window = popover.window
+    assert window is not None
+    assert window._geometry == "+112+224"
+    assert [line.cget("text") for line in _labels_of(window)] == [
+        "Port : 5680",
+        "Pipelines : 3",
+    ]
+
+    window._bindings["<Escape>"](SimpleNamespace(widget=window))
+    assert popover.window is None
+    assert window.destroyed
+
+
+def test_overflow_popover_stays_on_screen_when_the_chip_is_in_a_corner(gui_mocks) -> None:
+    root = FakeRoot()
+    root._screen = (1000, 800)
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+2")
+    chip._rootx, chip._rooty, chip._height = 995, 795, 20
+
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+
+    window = popover.window
+    assert window is not None
+    # Both coordinates are pulled back: the window would otherwise open off the
+    # right edge and off the bottom of the display at once.
+    geometry = window._geometry
+    assert geometry.startswith(f"+{1000 - window.winfo_reqwidth() - _FLOAT_MARGIN}+")
+    assert int(geometry.rsplit("+", 1)[1]) < 795
+
+
+def test_overflow_popover_closes_on_a_click_outside_it(gui_mocks) -> None:
+    # The click is delivered to the root's own bindtags, so a click anywhere in
+    # the list dismisses the popover.
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+    window = popover.window
+    assert window is not None
+
+    root.fire("<Button-1>", SimpleNamespace(widget=SimpleNamespace(__str__=lambda s: ".!frame")))
+
+    assert popover.window is None
+    assert window.destroyed
+
+
+def test_overflow_popover_ignores_a_click_inside_itself(gui_mocks) -> None:
+    # The popover is its own toplevel, so a click on it never reaches the root's
+    # binding — which is what makes it the "outside" test.
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+    window = popover.window
+    assert window is not None
+
+    root.fire("<Button-1>", SimpleNamespace(widget=window))
+
+    assert popover.window is window
+    assert not window.destroyed
+
+
+def test_overflow_popover_takes_its_own_binding_off_the_root(gui_mocks) -> None:
+    # The dismissal must not leave a handler behind, and must not take another
+    # handler on the same sequence down with it.
+    root = FakeRoot()
+    neighbour = MagicMock()
+    root._bindings["<Button-1>"] = [neighbour]
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+
+    _ChipOverflow(root, chip, ["Port : 5680"])
+    assert len(root._bindings["<Button-1>"]) == 2
+
+    root.fire("<Button-1>", SimpleNamespace(widget="!.somewhere"))
+
+    assert root._bindings["<Button-1>"] == [neighbour]
+    neighbour.assert_called_once()
+
+
+def test_overflow_popover_can_be_opened_again_after_being_closed(gui_mocks) -> None:
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+    first = popover.window
+
+    popover.dismiss()
+    popover.show()
+
+    assert popover.window is not None
+    assert popover.window is not first
+
+
+def test_overflow_popover_showing_twice_leaves_one_window(gui_mocks) -> None:
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+    window = popover.window
+
+    popover.show()
+
+    assert popover.window is window
+
+
+def test_overflow_popover_survives_a_teardown_that_takes_the_root_away(gui_mocks) -> None:
+    # Everything here is best-effort: a popover closed after the widgets it
+    # refers to are gone must not surface an error to the caller.
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+
+    root.bind = None
+    popover.dismiss()
+
+    assert popover.window is None
+
+
+def test_overflow_popover_survives_an_anchor_that_cannot_be_measured(gui_mocks) -> None:
+    # A row that is not on screen yet cannot report where it is; the popover
+    # still opens rather than taking the row's click handler down with it.
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    chip.winfo_rootx = None
+
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+
+    assert popover.window is not None
+    # No geometry was ever applied: the fake only records it on ``geometry``.
+    assert not hasattr(popover.window, "_geometry")
+
+
+def test_clicking_the_chip_again_closes_its_popover(gui_mocks) -> None:
+    root = FakeRoot()
+    chip = FakeTk.Label(FakeTk.Frame(FakeRoot()), text="+1")
+    popover = _ChipOverflow(root, chip, ["Port : 5680"])
+    assert popover.window is not None
+
+    handlers = chip._bindings["<Button-1>"]
+    for handler in handlers:
+        handler(SimpleNamespace(widget=chip))
+
+    assert popover.window is None
+
+
+def _labels_of(window) -> list[FakeTk.Label]:
+    """Return the labels of a popover, in the order they were packed."""
+    card = window.children[0]
+    return [child for child in card.children if isinstance(child, FakeTk.Label)]
+
+
+def _refit(app) -> None:
+    """Re-fit every row, as a resize of the list does."""
+    for workspace_id in list(app.app._rows):
+        app.app._fit_row_name(workspace_id)
+
+
+def _row_overflow(app, workspace_id: str) -> list[str]:
+    """Return the details a row currently collapsed, as the user sees it."""
+    return app.app._rows[workspace_id][0].overflow
+
+
+def _overflow_chip_text(app, workspace_id: str) -> str:
+    return app.app._rows[workspace_id][0].overflow_chip.cget("text")
+
+
+def test_a_row_with_room_shows_no_overflow_chip(app) -> None:
+    # With room to spare, every detail is on the row and the chip has nothing to
+    # say — a chip reading "+0" would be a lie about what is hidden.
+    app.app._list_canvas._width = 2000
+    _refit(app)
+
+    assert _row_overflow(app, "ws-running") == []
+    assert _overflow_chip_text(app, "ws-running") == ""
+
+
+def test_a_narrow_row_collapses_a_detail_into_the_chip(app) -> None:
+    # The name may yield down to its minimum, and not one pixel further: at that
+    # exact room both details still fit, one pixel less and the count is hidden.
+    both = _row_essentials(app, "ws-running") + _details_width(app)
+    room = both + _ROW_NAME_MINIMUM
+
+    app.app._list_canvas._width = room
+    _refit(app)
+    assert _row_overflow(app, "ws-running") == []
+    assert _overflow_chip_text(app, "ws-running") == ""
+
+    app.app._list_canvas._width = room - 1
+    _refit(app)
+    assert _row_overflow(app, "ws-running") == ["pipelines"]
+    assert _overflow_chip_text(app, "ws-running") == "+1"
+
+
+def test_a_narrow_row_collapses_the_port_last(app) -> None:
+    # The port is the detail that says where n8n can be reached, so it is the one
+    # that survives: it goes only once the name would fall under its minimum with
+    # the count already gone.
+    essentials = _row_essentials(app, "ws-running")
+    port = _detail_width(app, "port")
+    room = essentials + _details_width(app) + _ROW_NAME_MINIMUM
+
+    app.app._list_canvas._width = room - 1
+    _refit(app)
+    assert _row_overflow(app, "ws-running") == ["pipelines"]
+
+    app.app._list_canvas._width = essentials + port + _ROW_NAME_MINIMUM - 1
+    _refit(app)
+    assert _row_overflow(app, "ws-running") == ["port", "pipelines"]
+    assert _overflow_chip_text(app, "ws-running") == "+2"
+
+
+def test_a_row_hidden_detail_reappears_when_the_room_comes_back(app) -> None:
+    app.app._list_canvas._width = 300
+    _refit(app)
+    assert _row_overflow(app, "ws-running") == ["port", "pipelines"]
+
+    app.app._list_canvas._width = 2000
+    _refit(app)
+
+    assert _row_overflow(app, "ws-running") == []
+    assert _overflow_chip_text(app, "ws-running") == ""
+
+
+def test_a_row_keeps_its_chips_when_the_width_changes(app) -> None:
+    # The chip is packed once and only relabelled: rebuilding it on every resize
+    # is how a row ends up with a chip in the wrong place.
+    row = app.app._rows["ws-running"][0]
+    chip = row.overflow_chip
+    before = dict(chip._pack_options)
+
+    app.app._list_canvas._width = 300
+    _refit(app)
+
+    assert app.app._rows["ws-running"][0].overflow_chip is chip
+    assert chip._pack_options == before
+
+
+def test_a_row_decides_nothing_before_the_list_is_laid_out(app) -> None:
+    # Tk answers 0 or 1 before the first layout; that means "unmeasured", not
+    # "no room at all", so nothing may be hidden on that answer.
+    app.app._list_canvas._width = 1
+    _refit(app)
+
+    assert _row_overflow(app, "ws-running") == []
+    assert _overflow_chip_text(app, "ws-running") == ""
+
+
+def test_the_overflow_chip_opens_the_details_of_its_own_row(app) -> None:
+    app.app._list_canvas._width = 300
+    _refit(app)
+    row = app.app._rows["ws-running"][0]
+
+    app.app._toggle_overflow("ws-running")
+
+    assert row.popover is not None
+    window = row.popover.window
+    assert window is not None
+    assert [label.cget("text") for label in _labels_of(window)] == [
+        "Port : 5678",
+        "Pipelines : 0",
+    ]
+
+
+def test_the_overflow_chip_toggles_its_popover(app) -> None:
+    app.app._list_canvas._width = 300
+    _refit(app)
+    row = app.app._rows["ws-running"][0]
+
+    app.app._toggle_overflow("ws-running")
+    window = row.popover.window
+    app.app._toggle_overflow("ws-running")
+
+    assert row.popover is None
+    assert window is not None
+    assert window.destroyed
+
+
+def test_the_overflow_chip_does_nothing_when_nothing_is_hidden(app) -> None:
+    # With no hidden detail there is no "+0" chip to click, and a call from a
+    # stale binding must not open an empty window.
+    app.app._list_canvas._width = 2000
+    _refit(app)
+    row = app.app._rows["ws-running"][0]
+
+    app.app._toggle_overflow("ws-running")
+
+    assert row.popover is None
+
+
+def test_an_open_popover_closes_when_its_row_hides_them_again(app) -> None:
+    app.app._list_canvas._width = 300
+    _refit(app)
+    row = app.app._rows["ws-running"][0]
+    app.app._toggle_overflow("ws-running")
+    window = row.popover.window
+
+    app.app._list_canvas._width = 2000
+    _refit(app)
+
+    assert row.popover is None
+    assert window is not None
+    assert window.destroyed
+
+
+def test_the_overflow_of_a_row_that_disappeared_does_nothing(app) -> None:
+    # The list is rebuilt on every change, so a binding can fire for a row that is
+    # already gone: that must be silent rather than an error.
+    app.app._rows.pop("ws-running", None)
+
+    app.app._toggle_overflow("ws-running")
+    app.app._fit_row_overflow(app.app._rows["ws-stopped"][0])
+
+
+def _essentials(app, workspace_id: str) -> list:
+    """Return the widgets on a row that are never collapsed, in pack order."""
+    row = app.app._rows[workspace_id][0]
+    return [
+        row.db_chip,
+        row.git_chip,
+        row.ci_chip,
+        row.server_chip,
+        row.action_button,
+        row.overflow_chip,
+    ]
+
+
+def _row_essentials(app, workspace_id: str) -> int:
+    """Return the width of everything on a row that is never collapsed.
+
+    A fake widget reports neither a mapped width nor a request unless the test
+    sets one, so what is left is the text plus the gap every packed widget
+    carries — which is exactly what the rule falls back to.
+    """
+    widgets = _essentials(app, workspace_id)
+    return sum(_measure(app.app, str(widget.cget("text"))) + _CHIP_GAP for widget in widgets)
+
+
+def _details_width(app) -> int:
+    """Return the width of every optional detail of a row, padding included."""
+    row = app.app._rows["ws-running"][0]
+    details = display.row_details(app.app._row_workspace(row))
+    return sum(_measure(app.app, value) + 2 * _CHIP_PADX for _name, value in details)
+
+
+def _detail_width(app, name: str) -> int:
+    """Return the width one optional detail takes, value and padding."""
+    row = app.app._rows["ws-running"][0]
+    details = dict(display.row_details(app.app._row_workspace(row)))
+    return _measure(app.app, details[name]) + 2 * _CHIP_PADX
+
+
+def _measure(app, text: str) -> int:
+    """Return the width a row reserves for *text*, the way the app measures it."""
+    return app._measure(str(text))

@@ -27,38 +27,61 @@ from tkinter import messagebox, ttk
 from ..core.models import Workspace
 from ..workspaces import ci
 from ..workspaces.manager import WorkspaceManager
-from .layout import WindowFitter, bind_wraplength
+from .dialog import Dialog
+from .layout import ColumnFitter, bind_wraplength, ellipsize
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
     SURFACE,
     TEXT_MUTED,
     TEXT_PRIMARY,
-    configure_fonts,
+    text_measure,
+)
+from .tokens import (
+    GUTTER,
+    SPACE_2XL,
+    SPACE_3XL,
+    SPACE_HAIRLINE,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SPACE_TIGHT,
+    SPACE_XL,
 )
 
+# The credentials table. ``#0`` carries the tick marker and the name, because the
+# marker and the thing it marks are one value to read — a dedicated marker column
+# would put a checkbox on one line and its name on the next.
+_CREDENTIALS_COLUMNS = ("type",)
+_CREDENTIALS_HEADINGS = {"#0": "Credential", "type": "Type"}
+_CREDENTIALS_MINIMUMS = {"#0": 240, "type": 140}
+_CREDENTIALS_MAXIMUMS = {"#0": 460, "type": 320}
+# A dialog's own horizontal padding is the gutter it was packed with; the fitter
+# is told about it so the table keeps that margin instead of eating it.
+_CREDENTIALS_PADX = GUTTER
+# Rows shown at once. Enough to scroll by eye, and short enough that a workspace
+# with a dozen credentials does not push the actions out of a small dialog.
+_CREDENTIALS_HEIGHT = 10
 
-def _finish_dialog_setup(
-    dialog: tk.Toplevel, root: tk.Tk, *, fitter: WindowFitter | None = None
-) -> None:
-    """Center a modal dialog over its parent and make it modal (best-effort).
+# Tick markers. Plain ASCII on purpose, and for the same reason as the pipeline
+# selection tree: the box glyphs ☐/☑ (U+2610/U+2611) are absent from the Linux
+# font families the theme resolves to (Noto Sans, Liberation Sans, Cantarell),
+# and Tk/Xft does not fall back across fonts — they rendered blank on Linux.
+_CHECKBOX = "[x]"
+_CHECKBOX_EMPTY = "[ ]"
 
-    The width is the one the content asks for, bounded by the screen; a dialog
-    fed asynchronously hands in the fitter it will keep asking to grow.
+
+def _table_room(dialog: tk.Misc) -> int:
+    """Return the pixels a dialog's table has, its own padding deducted.
+
+    The dialog is the room, not the screen: the user resized *this* window, and
+    the table has to follow it. A dialog Tk has not measured yet reports 1, which
+    the fitter reads as "no budget yet" and leaves the columns on their pure
+    content sizing.
     """
-    # Same guarantee as gui/dialogs: a dialog can own its interpreter's first
-    # font registration, so make the named UI fonts resolvable on that root.
     with contextlib.suppress(Exception):
-        configure_fonts(root)
-    try:
-        dialog.transient(root)
-        dialog.grab_set()
-        dialog.update_idletasks()
-        if fitter is None:
-            fitter = WindowFitter(dialog, parent=root)
-        fitter.fit()
-    except Exception:
-        pass
+        return max(int(dialog.winfo_width()) - 2 * _CREDENTIALS_PADX, 1)
+    return 1
 
 
 def _copy_text(widget: tk.Misc, text: str) -> None:
@@ -78,12 +101,7 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
     on a background thread once a ref is returned. *default_ref* is prefilled
     so the common case is a single click.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Lancer la CI")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: str | None = None
+    dialog: Dialog[str] = Dialog(root, "Lancer la CI", primary="Lancer")
 
     tk.Label(
         dialog,
@@ -92,7 +110,7 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(16, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_HAIRLINE))
     ref_var = tk.StringVar(value=default_ref)
     ref_entry = tk.Entry(
         dialog,
@@ -103,7 +121,7 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
         relief="flat",
         font=FONT_META,
     )
-    ref_entry.pack(fill="x", padx=18, pady=(0, 6))
+    ref_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
     intro = tk.Label(
         dialog,
         text=(
@@ -116,40 +134,20 @@ def prompt_run_ci(root: tk.Tk, workflow_file: str, default_ref: str) -> str | No
         anchor="w",
         justify="left",
     )
-    intro.pack(fill="x", padx=18, pady=(0, 12))
-    bind_wraplength(intro, minimum=200, padding=36)
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    intro.pack(fill="x", padx=GUTTER, pady=(0, SPACE_XL))
+    bind_wraplength(intro, minimum=200, padding=2 * GUTTER)
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
-        ref = ref_var.get().strip()
-        if ref:
-            result = ref
-        dialog.destroy()
+        # An empty ref is not an error, it is a cancellation: dispatching the
+        # default branch is already what the prefilled value does.
+        if ref_var.get().strip():
+            dialog.settle(ref_var.get().strip())
+        else:
+            dialog.cancel()
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(buttons, text="Annuler", style="Secondary.TButton", command=cancel).pack(
-        side="right"
-    )
-    ttk.Button(
-        buttons,
-        text="Lancer",
-        style="Accent.TButton",
-        cursor="hand2",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
+    dialog.on_submit = submit
     ref_entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root)
-    with contextlib.suppress(Exception):
-        ref_entry.focus_set()
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=ref_entry)
 
 
 def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Workspace) -> None:
@@ -175,10 +173,18 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         messagebox.showerror("n8n Launcher", str(exc), parent=root)
         return
 
-    dialog = tk.Toplevel(root)
-    dialog.title("Credentials CI")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(True, True)
+    # All three commands are peers here: "J'ai collé" records the metadata but is
+    # not more committing than "Annuler", so the bar does not promote it to the
+    # accent, and it keeps the tighter gap this dialog always used.
+    dialog: Dialog[None] = Dialog(
+        root,
+        "Credentials CI",
+        primary="J'ai collé",
+        primary_style="Secondary.TButton",
+        resizable=True,
+        bar_pady=(SPACE_LG, SPACE_2XL),
+        action_gap=SPACE_SM,
+    )
 
     intro = tk.Label(
         dialog,
@@ -192,8 +198,8 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         anchor="w",
         justify="left",
     )
-    intro.pack(fill="x", padx=18, pady=(14, 2))
-    bind_wraplength(intro, minimum=200, padding=36)
+    intro.pack(fill="x", padx=GUTTER, pady=(SPACE_2XL, SPACE_HAIRLINE))
+    bind_wraplength(intro, minimum=200, padding=2 * GUTTER)
     secret_hint = tk.Label(
         dialog,
         text=(
@@ -207,29 +213,127 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         anchor="w",
         justify="left",
     )
-    secret_hint.pack(fill="x", padx=18, pady=(0, 8))
-    bind_wraplength(secret_hint, minimum=200, padding=36)
+    secret_hint.pack(fill="x", padx=GUTTER, pady=(0, SPACE_MD))
+    bind_wraplength(secret_hint, minimum=200, padding=2 * GUTTER)
 
-    rows: list[tuple[tk.IntVar, str, str]] = []
+    # A table, not a stack of checkbuttons: the same widget the CI page already
+    # uses for the pipeline selection, fitted to its own content, so the dialog
+    # opens as wide as the longest credential name and never shows a column the
+    # user cannot read. There is no scrollbar — a ttk.Treeview scrolls on its own,
+    # and a native one would be the only scrollbar in the app.
+    tree = ttk.Treeview(
+        dialog,
+        columns=_CREDENTIALS_COLUMNS,
+        show="tree headings",
+        height=_CREDENTIALS_HEIGHT,
+        selectmode="none",
+    )
+    for name, heading in _CREDENTIALS_HEADINGS.items():
+        tree.heading(name, text=heading)
+    for name in ("#0", *_CREDENTIALS_COLUMNS):
+        # Request the minimum up front, exactly as the selection tree does: a
+        # declared guess is what a table is never laid out by.
+        tree.column(
+            name,
+            width=_CREDENTIALS_MINIMUMS[name],
+            minwidth=_CREDENTIALS_MINIMUMS[name],
+            stretch=False,
+            anchor="w",
+        )
+    tree.pack(fill="both", expand=True, padx=_CREDENTIALS_PADX, pady=(0, SPACE_MD))
+
+    # What the row shows is ``[x] Name``; what the dialog hands to the manager is
+    # the ``(name, type)`` pair. One entry per line, in the order n8n returned
+    # them once sorted, so the two never drift apart.
+    entries: list[tuple[str, str, str]] = []
+    ticked: dict[str, bool] = {}
     for item in sorted(listed, key=lambda credential: str(credential.get("name") or "")):
         name = str(item.get("name") or "").strip()
         ctype = str(item.get("type") or "").strip()
         if not name or not ctype:
+            # A credential with no name or no type cannot be recreated by the
+            # generated runner, so it is not offered at all.
             continue
-        variable = tk.IntVar(value=1)
-        rows.append((variable, name, ctype))
-        tk.Checkbutton(
-            dialog,
-            text=f"{name}  ({ctype})",
-            variable=variable,
-            bg=APP_BACKGROUND,
-            fg=TEXT_PRIMARY,
-            selectcolor=SURFACE,
-            activebackground=APP_BACKGROUND,
-            activeforeground=TEXT_PRIMARY,
-            anchor="w",
-            highlightthickness=0,
-        ).pack(fill="x", padx=18, pady=1)
+        # The id is the name itself: n8n credential names are unique within a
+        # project, and an index-based id would mean a second thing to renumber.
+        entries.append((name, name, ctype))
+        ticked[name] = True
+    fitter = ColumnFitter(
+        tree,
+        columns=_CREDENTIALS_COLUMNS,
+        headings=_CREDENTIALS_HEADINGS,
+        minimums=_CREDENTIALS_MINIMUMS,
+        maximums=_CREDENTIALS_MAXIMUMS,
+        measure=text_measure(dialog, FONT_META),
+        container=dialog,
+        available=lambda: _table_room(dialog),
+        flexible="#0",
+    )
+    fitter.rows()
+
+    captioned_at = -1
+
+    def render() -> None:
+        """Draw the table from the current ticks, one row per credential."""
+        for iid in tree.get_children():
+            tree.delete(iid)
+        for item_id, name, ctype in entries:
+            marker = _CHECKBOX if ticked.get(name) else _CHECKBOX_EMPTY
+            tree.insert("", "end", iid=item_id, text=f"{marker}  {name}", values=(ctype,))
+        fitter.rows()
+        # The tree is the widest thing in the dialog, so the captions are bounded
+        # by it: a prose label asking for more than the table would widen the
+        # dialog past what the table can fill. Their width is the table's, so this
+        # only has to happen when the table's own total moved.
+        nonlocal captioned_at
+        total = fitter.total() or sum(_CREDENTIALS_MINIMUMS.values())
+        if total == captioned_at:
+            return
+        captioned_at = total
+        measure = text_measure(dialog, FONT_META)
+        intro.config(text=ellipsize(str(intro.cget("text")), total, measure))
+        for caption in (intro, secret_hint):
+            bind_wraplength(caption, minimum=200, padding=2 * _CREDENTIALS_PADX)
+
+    def selected() -> list[dict[str, str]]:
+        """The ticked credentials, as the name/type pairs the manager records.
+
+        Deduped by name, last occurrence winning: a workspace whose n8n returned
+        the same credential twice would otherwise hand the runner two entries for
+        one secret.
+        """
+        chosen: dict[str, dict[str, str]] = {}
+        for name, label, ctype in entries:
+            if ticked.get(name):
+                chosen[name] = {"name": label, "type": ctype}
+        return list(chosen.values())
+
+    def toggle(item: str) -> None:
+        """Flip the credential of one row, and redraw it."""
+        for name, _label, _ctype in entries:
+            if name == item:
+                ticked[name] = not ticked.get(name)
+                break
+        render()
+
+    def set_all(value: bool) -> None:
+        """Tick or untick every credential at once."""
+        for name, _label, _ctype in entries:
+            ticked[name] = value
+        render()
+
+    def on_tree_click(event: tk.Event) -> None:
+        """Toggle the credential whose row was clicked, and only that row."""
+        try:
+            if tree.identify("region", event.x, event.y) not in ("cell", "tree"):
+                return
+            item = tree.identify_row(event.y)
+        except Exception:
+            return
+        if item:
+            toggle(item)
+
+    tree.bind("<Button-1>", on_tree_click)
 
     status = tk.Label(
         dialog,
@@ -239,13 +343,13 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         font=FONT_META,
         anchor="w",
     )
-    status.pack(fill="x", padx=18, pady=(4, 0))
+    status.pack(fill="x", padx=GUTTER, pady=(SPACE_TIGHT, 0))
+
+    render()
 
     def copy_json() -> None:
-        selected = [
-            {"name": name, "type": ctype} for variable, name, ctype in rows if variable.get()
-        ]
-        if not selected:
+        picked = selected()
+        if not picked:
             messagebox.showwarning(
                 "n8n Launcher",
                 "Sélectionnez au moins une credential.",
@@ -253,7 +357,7 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
             )
             return
         try:
-            payload = manager.ci_credentials_payload(workspace, selected)
+            payload = manager.ci_credentials_payload(workspace, picked)
         except Exception as exc:
             messagebox.showerror("n8n Launcher", str(exc), parent=dialog)
             return
@@ -264,11 +368,8 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
         )
 
     def confirm_pasted() -> None:
-        selected = [
-            {"name": name, "type": ctype} for variable, name, ctype in rows if variable.get()
-        ]
         try:
-            manager.set_ci_credentials(workspace, selected)
+            manager.set_ci_credentials(workspace, selected())
         except Exception as exc:
             messagebox.showerror(
                 "n8n Launcher",
@@ -276,23 +377,12 @@ def prompt_ci_credentials(root: tk.Tk, manager: WorkspaceManager, workspace: Wor
                 parent=dialog,
             )
             return
-        dialog.destroy()
+        # No result to hand back: what this dialog commits is the manager call.
+        dialog.settle(None)
 
-    actions = tk.Frame(dialog, bg=APP_BACKGROUND)
-    actions.pack(fill="x", padx=18, pady=(10, 14))
-    for text, command in (
-        ("Copier le JSON", copy_json),
-        ("J'ai collé", confirm_pasted),
-        ("Annuler", lambda: dialog.destroy()),
-    ):
-        ttk.Button(
-            actions,
-            text=text,
-            style="Secondary.TButton",
-            cursor="hand2",
-            command=command,
-        ).pack(side="right", padx=(6, 0))
-
+    dialog.add_action("Tout cocher", lambda: set_all(True))
+    dialog.add_action("Tout décocher", lambda: set_all(False))
+    dialog.add_action("Copier le JSON", copy_json)
+    dialog.on_submit = confirm_pasted
     # Every child is in: the dialog opens as wide as this prose really needs.
-    _finish_dialog_setup(dialog, root)
-    dialog.wait_window()
+    dialog.wait()

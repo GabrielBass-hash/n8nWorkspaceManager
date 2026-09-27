@@ -1,5 +1,6 @@
 """GUI unit-test fixtures: shared mocks and the ``app`` harness."""
 
+import importlib
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,9 @@ from helpers import (
     SyncThread,
     SyncThreadPoolExecutor,
     _safe_git_row_status,
+    fake_board_bases,
     fake_ci_page_bases,
+    fake_dialog_bases,
     fake_monitoring_panel_bases,
     fake_runs_panel_bases,
     fake_server_page_bases,
@@ -47,11 +50,31 @@ def gui_mocks():
         stack.enter_context(fake_ci_page_bases())
         stack.enter_context(fake_runs_panel_bases())
         stack.enter_context(fake_server_page_bases())
-        # The page host and the CI page build their own widgets, so the app's
-        # fakes have to reach those modules too or the real Tk would be created.
-        for module in ("app", "monitoring", "pages", "ci_page", "ci_runs", "server_page"):
+        stack.enter_context(fake_board_bases())
+        stack.enter_context(fake_dialog_bases())
+        # The dashboard, the CI page and the journal build their own widgets, so
+        # the app's fakes have to reach those modules too or a real Tk root would
+        # be created. ``dialog`` is in the list for the same reason as ``app``:
+        # the shared ``Dialog`` base creates the action bar and its buttons.
+        for module in (
+            "app",
+            "board",
+            "monitoring",
+            "ci_page",
+            "ci_runs",
+            "server_page",
+            "dialog",
+            "dialogs",
+            "ci_edit",
+        ):
+            target = importlib.import_module(f"n8n_launcher.gui.{module}")
             for kind, fake in (("tk", mocks.tk), ("ttk", mocks.ttk)):
-                stack.enter_context(patch(f"n8n_launcher.gui.{module}.{kind}", fake))
+                # A module only binds the toolkit names it uses — ``ci_edit`` asks
+                # ``tk`` for its fields but no longer names ``ttk`` — so patch the
+                # ones it has rather than every one. A *missing module* still
+                # raises, which is the typo this is meant to catch.
+                if hasattr(target, kind):
+                    stack.enter_context(patch.object(target, kind, fake))
         for module in ("app", "close", "update_flow"):
             stack.enter_context(patch(f"n8n_launcher.gui.{module}.messagebox", mocks.messagebox))
         for module in ("app", "close", "update_flow"):

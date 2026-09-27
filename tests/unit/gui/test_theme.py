@@ -20,6 +20,7 @@ def test_font_constants_match_registered_font_names() -> None:
         theme.FONT_META,
         theme.FONT_STATUS,
         theme.FONT_PILL,
+        theme.FONT_CARD,
         theme.FONT_EMPTY_TITLE,
         theme.FONT_EMPTY_BADGE,
     } == names

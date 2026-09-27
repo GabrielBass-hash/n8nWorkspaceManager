@@ -75,6 +75,9 @@ _FONT_SPECS: tuple[tuple[str, int, str | None], ...] = (
     ("Launcher.Pill", 11, "bold"),
     ("Launcher.EmptyTitle", 18, "bold"),
     ("Launcher.EmptyBadge", 22, "bold"),
+    # The card header of a dashboard panel: the one label that names a view and
+    # carries its actions, so it is a step above ``Launcher.Meta``.
+    ("Launcher.Card", 13, "bold"),
 )
 
 FONT_TITLE = "Launcher.Title"
@@ -85,6 +88,7 @@ FONT_STATUS = "Launcher.Status"
 FONT_PILL = "Launcher.Pill"
 FONT_EMPTY_TITLE = "Launcher.EmptyTitle"
 FONT_EMPTY_BADGE = "Launcher.EmptyBadge"
+FONT_CARD = "Launcher.Card"
 
 # Preferred font families, most-desirable first. The first one reported by the
 # running Tk wins, so the table doubles as the platform fallback chain:

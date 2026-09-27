@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from helpers import FakeTk, FakeTtk
+from helpers import FakeTk, FakeTtk, fire
 
 from n8n_launcher.gui import layout
 
@@ -218,6 +218,8 @@ def make_fitter(tree=None, container=None, **kwargs):
         maximums=kwargs.get("maximums", {"#0": 300, "detail": 3000}),
         measure=measure,
         container=container,
+        flexible=kwargs.get("flexible"),
+        available=kwargs.get("available"),
     )
     return tree, fitter
 
@@ -323,20 +325,326 @@ def test_column_fitter_walks_a_nested_tree():
     assert fitter.widths()["#0"] == natural("    importer")
 
 
-def test_column_fitter_ignores_the_pane_it_is_shown_in():
+def test_an_unconstrained_fitter_ignores_the_pane_it_is_shown_in():
+    # Without an ``available`` room the widths stay a property of the content, so
+    # resizing the window (or dragging the paned sash) changes nothing. That is
+    # what a table in a window that sizes *itself* from its content wants.
     tree, fitter = make_fitter()
     tree.insert("", "end", iid="run-1", text="run", values=("success",))
     tree._width = 400
     fitter.rows()
     narrow = dict(fitter.widths())
 
-    # The very same rows in a much wider table: the widths are a property of the
-    # content, so resizing the window (or dragging the paned sash) changes
-    # nothing — there is no longer a ``<Configure>`` handler to feed.
     tree._width = 1400
     fitter.rows()
     assert fitter.widths() == narrow
     assert "<Configure>" not in tree._bindings
+
+
+# ------------------------------------------------------------- fit_budget
+def budget(widths, available, **kwargs):
+    """Return :func:`fit_budget` for *widths* with the test's own bounds."""
+    return layout.fit_budget(
+        widths,
+        MINIMUMS,
+        MAXIMUMS,
+        available=available,
+        flexible=kwargs.get("flexible", "message"),
+    )
+
+
+def test_a_table_that_already_fits_keeps_every_column_but_the_flexible_one():
+    # A pane wider than the table must not stretch it: a stretched column is one
+    # whose text ends nowhere, and no row gained a pixel of readability. The one
+    # exception is the column that was declared to take the spare room.
+    widths = {"time": 140, "level": 80, "message": 300}
+    fitted = budget(widths, 1200)
+    assert fitted["time"] == 140
+    assert fitted["level"] == 80
+    assert fitted["message"] == 980
+    # Without a flexible column the surplus simply stays the pane's slack.
+    assert budget(widths, 1200, flexible=None) == widths
+
+
+def test_the_room_a_wide_pane_leaves_over_goes_to_the_flexible_column():
+    # The message is prose, so it is the one column that reads better wide; the
+    # timestamp and the level are not, so they keep the room they asked for.
+    widths = {"time": 140, "level": 80, "message": 300}
+    fitted = budget(widths, 700)
+    assert fitted["time"] == 140
+    assert fitted["level"] == 80
+    assert fitted["message"] == 480
+    assert sum(fitted.values()) == 700
+
+
+def test_the_flexible_column_stops_at_its_maximum():
+    # The surplus beyond the column's declared maximum stays empty: a table does
+    # not invent space, and the rest of the room is the pane's slack.
+    widths = {"time": 140, "level": 80, "message": 300}
+    fitted = budget(widths, 10000)
+    assert fitted["message"] == MAXIMUMS["message"]
+    assert sum(fitted.values()) == MAXIMUMS["message"] + 220
+
+
+def test_without_a_flexible_column_the_surplus_stays_empty():
+    widths = {"time": 140, "level": 80, "message": 300}
+    fitted = budget(widths, 700, flexible=None)
+    assert fitted == widths
+
+
+def test_a_narrow_room_is_taken_from_the_columns_that_have_it():
+    # Water-filling: the cap comes down on every column at once, so a column
+    # already narrower than the cap keeps its own width and the wide one pays
+    # alone — the room is not taken from the first column in sight.
+    widths = {"time": 140, "level": 80, "message": 900}
+    fitted = budget(widths, 600)
+    assert fitted["time"] == 140
+    assert fitted["level"] == 80
+    assert fitted["message"] == 380
+    assert sum(fitted.values()) == 600
+
+
+def test_the_wide_columns_level_off_together_in_a_crowded_room():
+    # Once the cap reaches the narrow columns, all three shrink evenly: the
+    # message gives up more, but never more than proportionally, and the shortest
+    # column is never the one that is cut first.
+    widths = {"time": 900, "level": 800, "message": 900}
+    fitted = budget(widths, 700)
+    # One pixel apart at most: the cap is found exactly, and the odd leftover
+    # pixel is handed to a column rather than dropped, so the table is never a
+    # pixel narrower than the room it was fitted to.
+    assert max(fitted.values()) - min(fitted.values()) <= 1
+    assert sum(fitted.values()) == 700
+    assert min(fitted.values()) >= 100
+
+
+def test_a_deficit_never_goes_below_a_declared_minimum():
+    # A pane narrower than the sum of the minimums is the one case left cut: the
+    # window's own floor is there to prevent it, and the columns stay readable
+    # rather than collapsing to nothing.
+    widths = {"time": 900, "level": 800, "message": 900}
+    fitted = budget(widths, 100)
+    assert fitted == MINIMUMS
+    assert sum(fitted.values()) == 180
+
+
+def test_an_unmeasured_room_leaves_the_content_widths_alone():
+    # ``available`` of 1 or less means Tk has not mapped the pane: fitting against
+    # it would push every column to its minimum, so the natural widths stand.
+    widths = {"time": 140, "level": 80, "message": 300}
+    assert budget(widths, 0) == widths
+    assert budget(widths, 1) == widths
+
+
+def test_column_widths_fits_the_room_it_is_given():
+    # The content sizing is the starting point and the room is what it is
+    # reconciled with, in one call: a journal table in a wide pane takes the
+    # spare room in its message column, and nothing else moves.
+    rows = [row(), row(message="démarrage du pipeline de synchronisation git")]
+    widths = layout.column_widths(
+        rows,
+        headings=HEADINGS,
+        minimums=MINIMUMS,
+        maximums=MAXIMUMS,
+        measure=measure,
+        available=1000,
+        flexible="message",
+    )
+    content = widths_for(rows)
+    assert widths["time"] == content["time"]
+    assert widths["level"] == content["level"]
+    assert widths["message"] > content["message"]
+    assert sum(widths.values()) == 1000
+
+
+# ------------------------------------------------------- responsive refits
+def make_budgeted_fitter(room=800, container=None):
+    """Return a fitter that knows the room its container gives it."""
+    tree = FakeTtk.Treeview(None, columns=("detail",))
+    container = container or FakeTk.Frame(None)
+    room_box = SimpleNamespace(value=room)
+    fitter = layout.ColumnFitter(
+        tree,
+        columns=("detail",),
+        headings={"#0": "Run", "detail": "Détails"},
+        minimums={"#0": 100, "detail": 60},
+        maximums={"#0": 600, "detail": 60},
+        measure=measure,
+        container=container,
+        available=lambda: room_box.value,
+        flexible="#0",
+    )
+    return tree, fitter, room_box, container
+
+
+def test_a_fitter_refits_when_the_room_it_is_given_changes():
+    # A table in a pane the user resized has to answer the new room: that is the
+    # whole difference between a dashboard and a fixed drawing.
+    tree, fitter, room, container = make_budgeted_fitter()
+    tree.insert("", "end", iid="run-1", text="run", values=("ok",))
+    fitter.rows()
+    assert fitter.room() == 800
+    narrow = dict(fitter.widths())
+
+    room.value = 300
+    fire(container, "<Configure>", SimpleNamespace(width=300))
+    tree.run_after()
+
+    assert fitter.room() == 300
+    assert fitter.widths()["#0"] < narrow["#0"]
+    assert sum(fitter.widths().values()) == 300
+
+
+def test_a_resize_waits_for_the_drag_to_settle():
+    # A window drag fires a burst of ``<Configure>``: one refit, not forty, and
+    # the fit reads the room the burst ended on.
+    tree, fitter, room, container = make_budgeted_fitter()
+    tree.insert("", "end", iid="run-1", text="run", values=("ok",))
+    fitter.rows()
+    for width in (700, 500, 400, 320):
+        room.value = width
+        fire(container, "<Configure>", SimpleNamespace(width=width))
+
+    assert len(tree.after_callbacks) == 1
+    assert fitter.room() == 800  # nothing fitted yet: the burst is still pending
+    tree.run_after()
+    assert fitter.room() == 320
+
+
+def test_a_resize_that_does_not_change_the_room_fits_nothing():
+    # ``<Configure>`` also fires for a height change and for a same-sized
+    # re-layout; re-measuring and re-pushing on those is work with no result.
+    tree, fitter, _room, container = make_budgeted_fitter()
+    tree.insert("", "end", iid="run-1", text="run", values=("ok",))
+    fitter.rows()
+
+    fire(container, "<Configure>", SimpleNamespace(width=800))
+
+    assert tree.after_callbacks == []
+
+
+def test_a_refit_on_a_pane_that_shrank_to_nothing_is_ignored():
+    # A collapsed pane reports 1 pixel: fitting against it would push every
+    # column to its minimum and the table would come back wrong.
+    tree, fitter, room, container = make_budgeted_fitter()
+    tree.insert("", "end", iid="run-1", text="un run dont le libellé est long", values=("ok",))
+    fitter.rows()
+    before = dict(fitter.widths())
+
+    room.value = 1
+    fire(container, "<Configure>", SimpleNamespace(width=1))
+    tree.run_after()
+
+    assert fitter.widths() == before
+
+
+def test_a_table_is_fitted_only_once_it_can_be_measured():
+    # Before the first layout the room is unknown, so the table stays on its pure
+    # content sizing — which is what lets a dialog open at the width it needs.
+    tree, fitter, _room, _container = make_budgeted_fitter(room=1)
+    tree.insert("", "end", iid="run-1", text="un run dont le libellé est long", values=("ok",))
+
+    fitter.rows()
+
+    assert fitter.room() == 0
+    assert fitter.widths()["#0"] == natural("un run dont le libellé est long")
+
+
+def test_the_minimum_total_is_the_floor_the_board_measures_against():
+    # The sum of the minimums is what a pane has to have for the table to show all
+    # of its columns: the dashboard's breakpoints are read off it, so it must not
+    # depend on the rows that happen to be on screen.
+    _tree, fitter = make_fitter()
+    assert fitter.minimum_total() == 160
+
+
+def test_a_container_that_never_measured_its_table_is_not_listened_to():
+    # ``<Configure>`` is bound to the container when there is one: a fitter whose
+    # container cannot be asked must not take the whole view down on a resize.
+    class Deaf(FakeTk.Frame):
+        """A container that refuses every binding, like an exotic toolkit."""
+
+        def bind(self, sequence, handler=None):  # type: ignore[override]
+            raise ValueError("no bindings here")
+
+    tree, fitter = make_fitter(container=Deaf(None), available=lambda: 400)
+    fitter.rows()  # the table is still fitted, from its own content
+    assert fitter.widths() == {"#0": 100, "detail": 82}
+    assert "<Configure>" not in tree._bindings  # and nothing to refit it later
+
+
+# ---------------------------------------------------------- bind_ellipsize
+def test_bind_ellipsize_cuts_the_text_to_the_label_width():
+    label = FakeTk.Label(None, text="un nom de workspace vraiment très long")
+    raw = {"text": label.text}
+    layout.bind_ellipsize(label, lambda: raw["text"], measure)
+
+    fire(label, "<Configure>", SimpleNamespace(width=200))
+
+    assert label.text.endswith(layout.ELLIPSIS)
+    assert measure(label.text) <= 200
+
+
+def test_bind_ellipsize_rereads_its_source_on_every_resize():
+    # The caller keeps setting the raw text the plain way; the binding is the only
+    # thing that knows about the cut, so a new value is never left stale.
+    label = FakeTk.Label(None, text="court")
+    raw = {"text": "court"}
+    layout.bind_ellipsize(label, lambda: raw["text"], measure)
+    fire(label, "<Configure>", SimpleNamespace(width=25))
+    assert label.text != "court"
+
+    raw["text"] = "un autre nom bien plus long que la place disponible"
+    fire(label, "<Configure>", SimpleNamespace(width=120))
+    assert measure(label.text) <= 120
+    assert label.text != raw["text"]
+
+
+def test_bind_ellipsize_leaves_a_label_that_fits_alone():
+    label = FakeTk.Label(None, text="court")
+    layout.bind_ellipsize(label, lambda: label.text, measure)
+
+    fire(label, "<Configure>", SimpleNamespace(width=400))
+
+    assert label.text == "court"
+
+
+def test_bind_ellipsize_ignores_an_unmapped_label():
+    label = FakeTk.Label(None, text="un nom de workspace vraiment très long")
+    layout.bind_ellipsize(label, lambda: label.text, measure)
+
+    fire(label, "<Configure>", SimpleNamespace(width=1))
+
+    # A label Tk has not measured cannot be cut to a width that is not a width.
+    assert label.text == "un nom de workspace vraiment très long"
+
+
+def test_bind_ellipsize_can_write_through_a_callback():
+    # Some labels cannot be ``config``ured directly (a canvas-drawn one), so the
+    # binding is told how to apply the cut instead.
+    applied: list[str] = []
+    label = FakeTk.Label(None, text="un nom de workspace vraiment très long")
+    layout.bind_ellipsize(label, lambda: label.text, measure, apply=lambda cut: applied.append(cut))
+
+    fire(label, "<Configure>", SimpleNamespace(width=150))
+
+    assert applied and measure(applied[-1]) <= 150
+    assert label.text == "un nom de workspace vraiment très long"
+
+
+def test_bind_ellipsize_skips_a_repeated_width():
+    # One row of the journal list can fire several ``<Configure>`` at the same
+    # width; re-measuring and re-writing the text on each of them is work with no
+    # result, so only a real width change touches the label.
+    applied: list[str] = []
+    label = FakeTk.Label(None, text="un nom de workspace vraiment très long")
+    layout.bind_ellipsize(label, lambda: label.text, measure, apply=lambda cut: applied.append(cut))
+
+    fire(label, "<Configure>", SimpleNamespace(width=200))
+    fire(label, "<Configure>", SimpleNamespace(width=200))
+    fire(label, "<Configure>", SimpleNamespace(width=200))
+
+    assert len(applied) == 1
 
 
 def test_column_fitter_fits_a_tree_that_is_not_mapped_yet():
@@ -423,7 +731,7 @@ def test_bind_wraplength_follows_the_label_width():
     label = FakeTk.Label(None, text="a long traceback", wraplength=480)
     layout.bind_wraplength(label, minimum=120, padding=24)
 
-    label._bindings["<Configure>"](SimpleNamespace(width=524))
+    fire(label, "<Configure>", SimpleNamespace(width=524))
 
     assert label._options["wraplength"] == 500
 
@@ -432,7 +740,7 @@ def test_bind_wraplength_never_goes_below_the_minimum():
     label = FakeTk.Label(None, text="x", wraplength=480)
     layout.bind_wraplength(label, minimum=120, padding=24)
 
-    label._bindings["<Configure>"](SimpleNamespace(width=40))
+    fire(label, "<Configure>", SimpleNamespace(width=40))
 
     assert label._options["wraplength"] == 120
 
@@ -441,7 +749,7 @@ def test_bind_wraplength_skips_an_unmapped_label():
     label = FakeTk.Label(None, text="x", wraplength=480)
     layout.bind_wraplength(label)
 
-    label._bindings["<Configure>"](SimpleNamespace(width=1))
+    fire(label, "<Configure>", SimpleNamespace(width=1))
 
     assert label._options["wraplength"] == 480
 
@@ -450,9 +758,9 @@ def test_bind_wraplength_ignores_a_repeated_width():
     label = FakeTk.Label(None, text="x", wraplength=480)
     layout.bind_wraplength(label, padding=0)
 
-    label._bindings["<Configure>"](SimpleNamespace(width=700))
+    fire(label, "<Configure>", SimpleNamespace(width=700))
     label._options["wraplength"] = -1  # simulate a redraw touching the option
-    label._bindings["<Configure>"](SimpleNamespace(width=700))
+    fire(label, "<Configure>", SimpleNamespace(width=700))
 
     # Nothing changed, so the option is left alone.
     assert label._options["wraplength"] == -1

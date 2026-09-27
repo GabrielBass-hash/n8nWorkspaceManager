@@ -20,13 +20,25 @@ class FakeTk:
             self._parent = _parent
             self.children: list[object] = []
             self._options = dict(kwargs)
+            # An explicitly given ``name=`` is what makes a container's path
+            # stable across snapshots; without one the widget keeps the unique
+            # auto-name ``__str__`` hands out, so two unnamed widgets never
+            # compare equal.
+            self._name = kwargs.get("name") or f"!frame{id(self):x}"
+            self._pack_options: dict[str, object] = {}
             self.destroyed = False
             self._bindings: dict[str, object] = {}
+            # The mapped size, 1 by default: Tk's answer before the first layout.
+            self._width = 1
+            self._height = 1
             # Pages own their own poll timers (``self.after``), so the fake
             # frame schedules them exactly like the fake root does.
             self.after_callbacks: list[tuple[int, object]] = []
             self._after_ids: list[int] = []
             self._next_after_id = 0
+            # Grid bookkeeping, for the widgets that reflow into columns.
+            self._columns: dict[int, dict[str, object]] = {}
+            self._rows: dict[int, dict[str, object]] = {}
 
         def after(self, delay: int, callback) -> int:
             after_id = self._next_after_id
@@ -48,16 +60,77 @@ class FakeTk:
                 node = node._parent
             return node
 
-        def pack(self, *_args, **_kwargs) -> None:
+        def winfo_width(self) -> int:
+            """Report the width tests set, like Tk reports the mapped width.
+
+            One pixel is Tk's answer before the first layout, so a frame that has
+            not been measured is indistinguishable from one that has — which is
+            what every fitter's "is this room real?" check reads.
+            """
+            return self._width
+
+        def __str__(self) -> str:
+            """Return the widget path Tk would answer with.
+
+            A frame's name is assigned by the paned window that manages it (a
+            real ``panes()`` hands paths back, never widgets), so before that it
+            is a unique string rather than an empty one: two unnamed frames must
+            never compare equal.
+            """
+            return getattr(self, "_name", f"!frame{id(self):x}")
+
+        def winfo_height(self) -> int:
+            return self._height
+
+        def pack(self, *_args, **kwargs) -> None:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
+            self._pack_options = dict(kwargs)
             self.packed = True
 
         def pack_forget(self) -> None:
+            """Forget this widget only: its siblings stay where they are."""
             self.packed = False
-            self.children.clear()
             with suppress(ValueError):
                 self._parent.children.remove(self)
+
+        def grid(self, row: int = 0, column: int = 0, **kwargs) -> None:
+            """Record a grid placement; the fakes do not lay anything out."""
+            self._grid_options = {"row": row, "column": column, **kwargs}
+            self.gridded = True
+            if hasattr(self._parent, "children"):
+                self._parent.children.append(self)
+
+        def grid_forget(self) -> None:
+            self.gridded = False
+            self._grid_options = None
+
+        def grid_configure(self, *args, **kwargs) -> None:
+            self.grid(*args, **kwargs)
+
+        def columnconfigure(self, index: int, **kwargs) -> None:
+            self._columns[index] = dict(kwargs)
+
+        def rowconfigure(self, index: int, **kwargs) -> None:
+            self._rows[index] = dict(kwargs)
+
+        def tkraise(self) -> None:
+            """Bring the widget to the top of the stack, as Tk does."""
+            self.raised = True
+
+        def event_generate(self, sequence: str, **_kwargs) -> None:
+            """Fire *sequence*'s bindings, as Tk does for a real event."""
+            handler = self._bindings.get(sequence)
+            if handler is not None:
+                handler(None)
+
+        def winfo_reqwidth(self) -> int:
+            """Report the width the children ask for; tests set it when needed."""
+            return getattr(self, "_reqwidth", 0)
+
+        def winfo_reqheight(self) -> int:
+            """Report the height the children ask for; tests set it when needed."""
+            return getattr(self, "_reqheight", 0)
 
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
@@ -80,8 +153,21 @@ class FakeTk:
             """Mirror Tk: report 0 as soon as ``destroy`` has run."""
             return 0 if self.destroyed else 1
 
-        def bind(self, sequence: str, handler) -> None:
-            self._bindings[sequence] = handler
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
 
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
@@ -110,16 +196,29 @@ class FakeTk:
             return self._width
 
         def winfo_height(self) -> int:
-            return 0
+            return self._height
+
+        def winfo_reqwidth(self) -> int:
+            """Report the width the text asks for; tests set it when needed.
+
+            A label's request is what a caller measures to keep a free-text
+            tooltip or a prose block inside the room it was given.
+            """
+            return getattr(self, "_reqwidth", 0)
+
+        def winfo_reqheight(self) -> int:
+            return getattr(self, "_reqheight", 0)
 
         def pack(self, *_args, **kwargs) -> None:
             self.packed = True
             self._pack_options = dict(kwargs)
-            if hasattr(self._parent, "children"):
+            if hasattr(self._parent, "children") and self not in self._parent.children:
                 self._parent.children.append(self)
 
         def pack_forget(self) -> None:
             self.packed = False
+            with suppress(ValueError):
+                self._parent.children.remove(self)
 
         def config(self, **kwargs) -> None:
             self._options.update(kwargs)
@@ -134,17 +233,36 @@ class FakeTk:
             """Read back an option, as Tk's ``cget`` does."""
             return self._options.get(option, "")
 
-        def bind(self, sequence: str, handler) -> None:
-            self._bindings[sequence] = handler
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
 
         def unbind(self, sequence: str) -> None:
             self._bindings.pop(sequence, None)
 
         def winfo_rootx(self) -> int:
-            return 0
+            """Report where the label sits on screen, as the window manager would.
+
+            A floating window is placed from its anchor's position, so a test has
+            to be able to move the anchor to check where the window lands.
+            """
+            return getattr(self, "_rootx", 0)
 
         def winfo_rooty(self) -> int:
-            return 0
+            """Report the label's top edge, as the window manager would."""
+            return getattr(self, "_rooty", 0)
 
         def place(self, **kwargs) -> None:
             self._place_options = dict(kwargs)
@@ -178,13 +296,33 @@ class FakeTk:
             self._items: list[object] = []
             self._lines: dict[int, dict[str, object]] = {}
             self.scrolled = 0
+            # The mapped width, which is the room the rows inside it are laid out
+            # in: a list is what decides what a row can afford to show.
+            self._width = 1
             FakeTk.Canvas.instances.append(self)
+
+        def winfo_width(self) -> int:
+            """Report the width tests set, like Tk reports the mapped width."""
+            return self._width
 
         def pack(self, *_args, **_kwargs) -> None:
             pass
 
-        def bind(self, sequence: str, handler) -> None:
-            self._bindings[sequence] = handler
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
 
         def create_window(self, _x: int, _y: int, **kwargs) -> int:
             self._window_id += 1
@@ -416,13 +554,42 @@ class FakeTk:
             self._options = dict(kwargs)
             self._bindings: dict[str, object] = {}
             self._text = ""
+            self.packed = False
 
         def pack(self, *_args, **_kwargs) -> None:
-            if hasattr(self._parent, "children"):
+            self.packed = True
+            if not self.packed:
+                return
+            if hasattr(self._parent, "children") and self not in self._parent.children:
                 self._parent.children.append(self)
 
-        def bind(self, sequence: str, handler) -> None:
-            self._bindings[sequence] = handler
+        def pack_forget(self) -> None:
+            self.packed = False
+            with suppress(ValueError):
+                self._parent.children.remove(self)
+
+        def place(self, *_args, **_kwargs) -> None:
+            """Record a place, so a collapsed panel's overlay can be forgotten."""
+            self._placed = True
+
+        def place_forget(self) -> None:
+            self._placed = False
+
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
 
         def focus_set(self) -> None:
             self._focused = True
@@ -486,50 +653,255 @@ class FakeTtk:
 
     class PanedWindow:
         instances: ClassVar[list["FakeTtk.PanedWindow"]] = []
+        # When set, ``panes()`` hands back widget *paths* the way a real
+        # ``ttk.PanedWindow`` does, instead of the widgets themselves. Code that
+        # compares a widget against them with ``in`` is then wrong exactly as it
+        # is on a real display — which is how the dock ended up appended after
+        # the journal instead of before it.
+        paths: bool = False
 
         def __init__(self, _parent, **_kwargs):
             self._parent = _parent
             self.children: list[object] = []
-            self._items: list[tuple[object, dict[str, object]]] = []
+            self._items: list[dict[str, object]] = []
+            self._bindings: dict[str, object] = {}
             self.packed = False
-            # The split, and the width it is applied to: the fakes cannot lay
-            # panes out, so a test sets them and reads back what the view asked
-            # for. ``sashpos`` also records the request, which is the only way a
-            # ttk paned window resizes an unweighted pane.
-            self._sashpos = 0
+            # The room this paned window is mapped to, and the sash positions
+            # pushed into it. The fakes cannot lay panes out, so a test sets the
+            # room and reads back the widths the split implies: a pane is what
+            # lies between its own sash and the next one, less the chrome.
+            self._sashes: dict[int, int] = {}
             self._width = 0
+            self._height = 0
+            # Per-pane overrides, for the tests that set a width directly.
+            self._pane_widths: dict[int, int] = {}
+            # Pending ``after`` timers (the board debounces its reflow on one).
+            self.after_callbacks: list[tuple[int, object]] = []
+            self._after_ids: list[int] = []
+            self._next_after_id = 0
             FakeTtk.PanedWindow.instances.append(self)
+
+        def __str__(self) -> str:
+            """Return the widget path Tk would answer with.
+
+            The dock's own paned window is a *pane* of the board's, so the board
+            resolves it by path like any other; before it is managed its name is
+            a unique string, never an empty one.
+            """
+            return getattr(self, "_name", f"!panedwindow{id(self):x}")
 
         def pack(self, *_args, **_kwargs) -> None:
             self.packed = True
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
-        def add(self, child, **_kwargs) -> None:
+        def add(self, child, **kwargs) -> None:
+            self._items.append({"child": child, "weight": kwargs.get("weight", 0)})
             self.children.append(child)
-            self._items.append((child, dict(_kwargs)))
+
+        def insert(self, index, child, **kwargs) -> None:
+            """Insert a pane at *index*, keeping the others' order.
+
+            A real paned window keeps the sashes it was given and re-indexes
+            them: inserting at 1 pushes the second one along, which is why the
+            board re-pushes every position after it inserts.
+            """
+            self._items.insert(index, {"child": child, "weight": kwargs.get("weight", 0)})
+            self.children.insert(index, child)
+            self._sashes = {
+                (position + 1 if position >= index else position): value
+                for position, value in self._sashes.items()
+            }
+            self._pane_widths = {
+                (position + 1 if position >= index else position): value
+                for position, value in self._pane_widths.items()
+            }
+
+        def forget(self, child) -> None:
+            """Remove *child*'s pane, like Tk does when a tab is closed."""
+            index = self.index(child)
+            if index is None:
+                return
+            self._items.pop(index)
+            self.children.remove(child)
+            # The sashes after the removed pane re-index; the ones before it
+            # keep their position, so the first column does not move when the
+            # dock opens or closes.
+            self._sashes = {
+                (position - 1 if position > index else position): value
+                for position, value in self._sashes.items()
+                if position != index
+            }
+            self._pane_widths = {
+                (position - 1 if position > index else position): value
+                for position, value in self._pane_widths.items()
+                if position != index
+            }
 
         def panes(self) -> tuple[object, ...]:
-            return tuple(child for child, _weights in self._items)
+            """Return the panes, as widget *paths* when ``paths`` is set.
+
+            A real ``ttk.PanedWindow`` hands back paths, never widgets, and code
+            that compares a widget against them with ``in`` is always wrong — so
+            a test can ask for the real answer instead of trusting the friendly
+            one.
+            """
+            children = tuple(item["child"] for item in self._items)
+            if not self.paths:
+                return children
+            return tuple(self._pane_path(child) for child in children)
+
+        def _pane_path(self, child) -> str:
+            """Return the stable widget path Tk would answer with for *child*.
+
+            The name is assigned once and kept, exactly as Tk's is: a path built
+            from the pane's *position* would change the moment a pane is inserted
+            or forgotten, and a test would then be checking the wrong thing.
+            """
+            if not hasattr(self, "_names"):
+                self._names: dict[int, str] = {}
+            if id(child) not in self._names:
+                self._names[id(child)] = f"!{type(child).__name__.lower()}{len(self._names) + 1}"
+            child._name = f".!panedwindow.{self._names[id(child)]}"
+            return child._name
+
+        def index(self, pane) -> int | None:
+            """Return the position of *pane* (a widget or an index)."""
+            if isinstance(pane, int):
+                return pane if 0 <= pane < len(self._items) else None
+            for position, item in enumerate(self._items):
+                if item["child"] is pane:
+                    return position
+            return None
+
+        def pane(self, index, option=None, **kwargs):
+            """Read or write one pane's options, as ``ttk`` does."""
+            entry = self._item(index)
+            if entry is None:
+                return None
+            for key, value in kwargs.items():
+                if key == "width":
+                    self._pane_widths[self.index(index)] = int(value)
+                else:
+                    entry[key] = value
+            if option is None:
+                return dict(entry) if kwargs else self.pane_width(index)
+            if option == "width":
+                return self.pane_width(index)
+            return entry.get(option)
 
         def sashpos(self, index: int, position: int | None = None) -> int:
-            """Report the split, or move it the way ``wm``-style panes do."""
+            """Report the sash that closes pane *index*, or move it there.
+
+            Verified against Tk 9.0.4 on a real display: a paned window with n
+            panes has n-1 sashes, ``sashpos(i)`` is the *right edge* of pane i,
+            and the handle occupies the gap before pane i+1 — so a two-column
+            window is split by pushing ``sashpos(0, left_width)`` alone and
+            reading the last pane back as ``room - left_width - handle``. An
+            out-of-range index is an error, so a host that sizes the wrong pane
+            cannot pass.
+            """
             if position is not None:
-                self._sashpos = position
-                for pane in self.panes()[1:]:
-                    # A real ttk pane is what the window has left once the first
-                    # pane took the split, less the sash handle and the pane's own
-                    # border. The fakes cannot lay panes out, so the ones after the
-                    # first are sized the same way, chrome included: a pane that
-                    # ignored it would hide the split's own arithmetic.
-                    pane._width = max(self._width - self._sashpos - _PANE_CHROME, 0)
-            return self._sashpos
+                self._sashes[index] = position
+            if index in self._sashes:
+                return self._sashes[index]
+            if not 0 <= index < len(self._items) - 1:
+                if index == len(self._items) - 1:
+                    return self._width
+                raise IndexError(f"sash index {index} out of range")
+            # An unpinned pane is left where Tk's layout put it: the room it
+            # asked for, shared evenly here since the fakes carry no requests.
+            share = self._width // max(len(self._items), 1)
+            return self._left_edge(index) + share
+
+        def _left_edge(self, index: int) -> int:
+            """Return the x a pane starts at, its previous sash included."""
+            return 0 if index == 0 else self.sashpos(index - 1) + _PANE_CHROME
+
+        def sashes(self) -> list[int]:
+            """Return the sashes a real paned window would have: one per gap."""
+            return [self.sashpos(index) for index in range(len(self._items) - 1)]
+
+        def pane_width(self, index: int) -> int:
+            """Return the width the room between a pane's own bounds gives it.
+
+            A ttk pane is what lies between its own sash and the next one, less
+            the handle and the pane's own border; a test that ignored that would
+            hide the split's own arithmetic, so the fake does not. The last pane
+            is the room the split left, which is how Tk sizes it.
+            """
+            override = self._pane_widths.get(index)
+            if override is not None:
+                return override
+            left = self._left_edge(index)
+            right = self.sashpos(index)
+            return max(right - left, 0)
+
+        def pane_width_of(self, child) -> int:
+            """Return the width of *child*'s pane, by widget rather than index."""
+            index = self.index(child)
+            return 0 if index is None else self.pane_width(index)
+
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
+
+        def fire_configure(self, width: int | None = None) -> None:
+            """Fire the ``<Configure>`` a real resize would, optionally resizing."""
+            if width is not None:
+                self._width = width
+            handler = self._bindings.get("<Configure>")
+            if handler is not None:
+                handler(None)
+
+        def after(self, delay: int, callback) -> int:
+            after_id = self._next_after_id
+            self._next_after_id += 1
+            self._after_ids.append(after_id)
+            self.after_callbacks.append((delay, callback))
+            return after_id
+
+        def after_cancel(self, after_id: int) -> None:
+            with suppress(ValueError):
+                index = self._after_ids.index(after_id)
+                self._after_ids.pop(index)
+                self.after_callbacks.pop(index)
+
+        def run_after(self, index: int = 0) -> None:
+            """Run the pending timer at *index*, as Tk would when it fires.
+
+            The id list is kept aligned with the callback list (both are appended
+            to together and popped from together), so the id comes off the same
+            position — a cancelled timer must not make the two drift apart.
+            """
+            self._after_ids.pop(index)
+            _delay, callback = self.after_callbacks.pop(index)
+            callback()
 
         def winfo_width(self) -> int:
             return self._width
 
         def winfo_reqwidth(self) -> int:
             return self._width
+
+        def winfo_height(self) -> int:
+            return self._height
+
+        def _item(self, index):
+            resolved = self.index(index)
+            return None if resolved is None else self._items[resolved]
 
     class Button:
         instances: ClassVar[list["FakeTtk.Button"]] = []
@@ -558,6 +930,12 @@ class FakeTtk:
                     setattr(self, key, kwargs.pop(key))
             self._options.update(kwargs)
 
+        def cget(self, option: str):
+            """Read back an option, as Tk's ``cget`` does."""
+            if option == "text":
+                return self.text
+            return self._options.get(option)
+
     class Treeview:
         instances: ClassVar[list["FakeTtk.Treeview"]] = []
 
@@ -573,7 +951,37 @@ class FakeTtk:
             self.element = "Treeitem.text"
             self.packed = False
             self._pack_options: dict[str, object] = {}
+            # Pending ``after`` timers. A real tree inherits ``Misc.after``, and
+            # the fitter debounces its resize refit on the table itself, so the
+            # timer has to be recordable here for a test to fire it.
+            self.after_callbacks: list[tuple[int, object]] = []
+            self._after_ids: list[int] = []
+            self._next_after_id = 0
             FakeTtk.Treeview.instances.append(self)
+
+        def after(self, delay: int, callback) -> int:
+            after_id = self._next_after_id
+            self._next_after_id += 1
+            self._after_ids.append(after_id)
+            self.after_callbacks.append((delay, callback))
+            return after_id
+
+        def after_cancel(self, after_id: int) -> None:
+            with suppress(ValueError):
+                index = self._after_ids.index(after_id)
+                self._after_ids.pop(index)
+                self.after_callbacks.pop(index)
+
+        def run_after(self, index: int = 0) -> None:
+            """Run the pending timer at *index*, as Tk would when it fires.
+
+            The id list is kept aligned with the callback list (both are appended
+            to together and popped from together), so the id comes off the same
+            position — a cancelled timer must not make the two drift apart.
+            """
+            self._after_ids.pop(index)
+            _delay, callback = self.after_callbacks.pop(index)
+            callback()
 
         def heading(self, column: str, **kwargs) -> None:
             self._headings[column] = dict(kwargs)
@@ -620,10 +1028,12 @@ class FakeTtk:
             self._items[item_id] = entry
             return item_id
 
-        def item(self, iid: str, **kwargs):
-            """Get all options when no kwargs, else update the stored ones."""
+        def item(self, iid: str, option=None, **kwargs):
+            """Read one option, or all of them, as ``ttk.Treeview.item`` does."""
             if kwargs:
                 self._items[iid].update(kwargs)
+            if option is not None:
+                return self._items[iid].get(option)
             return dict(self._items[iid])
 
         def delete(self, *iids) -> None:
@@ -642,8 +1052,21 @@ class FakeTtk:
         def get_children(self, iid: str = "") -> list[str]:
             return [item_id for item_id, entry in self._items.items() if entry.get("parent") == iid]
 
-        def bind(self, sequence: str, handler) -> None:
-            self._bindings[sequence] = handler
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
 
         def selection(self) -> list[str]:
             return list(self._selection)
@@ -651,16 +1074,35 @@ class FakeTtk:
         def selection_set(self, *iids) -> None:
             self._selection = list(iids)
 
-        def identify(self, _region: str, _x: int, _y: int) -> str:
-            return "tree"
+        def identify(self, region: str, _x: int, y: int) -> str:
+            """Report which region a coordinate lands in, as Tk does.
+
+            Only the rows and the headings occupy a tree, so a click below the
+            last row is on neither — that is what makes "the user clicked the
+            empty space under the table" a thing a test can produce.
+            """
+            if region != "region":
+                return ""
+            if 0 <= y < _ROW_HEIGHT * len(self.get_children()):
+                return "tree"
+            return ""
 
         def identify_element(self, _x: int, _y: int) -> str:
             # Defaults to a row element; tests set ``element`` to
             # "Treeitem.indicator" to simulate a click on the expander triangle.
             return self.element
 
-        def identify_row(self, _y: int) -> str | None:
-            return next(iter(self._items), None)
+        def identify_row(self, y: int) -> str | None:
+            """Return the item whose row covers *y*, as Tk maps a click to one.
+
+            Rows are a fixed height and start at the top, which is enough to tell
+            two rows apart; a click past the last one is on no row at all.
+            """
+            index = y // _ROW_HEIGHT
+            rows = self.get_children()
+            if 0 <= index < len(rows):
+                return rows[index]
+            return None
 
         def pack(self, *_args, **kwargs) -> None:
             self.packed = True
@@ -671,8 +1113,14 @@ class FakeTtk:
             # Tk registers a packed slave with its parent, in packing order, and
             # that order decides who takes the shortfall when a container is
             # shorter than the sum of its children.
-            if hasattr(self._parent, "children"):
+            if hasattr(self._parent, "children") and self not in self._parent.children:
                 self._parent.children.append(self)
+
+        def pack_forget(self) -> None:
+            """Forget the table, keeping its parent's other children in place."""
+            self.packed = False
+            with suppress(ValueError):
+                self._parent.children.remove(self)
 
         def set(self, iid: str, column: str, value: object) -> None:
             entry = self._items[iid]
@@ -695,7 +1143,21 @@ class FakeTtk:
             if hasattr(self._parent, "children"):
                 self._parent.children.append(self)
 
-        def bind(self, sequence: str, handler) -> None:
+        def bind(self, sequence: str, handler, add: bool | str | None = None) -> None:
+            """Bind *handler*, keeping the others when ``add`` is set.
+
+            Tk's ``add="+"`` is what lets two independent parts of a view listen
+            to the same sequence — the column fitter's refit and the window
+            fitter's "the user resized this" — instead of the second one silently
+            replacing the first.
+            """
+            if add:
+                self._bindings.setdefault(sequence, [])
+                if not isinstance(self._bindings[sequence], list):
+                    self._bindings[sequence] = [self._bindings[sequence]]
+                self._bindings[sequence].append(handler)
+            elif handler is not None:
+                self._bindings[sequence] = handler
             """Record a binding so a test can fire the notebook's virtual event."""
             self._bindings[sequence] = handler
 
@@ -770,12 +1232,20 @@ class FakeTtk:
             return self._tabs[index] if index is not None else None
 
 
+# The height one Treeview row is given, so a fake can map a y coordinate onto a
+# row the way Tk does. It only has to be consistent and non-zero.
+_ROW_HEIGHT = 20
+
+
 class FakeRoot:
     def __init__(self):
         self.after_callbacks: list[tuple[int, object]] = []
         self._after_ids: list[int] = []
         self._next_after_id = 0
         self._protocol_handlers: dict[str, object] = {}
+        self._bindings: dict[str, object] = {}
+        self._funcids: dict[str, tuple[str, object]] = {}
+        self._next_funcid = 0
         self.destroyed = False
         # The mapped geometry and the display, both settable by the tests: the
         # dialogs are centred over the root and bounded by the screen.
@@ -805,6 +1275,54 @@ class FakeRoot:
 
     def protocol(self, name: str, handler) -> None:
         self._protocol_handlers[name] = handler
+
+    def bind(self, sequence: str, handler, add: bool | str | None = None) -> str:
+        """Bind on the root, keeping the others when ``add`` is set.
+
+        A click anywhere in the window is delivered to the root's own bindtags,
+        which is how a floating window listens for the click that dismisses it.
+        The id is the one ``unbind`` takes, so it can take itself off again
+        without disturbing whatever else listens to the same sequence.
+        """
+        if add:
+            self._bindings.setdefault(sequence, [])
+            if not isinstance(self._bindings[sequence], list):
+                self._bindings[sequence] = [self._bindings[sequence]]
+            self._bindings[sequence].append(handler)
+        elif handler is not None:
+            self._bindings[sequence] = handler
+        funcid = f"func{self._next_funcid}"
+        self._next_funcid += 1
+        self._funcids[funcid] = (sequence, handler)
+        return funcid
+
+    def unbind(self, sequence: str, funcid: str | None = None) -> str:
+        """Remove one binding by id, or the whole sequence when given none."""
+        if funcid is None:
+            self._bindings.pop(sequence, None)
+            return ""
+        removed = self._funcids.pop(funcid, None)
+        if removed is None:
+            return ""
+        bound_sequence, handler = removed
+        current = self._bindings.get(bound_sequence)
+        if isinstance(current, list):
+            if handler in current:
+                current.remove(handler)
+            if not current:
+                self._bindings.pop(bound_sequence, None)
+        elif current is handler:
+            self._bindings.pop(bound_sequence, None)
+        return ""
+
+    def fire(self, sequence: str, event=None) -> None:
+        """Deliver *sequence* to whatever the root is listening for."""
+        handler = self._bindings.get(sequence)
+        if isinstance(handler, list):
+            for one in list(handler):
+                one(event)
+        elif handler is not None:
+            handler(event)
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -940,6 +1458,27 @@ class FakeMessagebox:
     def askyesnocancel(self, *_args, **_kwargs) -> bool | None:
         self._yesnocancel_messages.append(_args[1] if len(_args) > 1 else "")
         return self._yesnocancel
+
+
+def fire(widget, sequence: str, event=None):
+    """Deliver *sequence* to every handler a fake widget is listening for.
+
+    A widget that bound the same sequence twice holds a *list* of handlers — that
+    is what ``add="+"`` means — so firing it means calling all of them, and this
+    helper is what stops a test from silently exercising only the last one.
+
+    The last handler's return value is handed back, as Tk does: a handler that
+    returns ``"break"`` is how a view stops a key from reaching the toplevel.
+    """
+    handler = widget._bindings.get(sequence)
+    if handler is None:
+        return None
+    if not isinstance(handler, list):
+        return handler(event)
+    result = None
+    for one in list(handler):
+        result = one(event)
+    return result
 
 
 def make_workspace(tmp_path: Path, name: str, port: int) -> Workspace:
@@ -1086,6 +1625,19 @@ def fake_ci_page_bases():
 
 
 @contextmanager
+def fake_board_bases():
+    """Rebind ``Card``'s ``tk.Frame`` base to :class:`FakeTk.Frame`.
+
+    A card is a frame the dock builds, and it captures its base class at import
+    time, so building one on the fakes means swapping it for the duration.
+    """
+    from n8n_launcher.gui.board import Card
+
+    with _rebase(Card):
+        yield Card
+
+
+@contextmanager
 def fake_runs_panel_bases():
     """Rebind ``RunsPanel``'s ``tk.Frame`` base to :class:`FakeTk.Frame`.
 
@@ -1102,3 +1654,18 @@ def fake_runs_panel_bases():
         yield RunsPanel
     finally:
         RunsPanel.__bases__ = original
+
+
+@contextmanager
+def fake_dialog_bases():
+    """Rebind ``Dialog``'s ``tk.Toplevel`` base to :class:`FakeTk.Toplevel`.
+
+    A dialog is a subclass (it is a ``Toplevel`` that opens itself), so it
+    captures the real base class at import time: patching the module-level
+    ``tk``/``ttk`` is not enough to build one without a real Tk root. Same
+    trade as :func:`fake_board_bases`, one base deeper.
+    """
+    from n8n_launcher.gui.dialog import Dialog
+
+    with _rebase(Dialog, FakeTk.Toplevel) as dialog_class:
+        yield dialog_class

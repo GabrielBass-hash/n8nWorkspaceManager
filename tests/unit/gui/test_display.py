@@ -22,7 +22,9 @@ from n8n_launcher.gui.display import (
     git_row_label,
     git_row_status,
     invalidate_git_status,
+    overflow_details,
     pipelines_count,
+    row_details,
     server_enabled,
     server_label,
     server_tooltip,
@@ -411,3 +413,83 @@ def test_ci_tooltip_warns_when_selected_no_longer_testable(tmp_path) -> None:
     tooltip = ci_tooltip(workspace)
 
     assert "plus testables" in tooltip
+
+
+def test_row_details_lists_the_port_before_the_pipeline_count(tmp_path) -> None:
+    # The order is the order of sacrifice, so it is part of the contract: the
+    # port says where n8n can be reached and must outlive the count.
+    workspace = make_workspace(tmp_path)
+    assert row_details(workspace) == [("port", "5678"), ("pipelines", "0")]
+
+
+def test_row_details_counts_the_pipelines(tmp_path) -> None:
+    workspace = make_workspace(tmp_path)
+    add_pipelines(tmp_path)
+    assert dict(row_details(workspace))["pipelines"] == "1"
+
+
+def test_overflow_details_hides_nothing_when_the_row_has_room() -> None:
+    details = [("port", 40), ("pipelines", 24)]
+    assert (
+        overflow_details(
+            room=400,
+            essentials=200,
+            details=details,
+            name_minimum=96,
+        )
+        == []
+    )
+
+
+def test_overflow_details_hides_the_count_before_the_port() -> None:
+    # The name may yield down to its minimum, and not one pixel further: the
+    # count goes first because it is the last of the two.
+    details = [("port", 40), ("pipelines", 24)]
+    room = 200 + 96 + 40 + 24
+    assert overflow_details(room=room, essentials=200, details=details, name_minimum=96) == []
+    assert overflow_details(
+        room=room - 1,
+        essentials=200,
+        details=details,
+        name_minimum=96,
+    ) == ["pipelines"]
+
+
+def test_overflow_details_hides_both_when_the_name_would_be_squeezed_out() -> None:
+    details = [("port", 40), ("pipelines", 24)]
+    assert overflow_details(
+        room=200 + 96,
+        essentials=200,
+        details=details,
+        name_minimum=96,
+    ) == ["port", "pipelines"]
+
+
+def test_overflow_details_never_hides_an_essential() -> None:
+    # The essentials are not optional, so a room too narrow for the name simply
+    # loses both details rather than pretending it can show everything.
+    assert overflow_details(
+        room=10,
+        essentials=200,
+        details=[("port", 40)],
+        name_minimum=96,
+    ) == ["port"]
+
+
+def test_overflow_details_decides_nothing_before_the_first_layout() -> None:
+    # Tk answers 0 or 1 before the row is mapped; that means "unmeasured", not
+    # "no room at all", so nothing may be hidden on that answer.
+    for room in (0, 1):
+        assert (
+            overflow_details(
+                room=room,
+                essentials=1000,
+                details=[("port", 40), ("pipelines", 24)],
+                name_minimum=96,
+            )
+            == []
+        )
+
+
+def test_overflow_details_of_an_empty_row_is_empty() -> None:
+    assert overflow_details(room=300, essentials=100, details=[], name_minimum=96) == []

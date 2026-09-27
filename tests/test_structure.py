@@ -33,6 +33,11 @@ pytest.importorskip("tkinter")
 import tkinter as tk
 from tkinter import ttk
 
+# ``tests/`` is not a package, so the parity registry is imported by its module
+# name: pytest puts the directory of each test file on ``sys.path`` (its default
+# "prepend" import mode), which is what makes this resolve.
+from test_parity import WATCHED_PATHS
+
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.gui.app import LauncherApp
 from n8n_launcher.gui.ci_edit import prompt_ci_credentials
@@ -65,7 +70,6 @@ _TEXT_ALIASES: tuple[tuple[str, str], ...] = (
     ("J'ai collé", "confirm_pasted_button"),
     ("Annuler", "cancel_button"),
     ("Créer", "create_button"),
-    ("GitHub  (", "credential_GitHub"),
 )
 
 
@@ -242,19 +246,40 @@ def _friendly_names(app: LauncherApp) -> dict[int, str]:
     Everything the app keeps a handle on (or the row builder exposes) gets a
     stable name so ``WATCHED_PATHS`` in ``test_parity.py`` reads naturally
     instead of carrying Tk's auto-generated ``frame2.label5`` names.
+
+    An auto-name is only stable until the *next* widget is created before it:
+    ``!frame`` becomes ``!frame4`` the moment three more frames are packed into
+    the same parent, which silently renames every path recorded under it. So the
+    window's structure is named here, by handle, and the snapshot's paths do not
+    move when an unrelated widget is added.
     """
     aliases: dict[int, str] = {}
     aliases[id(app.root)] = "root"
-    for child in app.root.winfo_children():
-        if child.winfo_class() == "TFrame":
-            aliases[id(child)] = "header"
 
     def note(widget: tk.Misc | None, name: str) -> None:
         if widget is not None:
             aliases[id(widget)] = name
 
+    # The two rules the window is framed by, and the header. The header is the
+    # only ``TFrame`` directly on the root; the two rules are plain frames, kept
+    # as handles by the app.
+    note(app._accent_bar, "accent_bar")
+    note(app._status_border, "status_border")
+    for child in app.root.winfo_children():
+        if child.winfo_class() == "TFrame":
+            aliases[id(child)] = "header"
     note(app._status_label, "status_label")
     note(app._subtitle, "subtitle")
+
+    # The board and its three columns. The dock's own vertical paned window is
+    # named too: it is a *sibling* pane of the list and the journal, so its
+    # auto-name shifts whenever the number of panes changes — which is exactly
+    # when a page opens or closes.
+    if app._board is not None:
+        note(app._board.pane, "paned")
+        note(app._board.list_card, "list_column")
+        note(app._board.journal_card, "journal_column")
+        note(app._board.dock.pane, "dock")
     note(app.workspace_list, "workspace_list")
     note(app._list_canvas, "list_canvas")
     note(app._empty_state, "empty_card")
@@ -270,8 +295,8 @@ def _friendly_names(app: LauncherApp) -> dict[int, str]:
         note(row.db_chip, "db_chip")
         note(row.git_chip, "git_chip")
         note(row.ci_chip, "ci_chip")
-        note(row.port_chip, "port_chip")
-        note(row.pipelines_chip, "pipelines_chip")
+        note(row.server_chip, "server_chip")
+        note(row.overflow_chip, "overflow_chip")
         note(row.action_button, "action_button")
         note(row.dirty_dot, "dirty_dot")
     return aliases
@@ -361,11 +386,49 @@ def test_structure_snapshot(real_tk_root: tk.Tk, tmp_path: Path, structure_dir: 
     output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def test_every_watched_path_is_a_widget_that_exists(real_tk_root: tk.Tk, tmp_path: Path) -> None:
+    """Every ``WATCHED_PATHS`` entry must name a widget this build really creates.
+
+    The parity test cannot check this on its own: it compares three snapshots
+    against each other and **skips** unless all three are present, so an entry
+    that names a widget nobody builds stays wrong indefinitely. That is not
+    hypothetical — ``WATCHED_PATHS`` carried ``root.!frame4.…`` for the whole
+    life of the board, an auto-name that stopped existing the day the workspace
+    list became the first pane of a paned window. Nothing failed, because a
+    registry of *essential* widgets is only worth anything if the entries are
+    live.
+    """
+    app = _build_app(tmp_path, real_tk_root)
+    _open_dialogs(real_tk_root, tmp_path)
+    real_tk_root.update_idletasks()
+
+    aliases = _friendly_names(app)
+    aliases.update(_text_dialog_alias(real_tk_root))
+    paths = {entry["path"] for entry in _walk_tree(app.root, aliases)}
+
+    stale = [path for path in WATCHED_PATHS if path not in paths]
+    assert not stale, (
+        "WATCHED_PATHS names widgets this build does not create: "
+        + ", ".join(stale)
+        + ". Either the widget was renamed or removed (drop the entry), or it "
+        "should exist and does not (fix the build). The paths this build really "
+        "creates are in the snapshot just written."
+    )
+
+
 def _text_dialog_alias(root: tk.Tk) -> dict[int, str]:
     """Name the dialog toplevels by their role (creation vs credentials).
 
     The two open dialogs are identified by their title, which is set from the
     same hard-coded strings on every OS.
+
+    Their action bar is named by **identity, not by text**: it is the frame that
+    actually holds the buttons, found by asking the widget tree where the
+    buttons live. Matching on a caption instead would be a second, parallel
+    naming rule that a reworded button would break silently. The credentials
+    table is named the same way — it is the one Treeview the dialog creates, and
+    a dialog with two of them is left to Tk's own names rather than being given a
+    wrong one.
     """
     aliases: dict[int, str] = {}
     for widget in root.winfo_children():
@@ -377,4 +440,53 @@ def _text_dialog_alias(root: tk.Tk) -> dict[int, str]:
             aliases[id(widget)] = "creation_dialog"
         elif title == "Credentials CI":
             aliases[id(widget)] = "credentials_dialog"
+            table = _sole_table(widget)
+            if table is not None:
+                aliases[id(table)] = "credentials_tree"
+        else:
+            continue
+        bar = _action_bar(widget)
+        if bar is not None:
+            aliases[id(bar)] = "actions"
     return aliases
+
+
+def _sole_table(dialog: tk.Misc) -> tk.Misc | None:
+    """Return the dialog's only table, or ``None`` if that is not a single one."""
+    tables = [child for child in dialog.winfo_children() if child.winfo_class() == "Treeview"]
+    return tables[0] if len(tables) == 1 else None
+
+
+def _action_bar(dialog: tk.Misc) -> tk.Misc | None:
+    """Return the frame holding *dialog*'s buttons, or ``None`` if there is none.
+
+    A dialog's buttons are packed into one bar so they line up under the fields
+    above them. That bar is currently an auto-named frame (``!frame``), so it is
+    located by asking the tree: the direct child of the dialog that contains a
+    button, and every button must live in that one frame — a dialog with two
+    such frames has an action bar this rule cannot speak for, and is left to Tk's
+    own names rather than being given a wrong one.
+    """
+    bars = {id(child) for child in dialog.winfo_children() if child.winfo_class() == "Frame"}
+    holders = {
+        id(child)
+        for child in dialog.winfo_children()
+        if child.winfo_class() == "Frame" and _holds_button(child)
+    }
+    if len(holders) != 1 or not holders <= bars:
+        return None
+    for child in dialog.winfo_children():
+        if id(child) in holders:
+            return child
+    return None
+
+
+def _holds_button(widget: tk.Misc) -> bool:
+    """Whether *widget* or any descendant is a button."""
+    stack = list(widget.winfo_children())
+    while stack:
+        node = stack.pop()
+        if node.winfo_class() in ("Button", "TButton"):
+            return True
+        stack.extend(node.winfo_children())
+    return False

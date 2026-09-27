@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -35,7 +35,7 @@ from ..platform.files import open_folder
 from ..workspaces import ci, ci_runs
 from ..workspaces.ci_runs import RunsSnapshot
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
-from . import ci_edit, ci_page, display, monitoring, pages, server_page
+from . import board, ci_edit, ci_page, display, monitoring, pages, server_page
 from .ci_runs import RunsPanel
 from .close import CloseController
 from .dialogs import (
@@ -88,6 +88,16 @@ from .theme import (
     state_label,
     text_measure,
 )
+from .tokens import (
+    BORDER_INSET,
+    GUTTER,
+    HAIRLINE,
+    SPACE_3XL,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SPACE_TIGHT,
+)
 from .update_flow import UpdateController
 
 logger = logging.getLogger(__name__)
@@ -99,12 +109,18 @@ logger = logging.getLogger(__name__)
 # the fallback geometry when screen metrics are unavailable (a metric of 1 pixel
 # means Tk never mapped the window).
 #
-# The width fraction is generous on purpose: the window holds the workspace list
-# *and* the event journal side by side, and the two together need ~1000 pixels
-# before a single column is clipped. ``MIN_WINDOW_WIDTH`` is that same floor, so
-# resizing by hand cannot squeeze the tables either.
-MIN_WINDOW_WIDTH = 1000
-MIN_WINDOW_HEIGHT = 460
+# The width fraction is generous on purpose: the window holds the workspace list,
+# the dock of open pages and the event journal side by side, and the board
+# collapses the journal to its rail (or forgets the dock) rather than clipping a
+# table. ``BOARD_FLOOR`` is the width below which that is not enough: the list,
+# the dock and the journal on its rail, side by side, with a handle and a border
+# per pane. ``MIN_WINDOW_WIDTH`` is that floor plus a margin for the sash handles
+# Tk draws slightly wider than the chrome it reports, so the two numbers cannot
+# drift apart and the window can always lay the board out. Below it the sash
+# remains the escape hatch, and a screen narrower than it gets its own width.
+BOARD_FLOOR = board.LIST_MINIMUM + board.DOCK_MINIMUM + board.JOURNAL_RAIL + 2 * board.PANE_CHROME
+MIN_WINDOW_WIDTH = BOARD_FLOOR + 30
+MIN_WINDOW_HEIGHT = 440
 MAX_WINDOW_WIDTH = 1600
 MAX_WINDOW_HEIGHT = 900
 WINDOW_WIDTH_FRACTION = 0.72
@@ -116,15 +132,17 @@ DEFAULT_WINDOW_HEIGHT = 600
 # clipped, so the workspace name is the one elastic field of a row and these two
 # paddings are what it has to work with. Kept tight on purpose: six chips side
 # by side are ~370px of a ~500px pane.
-_CHIP_PADX = 6
-_CHIP_GAP = 4
+_CHIP_PADX = SPACE_SM
+# How a collapsed detail is named in the popover: the keys come from
+# ``display.row_details`` and are the stable ones tests assert on, these are for
+# the user to read.
+_OVERFLOW_LABELS = {"port": "Port", "pipelines": "Pipelines"}
+_CHIP_GAP = SPACE_TIGHT
 
-# The narrowest the workspace list may be squeezed to when the journal's table
-# needs the rest of the window: the sash is moved to give the journal its
-# columns, and the list is a column of ellipsized names and chips that stays
-# usable down to this. Below it the window is grown instead (once), and on a
-# display too small for both the table keeps its columns and is simply cut.
-_LIST_PANE_MINIMUM = 240
+# What the workspace name keeps on a row whatever the chips give up. Below this
+# a name is not a name any more, and the row is better off hiding a detail it
+# can show again in one click (see ``display.overflow_details``).
+_ROW_NAME_MINIMUM = 96
 
 # Concurrent workspace starts are bounded by a semaphore: allowing eight
 # "Démarrer" clicks to spawn eight ``docker compose up`` at once would thresh
@@ -177,12 +195,13 @@ def window_size(screen_width: int, screen_height: int) -> tuple[int, int]:
 
 
 def window_minsize(screen_width: int, screen_height: int) -> tuple[int, int]:
-    """Return the narrowest window that still shows every column.
+    """Return the narrowest window the dashboard can still lay out.
 
-    The 1000px floor is what keeps the journal and a workspace row from
-    collapsing when the user drags the window smaller; a screen narrower than
-    that floor gets its own width as the minimum, so the launcher never opens
-    (or refuses to shrink) wider than the display it lives on.
+    Below this the board has nothing left to give: the workspace list is at its
+    floor, the journal is at its floor, and the panes' own chrome has nowhere to
+    come from. A screen narrower than the floor gets its own width as the
+    minimum, so the launcher never opens (or refuses to shrink) wider than the
+    display it lives on.
     """
     return (
         min(MIN_WINDOW_WIDTH, screen_width) if screen_width > 1 else MIN_WINDOW_WIDTH,
@@ -207,6 +226,159 @@ def _api_router_mounted(response: requests.Response) -> bool:
     return status in (200, 401, 403)
 
 
+# How far a floating window may sit from the display edge. Both the tooltip and
+# the overflow popover are anchored to a row, and a row can be the last one on
+# the right or at the bottom, so an unclamped window is how a tip ends up
+# invisible on a 1024px display.
+_FLOAT_MARGIN = 8
+#: The gap between the anchor's right edge and the window, and between the
+#: anchor's bottom and the window shown below it.
+_FLOAT_OFFSET_X = 12
+_FLOAT_OFFSET_Y = 4
+
+
+def clamp_to_screen(
+    *,
+    anchor_x: int,
+    anchor_y: int,
+    anchor_height: int,
+    width: int,
+    height: int,
+    screen_width: int,
+    screen_height: int,
+    margin: int = _FLOAT_MARGIN,
+) -> tuple[int, int]:
+    """Return where a floating window of *width* by *height* stays on screen.
+
+    Anchored below and to the right of the widget it belongs to, then pulled
+    back inside the display: a window wider or taller than the display itself
+    is pinned to the top-left margin rather than pushed off the far edge, and a
+    window with no room below is placed *above* its anchor instead.
+
+    This is the one rule both the row tooltip and the row's overflow popover go
+    through, measured from the real geometry — never a guess.
+    """
+    x = anchor_x + _FLOAT_OFFSET_X
+    x = min(max(x, margin), max(margin, screen_width - width - margin))
+    below = anchor_y + anchor_height + _FLOAT_OFFSET_Y
+    y = below if below + height + margin <= screen_height else max(margin, anchor_y - height - 4)
+    return x, y
+
+
+class _ChipOverflow:
+    """A frameless window listing the row details its width could not show.
+
+    A row carries more facts than a narrow pane can hold, and the ones that go
+    are the ones that are not controls: the port and the pipeline count. Rather
+    than clipping a chip or squeezing the name to nothing, the row shows a
+    ``+N`` chip that opens this.
+
+    It is a ``Toplevel`` with the window manager decorations turned off rather
+    than a native menu, for the reason the journal rail is not one either: the
+    content is a handful of labels, and a menu would bring a platform popup the
+    rest of the window never uses. Everything here is best-effort — a popover is
+    a convenience, and destroying one from a torn-down interpreter must never
+    surface.
+    """
+
+    def __init__(self, root: tk.Misc, anchor: tk.Misc, lines: Sequence[str]) -> None:
+        """Build the window and place it under the chip that opened it."""
+        self._root = root
+        self._anchor = anchor
+        self._window: tk.Toplevel | None = None
+        self._outside: str | None = None
+        self._lines = list(lines)
+        self.show()
+
+    @property
+    def window(self) -> tk.Toplevel | None:
+        """The floating window, or ``None`` once it has been dismissed."""
+        return self._window
+
+    def show(self) -> None:
+        """Open the popover, or leave it alone if it is already up."""
+        if self._window is not None:
+            return
+        with contextlib.suppress(Exception):
+            self._window = self._build()
+
+    def dismiss(self) -> None:
+        """Close the popover and drop the global click binding it installed.
+
+        The handler is bound on the main window rather than with
+        ``bind_all``: Tk delivers a click to the widget's own bindtags, so a
+        click anywhere in the list or the dock still reaches it, while a click
+        *inside* the popover — a different toplevel — does not, which is
+        exactly the "outside" test. It is removed by the id it was added with,
+        because ``unbind_all("<Button-1>")`` takes no id in tkinter and would
+        take every other handler down with it.
+        """
+        window, self._window = self._window, None
+        funcid, self._outside = self._outside, None
+        with contextlib.suppress(Exception):
+            if funcid is not None:
+                self._root.unbind("<Button-1>", funcid)
+        with contextlib.suppress(Exception):
+            if window is not None:
+                window.destroy()
+
+    def _build(self) -> tk.Toplevel:
+        """Create the window, its labels, and its dismissal bindings."""
+        window = tk.Toplevel(self._root)
+        window.wm_overrideredirect(True)
+        card = tk.Frame(
+            window,
+            bg=SURFACE_HOVER,
+            highlightthickness=HAIRLINE,
+            highlightbackground=BORDER,
+            padx=SPACE_MD,
+            pady=SPACE_SM,
+        )
+        card.pack(fill="both", expand=True)
+        for line in self._lines:
+            tk.Label(
+                card,
+                text=line,
+                bg=SURFACE_HOVER,
+                fg=TEXT_PRIMARY,
+                font=FONT_META,
+                anchor="w",
+            ).pack(fill="x")
+        # Escape is bound before the outside click so it wins for this window.
+        window.bind("<Escape>", lambda _event: self.dismiss())
+        # Clicking the chip again closes the popover: the handler is bound with
+        # ``add`` so the row's own click handler still runs.
+        with contextlib.suppress(Exception):
+            self._anchor.bind(
+                "<Button-1>",
+                lambda _event: self.dismiss(),
+                add="+",
+            )
+        window.update_idletasks()
+        with contextlib.suppress(Exception):
+            x, y = clamp_to_screen(
+                anchor_x=self._anchor.winfo_rootx(),
+                anchor_y=self._anchor.winfo_rooty(),
+                anchor_height=self._anchor.winfo_height(),
+                width=window.winfo_reqwidth(),
+                height=window.winfo_reqheight(),
+                screen_width=self._root.winfo_screenwidth(),
+                screen_height=self._root.winfo_screenheight(),
+            )
+            window.geometry(f"+{x}+{y}")
+        self._outside = self._root.bind("<Button-1>", self._on_outside_click, add="+")
+        return window
+
+    def _on_outside_click(self, event: tk.Event) -> None:
+        """Dismiss when the click landed outside the popover itself."""
+        if self._window is None:
+            return
+        widget = getattr(event, "widget", None)
+        inside = widget is not None and str(widget).startswith(str(self._window))
+        if not inside:
+            self.dismiss()
+
+
 class RowFrame(Protocol):
     """Description of a workspace row.
 
@@ -217,18 +389,24 @@ class RowFrame(Protocol):
     with a single ``cast``.
     """
 
+    workspace_id: str
     name_label: tk.Label
     db_chip: tk.Label
     git_chip: tk.Label
     ci_chip: tk.Label
     server_chip: tk.Label
-    port_chip: tk.Label
-    pipelines_chip: tk.Label
+    overflow_chip: tk.Label
     action_button: ttk.Button
     dirty_dot: tk.Label
     # The workspace name as given, before ``_fit_row_name`` shortened it to fit
     # the row: this is what the tooltip shows when the label shows an ellipsis.
     full_name: str
+    # The optional details the row's current width could not show, and the
+    # popover listing them. The chips themselves are not rebuilt when the width
+    # changes: what changes is the chip's own label (``+N``) and the detail
+    # lines it opens, so the chips the row already packed stay packed.
+    overflow: list[str]
+    popover: _ChipOverflow | None
 
     def pack(self, **kwargs: object) -> None: ...
     def bind(
@@ -260,9 +438,16 @@ class LauncherApp:
         # journal is available instead of failing to start.
         self.monitor = monitor
         self._monitor_panel: monitoring.MonitoringPanel | None = None
-        # Notebook of the left pane: the workspace list plus one tab per open
-        # information page. Built in ``_build_ui``, so it is absent until then.
-        self._pages: pages.PageHost | None = None
+        # The dashboard: the workspace list, the dock of open pages and the
+        # journal, in one paned window. Built in ``_build_ui``, so it is absent
+        # until then.
+        self._board: board.Board | None = None
+        # The two decorative rules the window is framed by. Kept as handles
+        # rather than locals: they are part of the window's structure (the
+        # structural parity snapshot names them), and a local could only be
+        # reached again by guessing at Tk's auto-generated name.
+        self._accent_bar: tk.Frame | None = None
+        self._status_border: tk.Frame | None = None
         self._monitor_events_cache: list[Event] = []
         self._monitor_gate = monitoring.CriticalGate()
         self._monitor_last_id: int | None = None
@@ -270,11 +455,6 @@ class LauncherApp:
         self._monitor_after_id: str | None = None
         self._owns_root = root is None
         self.root = root or tk.Tk()
-        # The width the launcher sized the window to at startup, and the one it
-        # may still grow to once for the journal (see ``_fit_width_to_journal``).
-        self._owned_width = 0
-        self._journal_card: tk.Frame | None = None
-        self._paned: ttk.PanedWindow | None = None
         self.browser_opener = browser_opener
         self.events: queue.Queue[tuple[Callable[[], None], Exception | None]] = queue.Queue()
         self._closing = False
@@ -488,86 +668,46 @@ class LauncherApp:
                 pass
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _fit_width_to_journal(self) -> None:
-        """Give the journal's pane the width its table asks for.
+    def _build_list_column(self, parent: tk.Misc) -> tk.Widget:
+        """Build the workspace-list column, the board's left pane.
 
-        A ``ttk.PanedWindow`` does not size a pane from its content: once laid
-        out, a pane keeps the width it was given and only the *sash* moves it
-        (measured: an unweighted journal pane stayed at its 491px first layout
-        in every window, 1000px or 1600px, so the table was cut whatever the
-        window's size). So the split is driven from the table's own footprint on
-        every fit, and it is one-directional: the journal is never given *less*
-        than its table, and any extra the user leaves it (or takes for the list
-        with the sash) is left alone.
-
-        When the window cannot hold both — a 1366px screen opens the launcher at
-        1000px and a long message needs 1114 — the launcher still owns the window
-        at that point, so it grows it once, by exactly the shortfall and never
-        past the display. After that the window is the user's: any width the
-        launcher did not set itself (a resize, a drag of the edge) ends the grow
-        for good, so a longer message arriving later never drags the window
-        along.
+        *parent* is the paned window itself: Tk only accepts a **descendant** of
+        a paned window as a pane, so the card cannot be built on the root and
+        handed over afterwards. The list's own rows are added by ``_build_ui``
+        once the board exists.
         """
-        if self._journal_card is None or self._paned is None:
-            return
-        with contextlib.suppress(Exception):
-            card = self._journal_card
-            paned = self._paned
-            # The card *is* the paned window's pane (ttk manages the widget handed
-            # to ``add`` directly), so its own request is the table's footprint and
-            # its own width is what the split gave it.
-            need = int(card.winfo_reqwidth())
-            if int(card.winfo_width()) >= need:
-                return
-            available = int(paned.winfo_width())
-            if available - need < _LIST_PANE_MINIMUM:
-                # The root's own chrome (the paned window's padding) is measured,
-                # not guessed: the grow has to buy the list its floor too.
-                chrome = max(int(self.root.winfo_width()) - available, 0)
-                self._grow_window_for(need + _LIST_PANE_MINIMUM + chrome)
-                available = int(paned.winfo_width())
-            if available < need:
-                # Too narrow even for the table alone (a 1024px display): the
-                # columns stay exact, the last one is cut, and the sash remains the
-                # escape hatch.
-                return
-            paned.sashpos(0, max(available - need, 0))
-            # A pane is what the window has left *minus* the sash handle and its own
-            # border, so the split lands a few pixels short of what the card asked
-            # for. That chrome is measured, never guessed, and taken off the sash
-            # in one correction — after the split has been flushed, since a widget
-            # answers a geometry question from the layout it last computed.
-            self.root.update_idletasks()
-            chrome = available - int(paned.sashpos(0)) - int(card.winfo_width())
-            if chrome > 0:
-                paned.sashpos(0, max(available - need - chrome, 0))
+        card = tk.Frame(parent, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        self._list_canvas = tk.Canvas(card, bg=SURFACE, highlightthickness=0)
+        self._list_canvas.pack(fill="both", expand=True, padx=SPACE_SM, pady=SPACE_SM)
+        return card
 
-    def _grow_window_for(self, needed: int) -> None:
-        """Widen the window to *needed* pixels, once, and only while we own it."""
-        if not self._owns_root:
-            return
-        with contextlib.suppress(Exception):
-            width = int(self.root.winfo_width())
-            if width != self._owned_width or needed <= width:
-                return
-            screen_width, _ = screen_size(self.root)
-            target = needed
-            if screen_width > 1:
-                target = min(target, screen_width)
-            if target <= width:
-                return
-            self.root.geometry(f"{target}x{int(self.root.winfo_height())}")
-            self.root.update_idletasks()
-            self._owned_width = target
-            # A size-only geometry keeps the corner, so the window only moves
-            # when growing would push its right edge off the display.
-            x, y = int(self.root.winfo_x()), int(self.root.winfo_y())
-            if screen_width > 1 and x + target > screen_width:
-                self.root.geometry(f"+{max(screen_width - target, 0)}+{y}")
-            self.root.update_idletasks()
+    def _build_journal_column(self, parent: tk.Misc) -> tk.Widget:
+        """Build the journal column, the board's right pane.
+
+        The panel asks for exactly what its table needs, so the column carries no
+        weight in the split: the width is the board's decision, from the room the
+        window really has, and the table refits itself to whatever it is given.
+        """
+        card = tk.Frame(parent, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        self._monitor_panel = monitoring.MonitoringPanel(
+            card,
+            on_export=self._export_monitor,
+            # Read late: the board is still being constructed by the time the
+            # panel asks for it, and the rail's control is clicked much later.
+            on_expand=lambda: self._board and self._board.toggle_journal(),
+            tooltip=self._attach_tooltip,
+        )
+        self._monitor_panel.pack(fill="both", expand=True)
+        return card
+
+    def _on_journal_rail(self, rail: bool) -> None:
+        """Show or hide the journal's contents when the board collapses it."""
+        if self._monitor_panel is not None:
+            self._monitor_panel.set_rail(rail)
 
     def _build_ui(self) -> None:
         accent_bar = tk.Frame(self.root, bg=ACCENT, height=4)
+        self._accent_bar = accent_bar
         accent_bar.pack(fill="x", side="top")
         with contextlib.suppress(Exception):
             accent_bar.pack_propagate(False)
@@ -592,7 +732,8 @@ class LauncherApp:
             anchor="w",
         )
         self._subtitle.pack(side="left", fill="x")
-        status_border = tk.Frame(self.root, bg=BORDER_STRONG, height=1)
+        status_border = tk.Frame(self.root, bg=BORDER_STRONG, height=HAIRLINE)
+        self._status_border = status_border
         status_border.pack(fill="x", side="bottom")
         self._status_label = tk.Label(
             self.root,
@@ -602,55 +743,24 @@ class LauncherApp:
             font=FONT_STATUS,
             anchor="w",
             padx=20,
-            pady=6,
+            pady=SPACE_SM,
         )
         self._status_label.pack(fill="x", side="bottom")
 
-        content = ttk.PanedWindow(self.root, orient="horizontal")
-        content.pack(fill="both", expand=True, padx=18, pady=(8, 16))
-        self._paned = content
-
-        # The left pane is a notebook: the workspace list is its permanent home
-        # tab, and every information view (CI, server supervision) opens as a
-        # tab of its own next to it — see gui.pages. The journal panel stays on
-        # the right, so a page is read with the log that explains it.
-        self._pages = pages.PageHost(
-            content,
-            home_factory=lambda notebook: tk.Frame(
-                notebook,
-                bg=SURFACE,
-                highlightthickness=1,
-                highlightbackground=BORDER,
-            ),
+        # The dashboard: the workspace list on the left, the dock of open pages in
+        # the middle (empty until a page is opened) and the journal on the right.
+        # The board owns the split, so a window resize re-decides the three
+        # widths instead of freezing them at the layout they were built with.
+        self._board = board.Board(
+            self.root,
+            list_factory=self._build_list_column,
+            journal_factory=self._build_journal_column,
             on_activate=self._on_page_activated,
+            on_journal_toggle=self._on_journal_rail,
         )
-        content.add(self._pages.notebook, weight=3)
-        card = self._pages.home
-        self._list_canvas = tk.Canvas(card, bg=SURFACE, highlightthickness=0)
-        self._list_canvas.pack(fill="both", expand=True, padx=6, pady=6)
-
-        monitor_card = tk.Frame(
-            content,
-            bg=SURFACE,
-            highlightthickness=1,
-            highlightbackground=BORDER,
-        )
-        # The journal asks for exactly what its table needs (the panel follows
-        # the fitter's total), so it carries no weight: a pane with a weight is
-        # handed part of the room the content did not ask for, which is what
-        # stretched the table's header row past its columns, and part of the
-        # squeeze when the window is narrow, which cut them off. The workspace
-        # list takes the rest and the sash stays the user's to move.
-        content.add(monitor_card, weight=0)
-        self._journal_card = monitor_card
-        self._monitor_panel = monitoring.MonitoringPanel(
-            monitor_card,
-            on_export=self._export_monitor,
-            on_fitted=self._fit_width_to_journal,
-            tooltip=self._attach_tooltip,
-        )
-        self._monitor_panel.pack(fill="both", expand=True)
-        self.workspace_list = tk.Frame(self._list_canvas, bg=SURFACE)
+        self._board.pane.pack(fill="both", expand=True, padx=GUTTER, pady=(SPACE_MD, SPACE_3XL))
+        card = self._board.list_card
+        self.workspace_list = tk.Frame(card, bg=SURFACE)
         self._list_window = self._list_canvas.create_window(
             0, 0, window=self.workspace_list, anchor="nw"
         )
@@ -761,7 +871,7 @@ class LauncherApp:
             width=2,
             height=1,
         )
-        badge.pack(pady=(0, 10))
+        badge.pack(pady=(0, SPACE_LG))
         title = tk.Label(
             card,
             text="Créer un workflow",
@@ -776,7 +886,7 @@ class LauncherApp:
             bg=SURFACE_HOVER,
             fg=TEXT_MUTED,
             font=FONT_META,
-            pady=4,
+            pady=SPACE_TIGHT,
         )
         subtitle.pack()
 
@@ -821,7 +931,7 @@ class LauncherApp:
             fg=TEXT_MUTED,
             font=FONT_EMPTY_BADGE,
         )
-        badge.pack(anchor="center", padx=8, pady=6)
+        badge.pack(anchor="center", padx=SPACE_MD, pady=SPACE_SM)
         for widget in (strip, badge):
             widget.bind("<Button-1>", lambda _event: self.prompt_create_workflow())
             with contextlib.suppress(Exception):
@@ -845,7 +955,7 @@ class LauncherApp:
             with contextlib.suppress(Exception):
                 self._list_canvas.itemconfigure(self._list_window, height=0)
             self._create_affordance.pack_forget()
-            self._create_affordance.pack(fill="x", padx=3, pady=(8, 6))
+            self._create_affordance.pack(fill="x", padx=BORDER_INSET, pady=(SPACE_MD, SPACE_SM))
 
     def _build_row(self, workspace: Workspace) -> tuple[RowFrame, tk.Label]:
         if workspace.id == self._selected_id:
@@ -860,7 +970,7 @@ class LauncherApp:
             highlightthickness=1,
             highlightbackground=border,
         )
-        row.pack(fill="x", pady=4, padx=3)
+        row.pack(fill="x", pady=SPACE_TIGHT, padx=BORDER_INSET)
 
         name_label = tk.Label(
             row,
@@ -869,7 +979,7 @@ class LauncherApp:
             fg=TEXT_PRIMARY,
             font=FONT_ROWS,
             anchor="w",
-            padx=8,
+            padx=SPACE_MD,
         )
 
         git_status = display.git_row_status(workspace)
@@ -909,9 +1019,6 @@ class LauncherApp:
             command=action_command,  # type: ignore[arg-type]  # ttk accepts None for an empty command; typeshed only allows str/callable
         )
         action_button.pack(side="right", padx=(_CHIP_GAP + 2, 0))
-
-        port_chip = self._chip(row, text=f":{workspace.port}", palette=CHIP_NEUTRAL)
-        port_chip.pack(side="right", padx=(_CHIP_GAP, 0))
 
         db_palette = CHIP_ACTIVE if display.db_connected(workspace) else CHIP_INACTIVE
         db_chip = self._chip(row, text=display.db_label(workspace), palette=db_palette)
@@ -953,9 +1060,12 @@ class LauncherApp:
         )
         self._attach_tooltip(server_chip, display.server_tooltip(workspace))
 
-        pipelines = display.pipelines_count(workspace.workflows_dir)
-        pipelines_chip = self._chip(row, text=str(pipelines), palette=CHIP_NEUTRAL)
-        pipelines_chip.pack(side="right", padx=(_CHIP_GAP, 0))
+        # The details a row cannot afford to show always sit in one place, in
+        # ``overflow``: the chip is packed once, and what changes with the width
+        # is its own label and the lines it opens.
+        overflow_chip = self._chip(row, text="", palette=CHIP_NEUTRAL)
+        overflow_chip.pack(side="right", padx=(_CHIP_GAP, 0))
+        overflow_chip.configure(cursor="hand2")
 
         name_label.bind("<Button-1>", lambda _event, wid=workspace.id: self._on_row_click(wid))
         name_label.bind(
@@ -980,19 +1090,27 @@ class LauncherApp:
             pass
 
         frame = cast(RowFrame, row)
+        frame.workspace_id = workspace.id
         frame.name_label = name_label
         frame.db_chip = db_chip
         frame.git_chip = git_chip
         frame.ci_chip = ci_chip
         frame.server_chip = server_chip
-        frame.port_chip = port_chip
-        frame.pipelines_chip = pipelines_chip
+        frame.overflow_chip = overflow_chip
         frame.action_button = action_button
         frame.dirty_dot = dirty_dot
-        # Set before the first cut: the row is not in ``self._rows`` until the
-        # caller stores it, so the name and its tooltip are seeded here rather
-        # than through ``_fit_row_name`` (which looks the row up by id).
+        frame.overflow = []
+        frame.popover = None
         frame.full_name = workspace.name
+        self._attach_tooltip(overflow_chip, "Détails du workspace")
+        overflow_chip.bind(
+            "<Button-1>",
+            lambda _event, wid=workspace.id: self._toggle_overflow(wid),
+        )
+        # Seeded before the first cut: the row is not in ``self._rows`` until the
+        # caller stores it, so the name and its tooltip are set here rather than
+        # through ``_fit_row_name`` (which looks the row up by id). The same goes
+        # for the overflow, which is decided from the list's own width.
         self._attach_tooltip(frame.name_label, display.row_tooltip(workspace))
         self._fit_label(frame)
         return frame, name_label
@@ -1023,6 +1141,7 @@ class LauncherApp:
         An unmapped label reports a width of 1, which leaves the name intact
         until the real size is known.
         """
+        self._fit_row_overflow(row)
         label = row.name_label
         try:
             width = label.winfo_width()
@@ -1036,6 +1155,118 @@ class LauncherApp:
             pass
         with contextlib.suppress(Exception):
             label.config(text=text)
+
+    def _fit_row_overflow(self, row: RowFrame) -> None:
+        """Decide which optional details this row cannot show, and relabel the chip.
+
+        The room is the list's own mapped width, the essentials are the chips
+        that are never dropped (db, git, CI, server) plus the action button, and
+        the name is the one field allowed to yield — so a detail is hidden only
+        while the name would fall below ``_ROW_NAME_MINIMUM``.
+
+        Every width here is *measured* off the widget — its mapped width once it
+        has one, its own request before that — because a chip is not the width
+        of its text: it carries ``_CHIP_PADX`` of padding on each side and a
+        highlight, and the action button is padded like a button. Guessing from
+        the text would under-count the essentials and hide a detail the row
+        actually had room for.
+
+        Nothing is rebuilt: the same chip is already packed, and only its own
+        label and the lines it opens change. That is deliberate — packing and
+        forgetting widgets on every resize is how a row ends up with a chip in
+        the wrong place.
+        """
+        if row.overflow_chip is None:
+            return
+        room = self._list_room()
+        if room <= 1:
+            return
+        essentials = sum(
+            self._widget_room(widget) + _CHIP_GAP
+            for widget in (
+                row.db_chip,
+                row.git_chip,
+                row.ci_chip,
+                row.server_chip,
+                row.action_button,
+                row.overflow_chip,
+            )
+        )
+        try:
+            details = display.row_details(self._row_workspace(row))
+        except LookupError:
+            return
+        hidden = display.overflow_details(
+            room=room,
+            essentials=essentials,
+            details=[(name, self._measure(value) + 2 * _CHIP_PADX) for name, value in details],
+            name_minimum=_ROW_NAME_MINIMUM,
+        )
+        if hidden == row.overflow:
+            return
+        row.overflow = hidden
+        with contextlib.suppress(Exception):
+            row.overflow_chip.config(text=f"+{len(hidden)}" if hidden else "")
+        if row.popover is not None:
+            # An open popover is showing lines that are no longer hidden, and the
+            # reference goes with it: a row whose chip still held a dismissed
+            # popover could never open another one.
+            row.popover.dismiss()
+            row.popover = None
+
+    def _widget_room(self, widget: tk.Misc) -> int:
+        """Return the width a packed widget really occupies.
+
+        The mapped width is what it is right now, the request is what it would
+        take before Tk has laid it out, and the text is only the last resort for a
+        widget that reports neither (an unmapped chip in a test double).
+        """
+        for read in ("winfo_width", "winfo_reqwidth"):
+            with contextlib.suppress(Exception):
+                value = int(getattr(widget, read)())
+                if value > 1:
+                    return value
+        with contextlib.suppress(Exception):
+            return self._measure(str(widget.cget("text")))
+        return 0
+
+    def _row_workspace(self, row: RowFrame) -> Workspace:
+        """Return the workspace a row was built for.
+
+        Read from the manager rather than cached on the frame: the row already
+        re-reads the workspace on every refresh (a rename, a new port, a new
+        state), and a second copy here would be a second thing to keep in step.
+        """
+        for workspace in self.workspace_manager.list():
+            if workspace.id == row.workspace_id:
+                return workspace
+        raise LookupError(row.workspace_id)
+
+    def _list_room(self) -> int:
+        """The width a row really has, or 0 when the list is not laid out yet."""
+        with contextlib.suppress(Exception):
+            return max(int(self._list_canvas.winfo_width()), 0)
+        return 0
+
+    def _toggle_overflow(self, workspace_id: str) -> None:
+        """Open the row's detail popover, or close the one it already shows."""
+        entry = self._rows.get(workspace_id)
+        if entry is None:
+            return
+        row = entry[0]
+        if row.popover is not None:
+            row.popover.dismiss()
+            row.popover = None
+            return
+        if not row.overflow:
+            return
+        try:
+            labels = dict(display.row_details(self._row_workspace(row)))
+        except LookupError:
+            return
+        lines = [f"{_OVERFLOW_LABELS.get(name, name)} : {labels[name]}" for name in row.overflow]
+        with contextlib.suppress(Exception):
+            row.popover = _ChipOverflow(self.root, row.overflow_chip, lines)
 
     @staticmethod
     def _chip(
@@ -1098,8 +1329,6 @@ class LauncherApp:
             if tip is not None:
                 return
             try:
-                x = widget.winfo_rootx() + 12
-                y = widget.winfo_rooty() + widget.winfo_height() + 4
                 tip = tk.Toplevel(self.root)
                 tip.wm_overrideredirect(True)
                 label = tk.Label(
@@ -1108,13 +1337,13 @@ class LauncherApp:
                     bg=SURFACE_HOVER,
                     fg=TEXT_PRIMARY,
                     relief="solid",
-                    borderwidth=1,
+                    borderwidth=HAIRLINE,
                     font=FONT_META,
-                    padx=8,
-                    pady=4,
+                    padx=SPACE_MD,
+                    pady=SPACE_TIGHT,
                 )
                 label.pack()
-                tip.geometry(f"+{x}+{y}")
+                tip.geometry(self._tooltip_geometry(widget, label))
             except Exception:
                 tip = None
 
@@ -1132,6 +1361,19 @@ class LauncherApp:
 
         widget.bind("<Enter>", on_enter)
         widget.bind("<Leave>", on_leave)
+
+    def _tooltip_geometry(self, widget: tk.Misc, label: tk.Label) -> str:
+        """Return where to show a tooltip for *widget* so it stays on screen."""
+        x, y = clamp_to_screen(
+            anchor_x=widget.winfo_rootx(),
+            anchor_y=widget.winfo_rooty(),
+            anchor_height=widget.winfo_height(),
+            width=label.winfo_reqwidth(),
+            height=label.winfo_reqheight(),
+            screen_width=self.root.winfo_screenwidth(),
+            screen_height=self.root.winfo_screenheight(),
+        )
+        return f"+{x}+{y}"
 
     def _make_toggle_action(self, workspace_id: str) -> Callable[[], None]:
         """Build a zero-argument callback bound to a row button.
@@ -1296,9 +1538,6 @@ class LauncherApp:
             cursor="arrow" if action_state == "disabled" else "hand2",
         )
 
-        row.port_chip.config(text=f":{workspace.port}")
-        row.pipelines_chip.config(text=str(display.pipelines_count(workspace.workflows_dir)))
-
         db_connected_now = display.db_connected(workspace)
         row.db_chip.config(
             text=display.db_label(workspace),
@@ -1434,10 +1673,10 @@ class LauncherApp:
         self._apply_selection_styles()
         self._render_monitor()
         workspace = self._selected_workspace()
-        if self._pages is not None and workspace is not None:
+        if self._board is not None and workspace is not None:
             # Open pages follow the list selection instead of pinning
             # themselves to the workspace they were opened for.
-            self._pages.retarget(workspace)
+            self._board.dock.retarget(workspace)
         if workspace is None:
             self.set_status("Journal — tous les workspaces")
             return
@@ -1829,20 +2068,23 @@ class LauncherApp:
         self._open_server_page(workspace)
 
     def _open_server_page(self, workspace: Workspace) -> None:
-        """Show the "Serveur" tab for *workspace*, building it on first use.
+        """Show the server view for *workspace* in the dock, built on first use.
+
+        The view is born in the card the dock hands it — the factory's *parent*
+        is the card's own body, never the dock or the paned window, because a
+        widget cannot be re-parented afterwards.
 
         Bound to the app's supervision machinery directly rather than through
         per-workspace closures: the page is retargeted when the list selection
         moves, so every callback takes the workspace it is meant to read.
         """
-        if self._pages is None:
+        if self._board is None:
             return
-        notebook = self._pages.notebook
-        self._pages.open(
+        self._board.dock.open(
             PageKind.SERVER,
             workspace,
-            lambda _workspace: server_page.ServerPage(
-                notebook,
+            lambda _workspace, parent: server_page.ServerPage(
+                parent,
                 source=self._server_cached_snapshot,
                 refresh=self._refresh_server_snapshot,
                 available=lambda item: item.server.enabled,
@@ -2076,20 +2318,19 @@ class LauncherApp:
         self._run_async(action, on_success=on_success)
 
     def _open_ci_page(self, workspace: Workspace) -> None:
-        """Show the CI tab for *workspace*, building it on first use.
+        """Show the CI view for *workspace* in the dock, built on first use.
 
         The page is bound to this app's runs machinery directly rather than
         through per-workspace closures: it is retargeted when the list selection
         moves, so every callback takes the workspace it is meant to read for.
         """
-        if self._pages is None:
+        if self._board is None:
             return
-        notebook = self._pages.notebook
-        self._pages.open(
+        self._board.dock.open(
             PageKind.CI,
             workspace,
-            lambda _workspace: ci_page.CiPage(
-                notebook,
+            lambda _workspace, parent: ci_page.CiPage(
+                parent,
                 on_save=self._save_ci_selection,
                 runs_source=self._ci_cached_snapshot,
                 runs_refresh=self._refresh_ci_runs,

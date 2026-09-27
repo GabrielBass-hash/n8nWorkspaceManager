@@ -1,22 +1,22 @@
-"""The CI page: pipeline selection and run history, as a tab of the main window.
+"""The CI panel: pipeline selection and run history, on the dashboard.
 
 This is what :func:`n8n_launcher.gui.ci_edit.prompt_ci_workflows` used to be: a
 pipeline tree the user ticks to decide what GitHub Actions runs, plus a
-read-only view of the runs it produced. The two live side by side in one page,
-in the main window, so the workspace list and the journal stay visible while the
-user works on them.
+read-only view of the runs it produced. The two are stacked in one panel of the
+launcher's dashboard (see :mod:`n8n_launcher.gui.board`), split by a sash, so
+the workspace list, the selection and the journal are all on screen at once.
 
-The page is a :class:`~n8n_launcher.gui.pages.Page`, and it differs from a plain
+The panel is a :class:`~n8n_launcher.gui.pages.Page`, and it differs from a plain
 frame in two ways that matter:
 
 * it is *retargeted*. Selecting another workspace in the list reloads
-  ``tests.json`` and the export files, so the page follows the selection rather
+  ``tests.json`` and the export files, so the panel follows the selection rather
   than showing the workspace it was opened for. Unsaved ticks are deliberately
   dropped on the way: the file on disk is the truth, and a silent mix of two
   workspaces' selections would be worse than losing the edits.
-* it owns timers. The runs tab polls GitHub on its own cadence (5 s while a run
-  is in flight, 30 s otherwise), and :meth:`CiPage.on_close` stops that loop —
-  without it Tk would keep firing against destroyed widgets once the tab is
+* it owns timers. The run history polls GitHub on its own cadence (5 s while a
+  run is in flight, 30 s otherwise), and :meth:`CiPage.on_close` stops that loop —
+  without it Tk would keep firing against destroyed widgets once the card is
   closed.
 """
 
@@ -30,6 +30,7 @@ from typing import Any
 
 from ..core.models import Workspace
 from ..workspaces import ci, ci_runs
+from .board import Card
 from .ci_runs import RunsPanel
 from .layout import ColumnFitter, bind_wraplength, ellipsize, wrap_at
 from .pages import PageSubject, log_page_event
@@ -40,8 +41,14 @@ from .theme import (
     TEXT_PRIMARY,
     text_measure,
 )
+from .tokens import (
+    GUTTER,
+    SPACE_2XL,
+    SPACE_LG,
+    SPACE_MD,
+)
 
-# The subject the journal filters on while this tab is the visible one: the CI
+# The subject the journal filters on while this card is the focused one: the CI
 # setup, its credentials and its runs. Every action taken here is journalled
 # through ``log_page_event``, so those events are what this filter finds.
 CI_SUBJECT = PageSubject("Tests CI", ("CI", "GitHub"))
@@ -52,9 +59,9 @@ _COLOR_DISABLED = TEXT_MUTED
 
 # Pipeline selection tree: the label column holds the export file name and its
 # indented node names, "Détails" the node count and the reason a pipeline is
-# blocked. Both are sized to their content by the fitter (see ``gui.layout``).
-# The maximums stay the ones the dialog used: the runs tree shares the same left
-# pane, so both must fit beside the journal.
+# blocked. Both are sized to their content by the fitter, which fits them to the
+# card the dock gives this page (see ``gui.layout``). The label column is the
+# flexible one: pipeline names are prose, the node count is a counter.
 _SELECTION_COLUMNS = ("detail",)
 _SELECTION_HEADINGS = {"#0": "Pipeline", "detail": "Détails"}
 _SELECTION_MINIMUMS = {"#0": 260, "detail": 180}
@@ -63,7 +70,13 @@ _SELECTION_MAXIMUMS = {"#0": 420, "detail": 520}
 # The margin every child of the panel is packed with: the intros, the table and
 # the counter share it, so the panel's request is the table's width plus twice
 # this and nothing else.
-_SELECTION_PADX = 18
+_SELECTION_PADX = GUTTER
+
+# What a bulk button costs around its label (padding, border and the theme's own
+# margins), and the gap between two of them. Used to count how many fit on a
+# line; the button is never cut, it moves to the next row instead.
+_ACTION_BUTTON_CHROME = 34
+_ACTION_GAP = SPACE_MD
 
 # Per-pipeline state markers. Plain ASCII on purpose: the box glyphs ☐/☑
 # (U+2610/U+2611) and the en dash fallback are absent from the Linux font
@@ -73,7 +86,7 @@ _CHECKBOX = "[x]"
 _CHECKBOX_EMPTY = "[ ]"
 _BLOCKED = "-"
 
-# Auto-refresh cadence of the runs tab: quick while a run is in flight (that's
+# Auto-refresh cadence of the runs card: quick while a run is in flight (that's
 # the phase the user watches), much slower otherwise to spare the API.
 NO_REMOTE_NOTE = (
     "Ce workspace n'a pas de dépôt GitHub : les exécutions de la CI ne peuvent pas y être lues."
@@ -167,6 +180,8 @@ class CiSelectionPanel(tk.Frame):
             maximums=_SELECTION_MAXIMUMS,
             measure=text_measure(self, FONT_META),
             container=self,
+            available=self._table_room,
+            flexible="#0",
         )
         tree.configure(selectmode="none")
         for tag, color in (
@@ -175,7 +190,7 @@ class CiSelectionPanel(tk.Frame):
             ("muted", _COLOR_DISABLED),
         ):
             tree.tag_configure(tag, foreground=color)
-        tree.pack(fill="y", anchor="nw", expand=True, padx=_SELECTION_PADX, pady=(0, 8))
+        tree.pack(fill="y", anchor="nw", expand=True, padx=_SELECTION_PADX, pady=(0, SPACE_MD))
         tree.bind("<Button-1>", self._on_tree_click)
         self._tree = tree
 
@@ -188,22 +203,29 @@ class CiSelectionPanel(tk.Frame):
             font=FONT_META,
             anchor="w",
         )
-        self._counter.pack(fill="x", padx=_SELECTION_PADX, pady=(0, 8))
+        self._counter.pack(fill="x", padx=_SELECTION_PADX, pady=(0, SPACE_MD))
 
         actions = tk.Frame(self, bg=APP_BACKGROUND)
-        actions.pack(fill="x", padx=18, pady=(0, 14))
-        for text, command in (
-            ("Tout cocher (éligibles)", self.select_all),
-            ("Tout décocher", self.clear_all),
-            ("Enregistrer", self.save),
+        actions.pack(fill="x", padx=GUTTER, pady=(0, SPACE_2XL))
+        # The three buttons reflow instead of overflowing: right-packed in a row
+        # they are the one part of the panel that cannot shrink, so a narrow card
+        # pushed them out of it. ``grid`` with a column count that follows the
+        # room is the responsive form of the same three buttons.
+        self._actions = actions
+        self._action_buttons: list[ttk.Button] = []
+        self._action_labels: list[str] = []
+        self._action_columns = 0
+        for text, command, style in (
+            ("Tout cocher (éligibles)", self.select_all, "Secondary.TButton"),
+            ("Tout décocher", self.clear_all, "Secondary.TButton"),
+            ("Enregistrer", self.save, "Surface.TButton"),
         ):
-            ttk.Button(
-                actions,
-                text=text,
-                style="Surface.TButton" if command is self.save else "Secondary.TButton",
-                cursor="hand2",
-                command=command,
-            ).pack(side="right", padx=(6, 0))
+            self._action_labels.append(text)
+            self._action_buttons.append(
+                ttk.Button(actions, text=text, style=style, cursor="hand2", command=command)
+            )
+        self._relayout_actions()
+        actions.bind("<Configure>", lambda _event: self._relayout_actions())
 
         hint = tk.Label(
             self,
@@ -218,7 +240,77 @@ class CiSelectionPanel(tk.Frame):
             anchor="w",
         )
         bind_wraplength(hint, minimum=200, padding=36)
-        hint.pack(fill="x", padx=18, pady=(0, 10))
+        hint.pack(fill="x", padx=GUTTER, pady=(0, SPACE_LG))
+
+    # -------------------------------------------------------------- responsive
+    def _table_room(self) -> int:
+        """Return the pixels the pipeline tree has, margins deducted.
+
+        The panel is the card the dashboard gives this page, so its mapped width
+        is the tree's budget: the dock decides how wide the card is and the
+        columns are fitted to that. A panel Tk has not measured yet reports 1,
+        which the fitter reads as "no budget yet" and leaves the tree on its
+        pure content sizing.
+        """
+        with contextlib.suppress(Exception):
+            return max(int(self.winfo_width()) - 2 * _SELECTION_PADX, 1)
+        return 1
+
+    def _action_columns_for(self, room: int) -> int:
+        """Return how many of the three bulk buttons fit side by side in *room*.
+
+        A button's own width is measured from its label plus the theme's chrome,
+        so the count follows the card instead of a hard-coded assumption about
+        how wide a button is. Three columns on a wide card, two then one as it
+        narrows — which is the whole reflow, since the buttons themselves are
+        never cut.
+        """
+        measure = text_measure(self, FONT_META)
+        widest = (
+            max((measure(text) for text in self._action_labels), default=0) + _ACTION_BUTTON_CHROME
+        )
+        for columns in (3, 2, 1):
+            needed = columns * widest + (columns - 1) * _ACTION_GAP
+            if needed <= room or columns == 1:
+                return columns
+        return 1
+
+    def _relayout_actions(self) -> None:
+        """Place the bulk buttons on the grid their room allows.
+
+        Only a *change* of column count touches the buttons, so a resize that
+        stays on the same layout costs one measurement and nothing else.
+        """
+        room = 0
+        with contextlib.suppress(Exception):
+            room = int(self._actions.winfo_width())
+        if room <= 1:
+            # Tk has not measured the bar yet: the first layout stands, and the
+            # ``<Configure>`` that follows gets the real answer.
+            return
+        columns = self._action_columns_for(room)
+        if columns == self._action_columns:
+            return
+        self._action_columns = columns
+        with contextlib.suppress(Exception):
+            for index, button in enumerate(self._action_buttons):
+                button.grid(
+                    row=index // columns,
+                    column=index % columns,
+                    padx=(0, _ACTION_GAP),
+                    pady=(0, _ACTION_GAP),
+                    sticky="ew",
+                )
+            for index in range(columns):
+                self._actions.grid_columnconfigure(index, weight=1, uniform="actions")
+
+    def table_widths(self) -> dict[str, int]:
+        """Return the column widths the fitter last applied (for the host)."""
+        return self._fitter.widths() if self._fitter is not None else {}
+
+    def minimum_table_width(self) -> int:
+        """Return the narrowest the tree can be, for the dock's breakpoints."""
+        return self._fitter.minimum_total() if self._fitter is not None else 0
 
     # ------------------------------------------------------------------- load
     def load(self, workspace: Workspace) -> None:
@@ -413,7 +505,14 @@ class CiSelectionPanel(tk.Frame):
 
 
 class CiPage(tk.Frame):
-    """The CI tab: the selection tree and the runs history, side by side.
+    """The CI panel: the selection tree and the runs history, stacked.
+
+    The two views used to be two tabs of a notebook nested in the page; they are
+    now two cards of one dashboard panel, split by a sash, so the user sees what
+    is ticked *and* what it produced at the same time. That changes what
+    "visible" means for a page, so the run history is driven by **focus** (see
+    :class:`~n8n_launcher.gui.board.PageDock`): the focused card polls GitHub, the
+    other one does not spend the API budget.
 
     The runs view is fed by the host through four callbacks, all of which take
     the workspace the page is currently showing (a page is retargeted, so they
@@ -444,24 +543,24 @@ class CiPage(tk.Frame):
         runs_run: Callable[[Workspace, RunsPanel], None] | None = None,
         runs_available: Callable[[Workspace], bool] | None = None,
     ) -> None:
-        """Build the two tabs; call :meth:`retarget` to fill them."""
+        """Build the two cards; call :meth:`retarget` to fill them."""
         super().__init__(parent, bg=APP_BACKGROUND)
         self.subject = CI_SUBJECT
         self.workspace: Workspace | None = None
-        # True while this tab is the visible one: a hidden tab must not spend
-        # the GitHub API budget on polling nobody is watching.
+        # True while this card is the focused one: a card the user is not
+        # looking at must not spend the GitHub API budget on polling.
         self._active = False
         self._runs_source = runs_source
         self._runs_refresh = runs_refresh
         # Without a GitHub remote there is nothing to read and nothing to poll:
-        # the tab still exists (it never appears and disappears under the user)
+        # the card still exists (it never appears and disappears under the user)
         # and shows the host's note instead of a failure.
         self._runs_available = runs_available
         self._after_id: str | None = None
         self._closed = False
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
-        header.pack(fill="x", padx=18, pady=(14, 0))
+        header.pack(fill="x", padx=GUTTER, pady=(SPACE_2XL, 0))
         self._title = tk.Label(
             header,
             text="",
@@ -470,17 +569,22 @@ class CiPage(tk.Frame):
             font=FONT_META,
             anchor="w",
         )
-        self._title.pack(side="left")
+        self._title.pack(side="left", fill="x", expand=True)
 
-        self._notebook = ttk.Notebook(self)
-        self._notebook.pack(fill="both", expand=True, padx=18, pady=(8, 14))
-        selection_tab = tk.Frame(self._notebook, bg=APP_BACKGROUND)
-        self._notebook.add(selection_tab, text="Sélection")
-        runs_tab = tk.Frame(self._notebook, bg=APP_BACKGROUND)
-        self._notebook.add(runs_tab, text="Déroulement")
+        # Two cards, one above the other, split by a draggable sash — and no tab
+        # bar. The selection tree and the run history used to be two tabs of a
+        # nested notebook, so only one of them was ever on screen and switching
+        # cost a click; as a dashboard they are both visible and the sash is the
+        # user deciding how much of each it wants.
+        self._split = ttk.PanedWindow(self, orient="vertical")
+        self._split.pack(fill="both", expand=True, padx=GUTTER, pady=(SPACE_MD, SPACE_2XL))
+        selection_card = Card(self._split, title="Sélection")
+        self._split.add(selection_card, weight=3)
+        runs_card = Card(self._split, title="Déroulement")
+        self._split.add(runs_card, weight=2)
 
         self.selection = CiSelectionPanel(
-            selection_tab,
+            selection_card.body(),
             on_save=on_save,
             on_push_prompt=on_push_prompt,
         )
@@ -492,7 +596,7 @@ class CiPage(tk.Frame):
             # callback is bound right after, and the panel cannot be clicked
             # before the page is on screen.
             self.runs_panel = RunsPanel(
-                runs_tab,
+                runs_card.body(),
                 refresh=lambda: None,
                 open_run=lambda _run: None,
                 run=(lambda: None) if runs_run is not None else None,
@@ -503,12 +607,16 @@ class CiPage(tk.Frame):
             if runs_run is not None:
                 panel = self.runs_panel
                 panel.run_cb = lambda: runs_run(self._require_workspace(), panel)
+        else:
+            # Nothing to show in the lower card without a runs source: the sash
+            # would divide the page between a tree and an empty frame.
+            self._split.forget(runs_card)
 
     # ------------------------------------------------------------------- page
     def retarget(self, workspace: Workspace) -> None:
         """Follow the list selection to *workspace*.
 
-        Both tabs reload: the tree re-reads ``tests.json`` and the export files,
+        Both cards reload: the tree re-reads ``tests.json`` and the export files,
         and the runs panel is served from the cache of that workspace before any
         fetch is started.
         """
@@ -516,7 +624,7 @@ class CiPage(tk.Frame):
         self._title.config(text=f"Tests GitHub Actions — workspace « {workspace.name} »")
         self.selection.load(workspace)
         if self.runs_panel is not None and not self._runs_readable(workspace):
-            # No GitHub remote: the tab stays, but it shows the note and stops
+            # No GitHub remote: the card stays, but it shows the note and stops
             # polling rather than asking for runs that can never be there.
             self._cancel_poll()
             self.runs_panel.apply(ci_runs.RunsSnapshot(repo_path="", note=NO_REMOTE_NOTE))
@@ -526,12 +634,12 @@ class CiPage(tk.Frame):
             if source is not None:
                 self.runs_panel.apply(source(workspace))
             if self._active:
-                # Visible tab: the workspace just changed under the user, so the
+                # Focused card: the workspace just changed under the user, so the
                 # cache shown is stale and a fetch is worth its call.
                 self._refresh_runs()
 
     def on_show(self) -> None:
-        """Refresh the runs when the tab becomes the visible one."""
+        """Refresh the runs when this card becomes the focused one."""
         self._active = True
         if self._closed or self.runs_panel is None or self.workspace is None:
             return
@@ -545,10 +653,10 @@ class CiPage(tk.Frame):
         self._cancel_poll()
 
     def on_close(self) -> None:
-        """Stop the runs poll before the tab goes away.
+        """Stop the runs poll before the card goes away.
 
         Without this Tk would keep firing the tick against destroyed widgets
-        after the tab is closed — the same reason the dialog relied on its
+        after the card is closed — the same reason the dialog relied on its
         ``winfo_exists`` guard.
         """
         self._closed = True
@@ -570,7 +678,7 @@ class CiPage(tk.Frame):
         try:
             return bool(self._runs_available(workspace))
         except Exception:
-            # An unreadable remote is not a reason to crash a tab: the poll is
+            # An unreadable remote is not a reason to crash a card: the poll is
             # simply skipped, and the next retarget decides again.
             return False
 

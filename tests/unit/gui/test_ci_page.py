@@ -15,8 +15,10 @@ from helpers import (
     FakeTk,
     FakeTtk,
     all_labels,
+    fake_board_bases,
     fake_ci_page_bases,
     fake_runs_panel_bases,
+    fire,
     make_workspace,
 )
 
@@ -105,9 +107,11 @@ def _active_run_snapshot() -> ci_runs.RunsSnapshot:
 def _fake_page_gui():
     """Rebase the page classes and swap the modules they build widgets with."""
     with ExitStack() as stack:
-        for module in ("ci_page", "ci_runs"):
+        # The page's two views are cards of its own, built by the dashboard.
+        for module in ("board", "ci_page", "ci_runs"):
             stack.enter_context(patch(f"n8n_launcher.gui.{module}.tk", FakeTk()))
             stack.enter_context(patch(f"n8n_launcher.gui.{module}.ttk", FakeTtk()))
+        stack.enter_context(fake_board_bases())
         stack.enter_context(fake_ci_page_bases())
         stack.enter_context(fake_runs_panel_bases())
         yield stack.enter_context(
@@ -229,7 +233,7 @@ def test_clicking_the_expander_does_not_tick_the_pipeline(tmp_path) -> None:
     rel = "n8nPipelines/manual.json"
     before = tree.item(rel)["text"]
     tree.element = "Treeitem.indicator"
-    tree._bindings["<Button-1>"](SimpleNamespace(x=5, y=5))
+    fire(tree, "<Button-1>", SimpleNamespace(x=5, y=5))
 
     assert tree.item(rel)["text"] == before
 
@@ -374,7 +378,7 @@ def test_pipeline_hint_wraps_at_the_page_width(tmp_path) -> None:
         for label in all_labels()
         if "pipeline non testable" in str(label._options.get("text", ""))
     )
-    hint._bindings["<Configure>"](SimpleNamespace(width=900))
+    fire(hint, "<Configure>", SimpleNamespace(width=900))
 
     # 864 = 900 - the 18px padding on each side of the panel.
     assert hint._options["wraplength"] == 864
@@ -386,8 +390,12 @@ def _page(tmp_path, workspace, **kwargs) -> CiPage:
         return CiPage(FakeTk.Frame(None), **kwargs)
 
 
-def test_the_page_has_a_selection_tab_and_a_runs_tab(tmp_path) -> None:
+def test_the_page_stacks_its_two_views_in_a_sash(tmp_path) -> None:
+    # The two views are cards of one panel, split by a draggable sash, and no
+    # tab bar: both are on screen so a ticked pipeline can be read next to the
+    # run it produced.
     workspace = _workspace_with(tmp_path, {"n8nPipelines/manual.json": _MANUAL})
+    FakeTtk.PanedWindow.instances.clear()
     FakeTtk.Notebook.instances.clear()
 
     with _fake_page_gui():
@@ -398,8 +406,9 @@ def test_the_page_has_a_selection_tab_and_a_runs_tab(tmp_path) -> None:
         )
         page.retarget(workspace)
 
-    notebook = FakeTtk.Notebook.instances[0]
-    assert [tab["text"] for tab in notebook._tabs] == ["Sélection", "Déroulement"]
+    assert not FakeTtk.Notebook.instances
+    panes = FakeTtk.PanedWindow.instances[0]
+    assert len(panes.panes()) == 2
     assert page.subject is ci_page.CI_SUBJECT
 
 

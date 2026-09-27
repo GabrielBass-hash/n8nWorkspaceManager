@@ -26,6 +26,7 @@ from n8n_launcher.gui import monitoring
 from n8n_launcher.gui.monitoring import ServerSnapshot
 from n8n_launcher.gui.pages import PageSubject, log_page_event
 from n8n_launcher.gui.theme import APP_BACKGROUND, FONT_META, TEXT_MUTED
+from n8n_launcher.gui.tokens import GUTTER, SPACE_2XL
 
 SERVER_SUBJECT = PageSubject("Serveur", ("Serveur", "Déploiement"))
 
@@ -54,12 +55,12 @@ NO_SERVER_NOTE = (
 
 
 class ServerPage(tk.Frame):
-    """One workspace's server snapshot, as a notebook tab.
+    """One workspace's server snapshot, as a dashboard card.
 
     The page keeps the ``Page`` contract (``retarget``/``on_show``/``on_hide``/
-    ``on_close``) so ``PageHost`` drives it like every other page. Visibility is
-    what starts a read: a hidden tab would spend four SSH round trips on data
-    nobody is looking at.
+    ``on_close``) so the dock drives it like every other page. Visibility is
+    what starts a read: a card nobody is looking at would spend four SSH round
+    trips on data nobody is watching.
     """
 
     def __init__(
@@ -84,7 +85,7 @@ class ServerPage(tk.Frame):
         self._on_status = on_status
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
-        header.pack(fill="x", padx=18, pady=(14, 0))
+        header.pack(fill="x", padx=GUTTER, pady=(SPACE_2XL, 0))
         self._title = tk.Label(
             header,
             text="",

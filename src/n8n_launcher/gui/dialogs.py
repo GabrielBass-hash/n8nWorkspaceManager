@@ -16,6 +16,7 @@ from .. import git
 from ..core.models import DbConfig, DbMode, ServerConfig
 from ..database import has_db_layout
 from ..github import auth
+from .dialog import Dialog
 from .layout import ColumnFitter, WindowFitter, bind_wraplength, wrap_at
 from .theme import (
     ACCENT,
@@ -26,15 +27,26 @@ from .theme import (
     SURFACE,
     TEXT_MUTED,
     TEXT_PRIMARY,
-    configure_fonts,
     text_measure,
+)
+from .tokens import (
+    GUTTER,
+    SPACE_2XL,
+    SPACE_3XL,
+    SPACE_HAIRLINE,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SPACE_TIGHT,
+    SPACE_XL,
 )
 
 # Repository picker: the label column holds ``owner/repo`` and the other three
 # hold "public"/"privé", a branch name and a date. The fitter sizes each to what
 # it actually contains (see ``gui.layout``) instead of reserving a fixed 280px
-# for the name while 90px sit on a five-letter word. The maximums are sized to
-# add up to a dialog that fits a display.
+# for the name while 90px sit on a five-letter word. The name is the flexible
+# column — it is the only one that reads better wide — and the four maximums add
+# up to a dialog that still fits a display.
 _REPO_COLUMNS = ("visibility", "branch", "updated")
 _REPO_HEADINGS = {
     "#0": "Dépôt",
@@ -82,40 +94,6 @@ class GitHubCreatePlan:
     token: str = ""
 
 
-def _finish_dialog_setup(
-    dialog: tk.Toplevel,
-    root: tk.Tk,
-    *,
-    focus: tk.Widget | None = None,
-    fitter: WindowFitter | None = None,
-) -> None:
-    """Center a modal dialog over its parent, grab input and focus a widget.
-
-    The width is the one the dialog's content asks for, bounded by the screen and
-    never shrunk afterwards: that is what ``layout.WindowFitter`` is for, and it
-    owns the whole geometry string (position included) so a width is never applied
-    twice. A dialog whose content is fed asynchronously — the CI runs tab — hands
-    in the very fitter it will ask to grow, so both share one history.
-    """
-    # A dialog can be the first window against a freshly created Tk root (the
-    # creation flow opens directly from the top bar); make sure the named UI
-    # fonts exist on that interpreter so FONT_* strings render correctly.
-    with contextlib.suppress(Exception):
-        configure_fonts(root)
-    try:
-        dialog.transient(root)
-        dialog.grab_set()
-        dialog.update_idletasks()
-        if fitter is None:
-            fitter = WindowFitter(dialog, parent=root)
-        fitter.fit()
-        if focus is not None:
-            focus.focus_set()
-    except Exception:
-        # Positioning is best-effort; the dialog must still open on exotic WMs.
-        pass
-
-
 def prompt_create_dir(root: tk.Tk) -> Path | None:
     """Let the user pick a workspace folder; create it when it does not exist."""
     directory = filedialog.askdirectory(
@@ -148,12 +126,7 @@ def default_creation_db(workflows_dir: Path) -> DbConfig:
 
 def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -> CreatePlan | None:
     """Show the single creation form; returns a plan or None when cancelled."""
-    dialog = tk.Toplevel(root)
-    dialog.title("Nouveau workspace")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: CreatePlan | None = None
+    dialog: Dialog[CreatePlan] = Dialog(root, "Nouveau workspace", primary="Créer")
 
     tk.Label(
         dialog,
@@ -162,7 +135,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(14, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_2XL, SPACE_HAIRLINE))
     name_var = tk.StringVar(value=workflows_dir.name)
     name_entry = tk.Entry(
         dialog,
@@ -173,7 +146,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         relief="flat",
         font=FONT_META,
     )
-    name_entry.pack(fill="x", padx=18, pady=(0, 6))
+    name_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
     tk.Label(
         dialog,
         text=str(workflows_dir),
@@ -181,7 +154,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         fg=TEXT_MUTED,
         font=FONT_SUBTITLE,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(0, 10))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_LG))
 
     tk.Label(
         dialog,
@@ -190,7 +163,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(0, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_HAIRLINE))
     db_var = tk.StringVar(value="managed" if default_db.mode is DbMode.MANAGED else "none")
     tk.Radiobutton(
         dialog,
@@ -203,7 +176,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         activeforeground=ACCENT_HOVER,
         selectcolor=SURFACE,
         font=FONT_META,
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     tk.Radiobutton(
         dialog,
         text="Aucune base",
@@ -215,7 +188,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         activeforeground=ACCENT_HOVER,
         selectcolor=SURFACE,
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(0, 10))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_LG))
 
     git_var = tk.BooleanVar(value=True)
     tk.Checkbutton(
@@ -229,7 +202,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         selectcolor=SURFACE,
         highlightthickness=0,
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(4, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_TIGHT, SPACE_HAIRLINE))
     tk.Label(
         dialog,
         text="URL du dépôt distant (optionnel) :",
@@ -237,7 +210,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         fg=TEXT_MUTED,
         font=FONT_SUBTITLE,
         anchor="w",
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     url_var = tk.StringVar(value="")
     tk.Entry(
         dialog,
@@ -247,7 +220,7 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         insertbackground=TEXT_PRIMARY,
         relief="flat",
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(0, 4))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_TIGHT))
     github_var = tk.BooleanVar(value=False)
     tk.Checkbutton(
         dialog,
@@ -260,42 +233,23 @@ def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -
         selectcolor=SURFACE,
         highlightthickness=0,
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(0, 12))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=dialog.destroy,
-    ).pack(side="right")
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_XL))
 
     def submit() -> None:
-        nonlocal result
         db = fresh_managed_db_config() if db_var.get() == "managed" else DbConfig(DbMode.NONE)
-        result = CreatePlan(
-            name=name_var.get().strip() or workflows_dir.name,
-            db=db,
-            git_enabled=git_var.get() or github_var.get(),
-            git_url=url_var.get().strip() or None,
-            github_create=github_var.get(),
+        dialog.settle(
+            CreatePlan(
+                name=name_var.get().strip() or workflows_dir.name,
+                db=db,
+                git_enabled=git_var.get() or github_var.get(),
+                git_url=url_var.get().strip() or None,
+                github_create=github_var.get(),
+            )
         )
-        dialog.destroy()
 
+    dialog.on_submit = submit
     name_entry.bind("<Return>", lambda _event: submit())
-    dialog.bind("<Escape>", lambda _event: dialog.destroy())
-    _finish_dialog_setup(dialog, root, focus=name_entry)
-
-    ttk.Button(
-        buttons,
-        text="Créer",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=name_entry)
 
 
 def prompt_ask_string(
@@ -306,12 +260,7 @@ def prompt_ask_string(
     initial: str = "",
 ) -> str | None:
     """Ask for a single string in a themed dark dialog; ``None`` on cancel."""
-    dialog = tk.Toplevel(root)
-    dialog.title(title)
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: str | None = None
+    dialog: Dialog[str] = Dialog(root, title)
 
     prompt_label = tk.Label(
         dialog,
@@ -322,8 +271,8 @@ def prompt_ask_string(
         anchor="w",
         justify="left",
     )
-    prompt_label.pack(fill="x", padx=18, pady=(16, 8))
-    bind_wraplength(prompt_label, minimum=200, padding=36)
+    prompt_label.pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_MD))
+    bind_wraplength(prompt_label, minimum=200, padding=2 * GUTTER)
     value_var = tk.StringVar(value=initial)
     entry = tk.Entry(
         dialog,
@@ -334,37 +283,14 @@ def prompt_ask_string(
         relief="flat",
         font=FONT_META,
     )
-    entry.pack(fill="x", padx=18, pady=(0, 14))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_2XL))
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
-        result = value_var.get()
-        dialog.destroy()
+        dialog.settle(value_var.get())
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=cancel,
-    ).pack(side="right")
-    ttk.Button(
-        buttons,
-        text="Valider",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
+    dialog.on_submit = submit
     entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=entry)
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=entry)
 
 
 def prompt_server_config(
@@ -379,12 +305,7 @@ def prompt_server_config(
     cancelled. Only the key *path* is captured — never key material — and the
     base directory defaults to ``n8n-launcher/<workspace id>``.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Serveur de production")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: ServerConfig | None = None
+    dialog: Dialog[ServerConfig] = Dialog(root, "Serveur de production", primary="Enregistrer")
 
     intro = tk.Label(
         dialog,
@@ -397,8 +318,8 @@ def prompt_server_config(
         anchor="w",
         justify="left",
     )
-    intro.pack(fill="x", padx=18, pady=(16, 8))
-    bind_wraplength(intro, minimum=200, padding=36)
+    intro.pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_MD))
+    bind_wraplength(intro, minimum=200, padding=2 * GUTTER)
 
     def field(label: str, value: str) -> tuple[tk.StringVar, tk.Entry]:
         tk.Label(
@@ -408,7 +329,7 @@ def prompt_server_config(
             fg=TEXT_MUTED,
             font=FONT_SUBTITLE,
             anchor="w",
-        ).pack(fill="x", padx=18)
+        ).pack(fill="x", padx=GUTTER)
         var = tk.StringVar(value=value)
         entry = tk.Entry(
             dialog,
@@ -419,7 +340,7 @@ def prompt_server_config(
             relief="flat",
             font=FONT_META,
         )
-        entry.pack(fill="x", padx=18, pady=(0, 6))
+        entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
         return var, entry
 
     host_var, _ = field("Hôte :", current.host)
@@ -437,9 +358,9 @@ def prompt_server_config(
         font=FONT_SUBTITLE,
         anchor="w",
     )
-    key_label.pack(fill="x", padx=18)
+    key_label.pack(fill="x", padx=GUTTER)
     key_row = tk.Frame(dialog, bg=APP_BACKGROUND)
-    key_row.pack(fill="x", padx=18, pady=(0, 6))
+    key_row.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
     key_entry = tk.Entry(
         key_row,
         textvariable=key_var,
@@ -461,13 +382,9 @@ def prompt_server_config(
         text="Parcourir…",
         style="Secondary.TButton",
         command=browse_key,
-    ).pack(side="right", padx=(8, 0))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    ).pack(side="right", padx=(SPACE_MD, 0))
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
         host = host_var.get().strip()
         user = user_var.get().strip()
         if not host or not user:
@@ -477,38 +394,21 @@ def prompt_server_config(
                 parent=dialog,
             )
             return
-        result = ServerConfig(
-            enabled=True,
-            host=host,
-            ssh_port=_int_or(ssh_var.get(), 22),
-            user=user,
-            key_path=key_var.get().strip() or None,
-            base_dir=base_var.get().strip(),
-            n8n_port=_int_or(port_var.get(), 5678),
+        dialog.settle(
+            ServerConfig(
+                enabled=True,
+                host=host,
+                ssh_port=_int_or(ssh_var.get(), 22),
+                user=user,
+                key_path=key_var.get().strip() or None,
+                base_dir=base_var.get().strip(),
+                n8n_port=_int_or(port_var.get(), 5678),
+            )
         )
-        dialog.destroy()
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=cancel,
-    ).pack(side="right")
-    ttk.Button(
-        buttons,
-        text="Enregistrer",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
+    dialog.on_submit = submit
     key_entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=key_entry)
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=key_entry)
 
 
 def _int_or(value: str, fallback: int) -> int:
@@ -529,12 +429,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
     regenerate everything. Password fields left empty are regenerated by the
     manager on save.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Base de données")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: DbConfig | None = None
+    dialog: Dialog[DbConfig] = Dialog(root, "Base de données")
     locked = current.mode is DbMode.MANAGED
 
     mode_var = tk.StringVar(value="managed" if current.mode is DbMode.MANAGED else "none")
@@ -545,7 +440,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(14, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_2XL, SPACE_HAIRLINE))
     tk.Radiobutton(
         dialog,
         text="Locale (PostgreSQL géré par le launcher)",
@@ -557,7 +452,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
         activeforeground=ACCENT_HOVER,
         selectcolor=SURFACE,
         font=FONT_META,
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     tk.Radiobutton(
         dialog,
         text="Aucune base",
@@ -569,7 +464,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
         activeforeground=ACCENT_HOVER,
         selectcolor=SURFACE,
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(0, 10))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_LG))
 
     def field(label: str, value: str, *, enabled: bool = True) -> tuple[tk.StringVar, tk.Entry]:
         tk.Label(
@@ -579,7 +474,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
             fg=TEXT_MUTED,
             font=FONT_SUBTITLE,
             anchor="w",
-        ).pack(fill="x", padx=18)
+        ).pack(fill="x", padx=GUTTER)
         var = tk.StringVar(value=value)
         entry = tk.Entry(
             dialog,
@@ -591,7 +486,7 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
             font=FONT_META,
             state="normal" if enabled else "disabled",
         )
-        entry.pack(fill="x", padx=18, pady=(0, 6))
+        entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
         return var, entry
 
     if locked:
@@ -605,8 +500,8 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
             anchor="w",
             justify="left",
         )
-        locked_hint.pack(fill="x", padx=18, pady=(0, 6))
-        bind_wraplength(locked_hint, minimum=200, padding=36)
+        locked_hint.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
+        bind_wraplength(locked_hint, minimum=200, padding=2 * GUTTER)
 
     db_var, db_name_entry = field(
         "Base de données :", current.database_name or "data", enabled=not locked
@@ -623,45 +518,24 @@ def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
         style="Secondary.TButton",
         state="disabled" if locked else "normal",
         command=generate_password,
-    ).pack(anchor="w", padx=18, pady=(0, 12))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    ).pack(anchor="w", padx=GUTTER, pady=(0, SPACE_XL))
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
         if mode_var.get() == "managed":
-            result = DbConfig(
-                DbMode.MANAGED,
-                database_name=db_var.get().strip() or None,
-                username=user_var.get().strip() or None,
-                password=pass_var.get() or None,
+            dialog.settle(
+                DbConfig(
+                    DbMode.MANAGED,
+                    database_name=db_var.get().strip() or None,
+                    username=user_var.get().strip() or None,
+                    password=pass_var.get() or None,
+                )
             )
         else:
-            result = DbConfig(DbMode.NONE)
-        dialog.destroy()
+            dialog.settle(DbConfig(DbMode.NONE))
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=cancel,
-    ).pack(side="right")
-    ttk.Button(
-        buttons,
-        text="Valider",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
+    dialog.on_submit = submit
     db_name_entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=db_name_entry)
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=db_name_entry)
 
 
 def prompt_git_remote(root: tk.Tk, workspace_name: str, current_remote: str | None) -> str | None:
@@ -687,12 +561,7 @@ def prompt_git_config(root: tk.Tk, workspace_name: str) -> GitConfigChoice | Non
     ``create_github=True`` when the user asks to create the remote repository
     from the app.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Configurer Git")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: GitConfigChoice | None = None
+    dialog: Dialog[GitConfigChoice] = Dialog(root, "Configurer Git")
 
     url_intro = tk.Label(
         dialog,
@@ -704,8 +573,8 @@ def prompt_git_config(root: tk.Tk, workspace_name: str) -> GitConfigChoice | Non
         anchor="w",
         justify="left",
     )
-    url_intro.pack(fill="x", padx=18, pady=(16, 8))
-    bind_wraplength(url_intro, minimum=200, padding=36)
+    url_intro.pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_MD))
+    bind_wraplength(url_intro, minimum=200, padding=2 * GUTTER)
     url_var = tk.StringVar(value="")
     url_entry = tk.Entry(
         dialog,
@@ -716,47 +585,17 @@ def prompt_git_config(root: tk.Tk, workspace_name: str) -> GitConfigChoice | Non
         relief="flat",
         font=FONT_META,
     )
-    url_entry.pack(fill="x", padx=18, pady=(0, 16))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    url_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_3XL))
 
     def create_github() -> None:
-        nonlocal result
-        result = GitConfigChoice(create_github=True)
-        dialog.destroy()
+        dialog.settle(GitConfigChoice(create_github=True))
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
-        result = GitConfigChoice(remote_url=url_var.get().strip() or None)
-        dialog.destroy()
+        dialog.settle(GitConfigChoice(remote_url=url_var.get().strip() or None))
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(
-        buttons,
-        text="Créer sur GitHub…",
-        style="Secondary.TButton",
-        command=create_github,
-    ).pack(side="left")
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=cancel,
-    ).pack(side="right")
-    ttk.Button(
-        buttons,
-        text="Valider",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=url_entry)
-    dialog.wait_window()
-    return result
+    dialog.add_action("Créer sur GitHub…", create_github, side="left")
+    dialog.on_submit = submit
+    return dialog.wait(focus=url_entry)
 
 
 def prompt_github_create(
@@ -770,12 +609,7 @@ def prompt_github_create(
     and one seed push, then discarded; a "Détecter via gh CLI" button refills
     it from ``gh auth token``.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Nouveau dépôt GitHub")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: GitHubCreatePlan | None = None
+    dialog: Dialog[GitHubCreatePlan] = Dialog(root, "Nouveau dépôt GitHub", primary="Créer")
 
     tk.Label(
         dialog,
@@ -784,7 +618,7 @@ def prompt_github_create(
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(16, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_HAIRLINE))
     name_var = tk.StringVar(value=_repo_name_from(workspace_name))
     name_entry = tk.Entry(
         dialog,
@@ -795,7 +629,7 @@ def prompt_github_create(
         relief="flat",
         font=FONT_META,
     )
-    name_entry.pack(fill="x", padx=18, pady=(0, 10))
+    name_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_LG))
 
     visibility_var = tk.BooleanVar(value=True)
     tk.Radiobutton(
@@ -809,7 +643,7 @@ def prompt_github_create(
         activeforeground=ACCENT_HOVER,
         selectcolor=SURFACE,
         font=FONT_META,
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     tk.Radiobutton(
         dialog,
         text="Public",
@@ -821,7 +655,7 @@ def prompt_github_create(
         activeforeground=ACCENT_HOVER,
         selectcolor=SURFACE,
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(0, 10))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_LG))
 
     token_hint = tk.Label(
         dialog,
@@ -832,8 +666,8 @@ def prompt_github_create(
         anchor="w",
         justify="left",
     )
-    token_hint.pack(fill="x", padx=18)
-    bind_wraplength(token_hint, minimum=200, padding=36)
+    token_hint.pack(fill="x", padx=GUTTER)
+    bind_wraplength(token_hint, minimum=200, padding=2 * GUTTER)
     token_var = tk.StringVar(value=token or "")
     token_entry = tk.Entry(
         dialog,
@@ -845,19 +679,15 @@ def prompt_github_create(
         relief="flat",
         font=FONT_META,
     )
-    token_entry.pack(fill="x", padx=18, pady=(4, 6))
+    token_entry.pack(fill="x", padx=GUTTER, pady=(SPACE_TIGHT, SPACE_SM))
     ttk.Button(
         dialog,
         text="Détecter via gh CLI",
         style="Secondary.TButton",
         command=lambda: token_var.set(auth.token_from_gh_cli() or ""),
-    ).pack(fill="x", padx=18, pady=(0, 14))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_2XL))
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
         name = name_var.get().strip()
         token = token_var.get().strip()
         if not name:
@@ -873,30 +703,11 @@ def prompt_github_create(
                 parent=dialog,
             )
             return
-        result = GitHubCreatePlan(name=name, private=visibility_var.get(), token=token)
-        dialog.destroy()
+        dialog.settle(GitHubCreatePlan(name=name, private=visibility_var.get(), token=token))
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=cancel,
-    ).pack(side="right")
-    ttk.Button(
-        buttons,
-        text="Créer",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
+    dialog.on_submit = submit
     name_entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=name_entry)
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=name_entry)
 
 
 def _repo_name_from(workspace_name: str) -> str:
@@ -915,12 +726,7 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
     button fills the field from the clipboard so the token is never typed or
     logged, and "Détecter via gh CLI" reuses an existing ``gh`` login.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Token GitHub")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: GitHubTokenPlan | None = None
+    dialog: Dialog[GitHubTokenPlan] = Dialog(root, "Token GitHub")
 
     tk.Label(
         dialog,
@@ -929,7 +735,7 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(16, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_HAIRLINE))
     token_var = tk.StringVar(value="")
     token_entry = tk.Entry(
         dialog,
@@ -941,19 +747,19 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
         relief="flat",
         font=FONT_META,
     )
-    token_entry.pack(fill="x", padx=18, pady=(0, 6))
+    token_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
     ttk.Button(
         dialog,
         text="Coller depuis le presse-papiers",
         style="Secondary.TButton",
         command=lambda: token_var.set(_clipboard_text(dialog)),
-    ).pack(fill="x", padx=18, pady=(0, 4))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_TIGHT))
     ttk.Button(
         dialog,
         text="Détecter via gh CLI",
         style="Secondary.TButton",
         command=lambda: token_var.set(auth.token_from_gh_cli() or ""),
-    ).pack(fill="x", padx=18, pady=(0, 8))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_MD))
 
     remember_var = tk.BooleanVar(value=False)
     tk.Checkbutton(
@@ -968,7 +774,7 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
         anchor="w",
         highlightthickness=0,
         font=FONT_SUBTITLE,
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     remember_hint = tk.Label(
         dialog,
         text=(
@@ -981,40 +787,21 @@ def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
         anchor="w",
         justify="left",
     )
-    remember_hint.pack(fill="x", padx=18, pady=(4, 12))
-    bind_wraplength(remember_hint, minimum=200, padding=36)
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    remember_hint.pack(fill="x", padx=GUTTER, pady=(SPACE_TIGHT, SPACE_XL))
+    bind_wraplength(remember_hint, minimum=200, padding=2 * GUTTER)
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
         token = token_var.get().strip()
+        # An empty token is not an error: the caller simply has no token to show
+        # runs with, which is the same answer as cancelling.
         if token:
-            result = GitHubTokenPlan(token=token, remember=remember_var.get())
-        dialog.destroy()
+            dialog.settle(GitHubTokenPlan(token=token, remember=remember_var.get()))
+        else:
+            dialog.cancel()
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(
-        buttons,
-        text="Annuler",
-        style="Secondary.TButton",
-        command=cancel,
-    ).pack(side="right")
-    ttk.Button(
-        buttons,
-        text="Valider",
-        style="Accent.TButton",
-        command=submit,
-    ).pack(side="right", padx=(8, 0))
-
+    dialog.on_submit = submit
     token_entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=token_entry)
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=token_entry)
 
 
 def _clipboard_text(widget: tk.Misc) -> str:
@@ -1038,12 +825,7 @@ def prompt_create_source(root: tk.Tk) -> str | None:
 
     Retourne ``None`` quand l'utilisateur annule.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Nouveau workspace")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: str | None = None
+    dialog: Dialog[str] = Dialog(root, "Nouveau workspace", primary="Continuer")
     choice = tk.StringVar(value="local")
 
     tk.Label(
@@ -1053,7 +835,7 @@ def prompt_create_source(root: tk.Tk) -> str | None:
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(16, 4))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_TIGHT))
     tk.Radiobutton(
         dialog,
         text="Dossier local existant",
@@ -1064,7 +846,7 @@ def prompt_create_source(root: tk.Tk) -> str | None:
         selectcolor=SURFACE,
         activebackground=APP_BACKGROUND,
         font=FONT_META,
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     tk.Radiobutton(
         dialog,
         text="Cloner un dépôt Git (URL)",
@@ -1075,28 +857,13 @@ def prompt_create_source(root: tk.Tk) -> str | None:
         selectcolor=SURFACE,
         activebackground=APP_BACKGROUND,
         font=FONT_META,
-    ).pack(fill="x", padx=18, pady=(0, 12))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_XL))
 
     def submit() -> None:
-        nonlocal result
-        result = choice.get()
-        dialog.destroy()
+        dialog.settle(choice.get())
 
-    # Les boutons d'action sont packés directement sur le dialogue (sans
-    # frame intermédiaire) : les appelants — tests inclus — inspectent
-    # ``dialog.children`` pour les retrouver, et le frame n'était que de la
-    # plomberie sans autre rôle.
-    ttk.Button(dialog, text="Annuler", style="Secondary.TButton", command=dialog.destroy).pack(
-        side="right", padx=(0, 18), pady=(0, 16)
-    )
-    ttk.Button(dialog, text="Continuer", style="Accent.TButton", command=submit).pack(
-        side="right", padx=(8, 0), pady=(0, 16)
-    )
-
-    dialog.bind("<Escape>", lambda _e: dialog.destroy())
-    _finish_dialog_setup(dialog, root)
-    dialog.wait_window()
-    return result
+    dialog.on_submit = submit
+    return dialog.wait()
 
 
 def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
@@ -1109,12 +876,7 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
     éditable à la main).
     """
 
-    dialog = tk.Toplevel(root)
-    dialog.title("Cloner un dépôt Git")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(False, False)
-
-    result: GitClonePlan | None = None
+    dialog: Dialog[GitClonePlan] = Dialog(root, "Cloner un dépôt Git", primary="Cloner")
     url_var = tk.StringVar(value="")
     branch_var = tk.StringVar(value="")
 
@@ -1125,7 +887,7 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(16, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_HAIRLINE))
     url_entry = tk.Entry(
         dialog,
         textvariable=url_var,
@@ -1135,7 +897,7 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
         relief="flat",
         font=FONT_META,
     )
-    url_entry.pack(fill="x", padx=18, pady=(0, 6))
+    url_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
 
     tk.Label(
         dialog,
@@ -1144,7 +906,7 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
         fg=TEXT_MUTED,
         font=FONT_SUBTITLE,
         anchor="w",
-    ).pack(fill="x", padx=18)
+    ).pack(fill="x", padx=GUTTER)
     branch_entry = tk.Entry(
         dialog,
         textvariable=branch_var,
@@ -1154,7 +916,7 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
         relief="flat",
         font=FONT_META,
     )
-    branch_entry.pack(fill="x", padx=18, pady=(0, 6))
+    branch_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_SM))
 
     status = tk.Label(
         dialog,
@@ -1167,8 +929,8 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
     )
     # The branch list echoes GitHub's answer verbatim, errors included: it wraps
     # at the dialog's real width rather than at a fixed number of pixels.
-    bind_wraplength(status, minimum=200, padding=36)
-    status.pack(fill="x", padx=18)
+    bind_wraplength(status, minimum=200, padding=2 * GUTTER)
+    status.pack(fill="x", padx=GUTTER)
 
     def load_branches() -> None:
         url = url_var.get().strip()
@@ -1188,38 +950,24 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
 
     ttk.Button(
         dialog, text="Charger les branches", style="Secondary.TButton", command=load_branches
-    ).pack(fill="x", padx=18, pady=(6, 14))
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(0, 16))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_SM, SPACE_2XL))
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
         url = url_var.get().strip()
         if not url:
             messagebox.showwarning(
                 "Cloner un dépôt Git", "L'URL du dépôt est requise.", parent=dialog
             )
             return
-        result = GitClonePlan(url=url, branch=branch_var.get().strip() or None)
-        dialog.destroy()
+        dialog.settle(GitClonePlan(url=url, branch=branch_var.get().strip() or None))
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    ttk.Button(buttons, text="Annuler", style="Secondary.TButton", command=cancel).pack(
-        side="right"
-    )
-    ttk.Button(buttons, text="Cloner", style="Accent.TButton", command=submit).pack(
-        side="right", padx=(8, 0)
-    )
-
+    dialog.on_submit = submit
+    # <Return> on the URL field loads branches rather than submitting: the user
+    # is still typing an address at that point, and the branch list is the only
+    # thing that answer can improve.
     url_entry.bind("<Return>", lambda _e: load_branches())
     branch_entry.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=url_entry)
-    dialog.wait_window()
-    return result
+    return dialog.wait(focus=url_entry)
 
 
 @dataclass(frozen=True)
@@ -1245,6 +993,13 @@ def prompt_clone_dest(root: tk.Tk, repo_name: str) -> Path | None:
     return Path(parent) / _repo_name_from(repo_name)
 
 
+def _dialog_room(dialog: tk.Toplevel, padding: int = 2 * GUTTER) -> int:
+    """Return the pixels a dialog's table has, its own padding deducted."""
+    with contextlib.suppress(Exception):
+        return max(int(dialog.winfo_width()) - padding, 1)
+    return 1
+
+
 def prompt_github_repo_picker(
     root: tk.Tk,
     *,
@@ -1260,12 +1015,15 @@ def prompt_github_repo_picker(
     validation. Returns the clone URL plus the typed/preselected branch, or
     ``None`` on cancel.
     """
-    dialog = tk.Toplevel(root)
-    dialog.title("Cloner depuis GitHub")
-    dialog.configure(bg=APP_BACKGROUND)
-    dialog.resizable(True, True)
-
-    result: GitHubRepoPick | None = None
+    dialog: Dialog[GitHubRepoPick] = Dialog(
+        root,
+        "Cloner depuis GitHub",
+        primary="Cloner",
+        resizable=True,
+        # The bar tucks under a 14-row table rather than sitting at the window's
+        # foot, so it keeps the tighter bottom padding this dialog always had.
+        bar_pady=(SPACE_SM, SPACE_2XL),
+    )
     selected: dict[str, Any] = {}
     branch_var = tk.StringVar(value="")
 
@@ -1276,7 +1034,7 @@ def prompt_github_repo_picker(
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(14, 4))
+    ).pack(fill="x", padx=GUTTER, pady=(SPACE_2XL, SPACE_TIGHT))
 
     tree = ttk.Treeview(
         dialog,
@@ -1296,6 +1054,11 @@ def prompt_github_repo_picker(
             stretch=False,
             anchor="w",
         )
+    # The room is the dialog's own width, so the table follows the window the
+    # user dragged it to: narrower, the columns are compressed down together
+    # instead of the last one being the one Tk cuts; wider, the name takes the
+    # slack. Unmapped (width 1) it stays on its pure content sizing, which is
+    # what makes ``WindowFitter`` below open the dialog at that content width.
     fitter = ColumnFitter(
         tree,
         columns=_REPO_COLUMNS,
@@ -1304,13 +1067,15 @@ def prompt_github_repo_picker(
         maximums=_REPO_MAXIMUMS,
         measure=text_measure(dialog, FONT_META),
         container=dialog,
+        available=lambda: _dialog_room(dialog),
+        flexible="#0",
     )
     # The dialog opens as wide as "owner/repo" plus its three fields really need,
     # bounded by the screen, and grows if a later page of repositories is wider.
     window_fitter = WindowFitter(dialog, parent=root)
     # No horizontal fill: ``winfo_reqwidth`` above is the width of the table, so
     # the dialog opens exactly as wide as the columns it holds.
-    tree.pack(fill="y", anchor="nw", expand=True, padx=18, pady=(0, 6))
+    tree.pack(fill="y", anchor="nw", expand=True, padx=GUTTER, pady=(0, SPACE_SM))
 
     # Sorted most-recently-updated first: matches the GitHub web default.
     for repo in sorted(
@@ -1344,7 +1109,7 @@ def prompt_github_repo_picker(
         fg=TEXT_PRIMARY,
         font=FONT_META,
         anchor="w",
-    ).pack(fill="x", padx=18, pady=(0, 2))
+    ).pack(fill="x", padx=GUTTER, pady=(0, SPACE_HAIRLINE))
     branch_entry = tk.Entry(
         dialog,
         textvariable=branch_var,
@@ -1354,7 +1119,7 @@ def prompt_github_repo_picker(
         relief="flat",
         font=FONT_META,
     )
-    branch_entry.pack(fill="x", padx=18, pady=(0, 4))
+    branch_entry.pack(fill="x", padx=GUTTER, pady=(0, SPACE_TIGHT))
 
     status = tk.Label(
         dialog,
@@ -1371,9 +1136,9 @@ def prompt_github_repo_picker(
     # the table's narrowest width and the first pass uses the width it has just
     # been given, so the note never widens the dialog past the table it explains
     # — the dialog opens at the width of its content.
-    bind_wraplength(status, minimum=200, padding=36)
-    wrap_at(status, fitter.total(), minimum=200, padding=36)
-    status.pack(fill="x", padx=18)
+    bind_wraplength(status, minimum=200, padding=2 * GUTTER)
+    wrap_at(status, fitter.total(), minimum=200, padding=2 * GUTTER)
+    status.pack(fill="x", padx=GUTTER)
 
     def pick(full_name: str) -> None:
         repo = next((item for item in repos if item.get("full_name") == full_name), None)
@@ -1400,7 +1165,6 @@ def prompt_github_repo_picker(
     tree.bind("<Double-1>", on_select)
 
     def submit(_event: tk.Event | None = None) -> None:
-        nonlocal result
         if not selected:
             selection = tree.selection()
             if not selection:
@@ -1419,30 +1183,17 @@ def prompt_github_repo_picker(
                 parent=dialog,
             )
             return
-        result = GitHubRepoPick(
-            clone_url=clone_url,
-            branch=branch_var.get().strip() or None,
+        dialog.settle(
+            GitHubRepoPick(
+                clone_url=clone_url,
+                branch=branch_var.get().strip() or None,
+            )
         )
-        dialog.destroy()
 
-    def cancel(_event: tk.Event | None = None) -> None:
-        dialog.destroy()
-
-    # <Return> sur le champ branche valide (comme dans prompt_clone_plan) ;
-    # la sélection de la liste pré-remplit déjà la branche via « pick ».
-    branch_entry.bind("<Return>", submit)
-
-    buttons = tk.Frame(dialog, bg=APP_BACKGROUND)
-    buttons.pack(fill="x", padx=18, pady=(6, 14))
-    ttk.Button(buttons, text="Annuler", style="Secondary.TButton", command=cancel).pack(
-        side="right"
-    )
-    ttk.Button(buttons, text="Cloner", style="Accent.TButton", command=submit).pack(
-        side="right", padx=(8, 0)
-    )
-
+    dialog.on_submit = submit
+    # <Return> validates here, both on the window and on the branch field (as in
+    # prompt_clone_plan); picking from the list already prefills the branch
+    # through « pick ».
     dialog.bind("<Return>", submit)
-    dialog.bind("<Escape>", cancel)
-    _finish_dialog_setup(dialog, root, focus=branch_entry, fitter=window_fitter)
-    dialog.wait_window()
-    return result
+    branch_entry.bind("<Return>", submit)
+    return dialog.wait(focus=branch_entry, fitter=window_fitter)

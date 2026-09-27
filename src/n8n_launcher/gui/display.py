@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -214,3 +215,52 @@ def ci_tooltip(workspace: Workspace) -> str:
     elif counts["selected_eligible"] < counts["selected"]:
         lines.append("Certaines pipelines sélectionnées ne sont plus testables")
     return "\n".join(lines)
+
+
+def row_details(workspace: Workspace) -> list[tuple[str, str]]:
+    """Return the row's optional details, most valuable first.
+
+    A row has room for a handful of chips, and two of the things it knows about
+    a workspace are *not* controls: its port and how many pipelines it holds.
+    They are worth showing when the room allows and worth one click otherwise,
+    so they are the pair that may be collapsed into the row's overflow.
+
+    The order is the order of sacrifice: the last entry is dropped first, so the
+    port (which says where n8n can be reached) outlives the count.
+
+    The values carry no punctuation of their own — a leading ``:`` on a port is
+    presentation, and it belongs to whoever shows the line.
+    """
+    return [
+        ("port", str(workspace.port)),
+        ("pipelines", str(pipelines_count(workspace.workflows_dir))),
+    ]
+
+
+def overflow_details(
+    *,
+    room: int,
+    essentials: int,
+    details: Sequence[tuple[str, int]],
+    name_minimum: int,
+) -> list[str]:
+    """Return the optional details this row cannot afford to show.
+
+    *room* is the width the row really has, *essentials* what the chips that
+    are never dropped occupy, and *details* the ``(name, width)`` of the ones
+    that can be, in the order they are packed. A detail is dropped from the end
+    only while the workspace name would otherwise fall below *name_minimum*:
+    the name is the one elastic field on a row, and it may only yield after
+    everything else has. The essentials are never dropped, so a room too narrow
+    for them simply hides every detail.
+
+    A room of 0 or 1 is Tk's answer before the first layout — the same
+    "unmeasured" convention as the column fitter — so nothing is decided yet and
+    the row is left showing everything it has.
+    """
+    if room <= 1:
+        return []
+    kept = list(details)
+    while kept and room - essentials - sum(width for _name, width in kept) < name_minimum:
+        kept.pop()
+    return [name for name, _width in details[len(kept) :]]

@@ -30,40 +30,53 @@ import pytest
 OS_NAMES = ("linux", "windows", "macos")
 
 WATCHED_PATHS = (
-    # Main window — app-owned widgets (friendly names from the structure test)
+    # Main window — the window's own structure, named by handle
+    # (friendly names from the structure test)
+    "root.accent_bar",
     "root.header",
     "root.header.title",
     "root.header.subtitle",
+    "root.status_border",
     "root.status_label",
-    "root.!frame4.list_canvas",
-    "root.!frame4.list_canvas.workspace_list",
+    # The dashboard: three columns in one paned window. The dock's pane exists
+    # from the start and is empty until a page opens, so it is watched here
+    # rather than inferred from a page's presence.
+    "root.paned",
+    "root.paned.list_column",
+    "root.paned.dock",
+    "root.paned.journal_column",
+    "root.paned.list_column.list_canvas",
+    "root.paned.list_column.workspace_list",
     # Empty-state creation card
-    "root.!frame4.list_canvas.workspace_list.empty_card",
-    "root.!frame4.list_canvas.workspace_list.empty_card.empty_badge",
-    "root.!frame4.list_canvas.workspace_list.empty_card.empty_title",
-    "root.!frame4.list_canvas.workspace_list.empty_card.empty_subtitle",
-    # One rendered workspace row
-    "root.!frame4.list_canvas.workspace_list.row",
-    "root.!frame4.list_canvas.workspace_list.row.name_label",
-    "root.!frame4.list_canvas.workspace_list.row.dirty_dot",
-    "root.!frame4.list_canvas.workspace_list.row.action_button",
-    "root.!frame4.list_canvas.workspace_list.row.db_chip",
-    "root.!frame4.list_canvas.workspace_list.row.git_chip",
-    "root.!frame4.list_canvas.workspace_list.row.ci_chip",
-    "root.!frame4.list_canvas.workspace_list.row.port_chip",
-    "root.!frame4.list_canvas.workspace_list.row.pipelines_chip",
+    "root.paned.list_column.workspace_list.empty_card",
+    "root.paned.list_column.workspace_list.empty_card.empty_badge",
+    "root.paned.list_column.workspace_list.empty_card.empty_title",
+    "root.paned.list_column.workspace_list.empty_card.empty_subtitle",
+    # One rendered workspace row — every chip it can grow, so a chip that is
+    # only created on one OS is loud rather than silently missing
+    "root.paned.list_column.workspace_list.row",
+    "root.paned.list_column.workspace_list.row.name_label",
+    "root.paned.list_column.workspace_list.row.dirty_dot",
+    "root.paned.list_column.workspace_list.row.action_button",
+    "root.paned.list_column.workspace_list.row.db_chip",
+    "root.paned.list_column.workspace_list.row.git_chip",
+    "root.paned.list_column.workspace_list.row.ci_chip",
+    "root.paned.list_column.workspace_list.row.server_chip",
+    "root.paned.list_column.workspace_list.row.overflow_chip",
     # Creation dialog — the workflow checkboxes parity exists to protect
     "root.creation_dialog.db_managed_radio",
     "root.creation_dialog.db_none_radio",
     "root.creation_dialog.git_enabled",
     "root.creation_dialog.github_create",
-    "root.creation_dialog.!frame.cancel_button",
-    "root.creation_dialog.!frame.create_button",
+    "root.creation_dialog.actions",
+    "root.creation_dialog.actions.cancel_button",
+    "root.creation_dialog.actions.create_button",
     # CI credentials dialog
-    "root.credentials_dialog.credential_GitHub",
-    "root.credentials_dialog.!frame.copy_json_button",
-    "root.credentials_dialog.!frame.confirm_pasted_button",
-    "root.credentials_dialog.!frame.cancel_button",
+    "root.credentials_dialog.credentials_tree",
+    "root.credentials_dialog.actions",
+    "root.credentials_dialog.actions.copy_json_button",
+    "root.credentials_dialog.actions.confirm_pasted_button",
+    "root.credentials_dialog.actions.cancel_button",
 )
 
 

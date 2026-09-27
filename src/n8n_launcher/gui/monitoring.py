@@ -40,7 +40,13 @@ from ..core.models import Workspace
 from ..monitoring.events import Event
 from ..monitoring.store import RETENTION_DAYS, EventStore
 from ..remote import RemoteExecutionStatus, RemoteHealth
-from .layout import ColumnFitter, bind_wraplength, ellipsize, wrap_at
+from .layout import (
+    ColumnFitter,
+    bind_ellipsize,
+    bind_wraplength,
+    ellipsize,
+    wrap_at,
+)
 from .pages import PageSubject
 from .theme import (
     ACCENT,
@@ -53,6 +59,14 @@ from .theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     text_measure,
+)
+from .tokens import (
+    SPACE_2XL,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SPACE_TIGHT,
+    SPACE_XL,
 )
 
 # Row colouring by severity. ERROR/CRITICAL reuse the destructive row colour
@@ -93,10 +107,16 @@ _JOURNAL_HEADINGS = {
 _JOURNAL_MINIMUMS = {"time": 80, "level": 60, "name": 90, "message": 200}
 _JOURNAL_MAXIMUMS = {"time": 120, "level": 90, "name": 220, "message": 760}
 
+# The column that may absorb the room a wide pane leaves over: the message is
+# the prose of a log line, so it is the only one that reads better wide. The
+# others are a timestamp, a level and a logger name, and stretching them would
+# invent space nothing uses.
+_JOURNAL_FLEXIBLE = "message"
+
 # The margin every child of the panel is packed with. One constant because the
 # caption, the detail pane and the table must share it: their requests are what
 # the card hands out, and they only add up when the margins match.
-_PANEL_PADX = 12
+_PANEL_PADX = SPACE_XL
 
 # The supervision window is a *reader* (logs, deploy history, executions), so it
 # follows the screen the same way the main window does instead of asking for a
@@ -370,13 +390,16 @@ class MonitoringPanel(tk.Frame):
         *,
         on_export: Callable[[], None] | None = None,
         on_fitted: Callable[[], None] | None = None,
+        on_expand: Callable[[], None] | None = None,
         tooltip: Callable[[tk.Misc, str], None] | None = None,
     ) -> None:
         """Build the integrated journal view and its optional host actions.
 
         ``on_fitted`` is called after every fit, so a host that owns the window
-        can answer a table the pane cannot hold. The panel itself never resizes
-        anything: it renders and calls back.
+        can answer a table the pane cannot hold. ``on_expand`` is the rail's
+        single control (see :meth:`set_rail`): a 46-pixel column cannot show a
+        table, so the panel is either a journal or one button to get it back.
+        The panel itself never resizes anything: it renders and calls back.
         """
         super().__init__(parent, bg=APP_BACKGROUND)
         self._events: list[Event] = []
@@ -392,10 +415,16 @@ class MonitoringPanel(tk.Frame):
         self._subject_chip: tk.Frame | None = None
         self._subject_text: tk.Label | None = None
         self._on_fitted = on_fitted
+        self._on_expand = on_expand
+        self._tooltip = tooltip
+        # Whether the panel is currently a rail, and the strip that says so.
+        self._rail = False
+        self._rail_frame: tk.Frame | None = None
         MonitoringPanel.instances.add(self)
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
-        header.pack(fill="x", padx=12, pady=(10, 4))
+        self._header = header
+        header.pack(fill="x", padx=SPACE_XL, pady=(SPACE_LG, SPACE_TIGHT))
         title = tk.Label(
             header,
             text="Journal",
@@ -417,7 +446,14 @@ class MonitoringPanel(tk.Frame):
             font=FONT_META,
             anchor="e",
         )
-        self._scope.pack(side="left", fill="x", expand=True, padx=(10, 6))
+        # The scope is a workspace name, so its width is whatever the user typed.
+        # An unbounded label here would out-request the header, the panel and the
+        # card behind it, and the launcher's window would grow to fit a name — so
+        # the text is re-cut to the label's own width and the full name stays in
+        # the row tooltip and the caption below.
+        self._scope_text = ""
+        bind_ellipsize(self._scope, lambda: self._scope_text, text_measure(self, FONT_META))
+        self._scope.pack(side="left", fill="x", expand=True, padx=(SPACE_LG, SPACE_SM))
         if on_export is not None:
             self._export_icon = _download_icon(header, command=on_export, tooltip=tooltip)
             self._export_icon.pack(side="right")
@@ -432,7 +468,7 @@ class MonitoringPanel(tk.Frame):
             relief="flat",
             font=FONT_META,
         )
-        self._entry.pack(fill="x", padx=_PANEL_PADX, pady=(0, 4))
+        self._entry.pack(fill="x", padx=_PANEL_PADX, pady=(0, SPACE_TIGHT))
         self._entry.bind("<Return>", lambda _event: self._render())
         self._entry.bind("<KeyRelease>", lambda _event: self._render())
         # Tk has no native placeholder, so the hint is a label floating over the
@@ -458,7 +494,7 @@ class MonitoringPanel(tk.Frame):
             font=FONT_META,
             anchor="w",
         )
-        self._summary.pack(fill="x", padx=_PANEL_PADX, pady=(0, 4))
+        self._summary.pack(fill="x", padx=_PANEL_PADX, pady=(0, SPACE_TIGHT))
 
         self.tree = ttk.Treeview(
             self,
@@ -487,6 +523,8 @@ class MonitoringPanel(tk.Frame):
             maximums=_JOURNAL_MAXIMUMS,
             measure=text_measure(self, FONT_META),
             container=self,
+            available=self._table_room,
+            flexible=_JOURNAL_FLEXIBLE,
         )
         for tag, color in (
             ("info", _TAG_INFO),
@@ -520,13 +558,116 @@ class MonitoringPanel(tk.Frame):
         # A traceback is the longest text in the panel: it re-wraps at the pane's
         # real width instead of being cut at a hard-coded 520 pixels.
         bind_wraplength(self._detail, minimum=200, padding=2 * _PANEL_PADX)
-        self._detail.pack(side="bottom", fill="both", padx=_PANEL_PADX, pady=(0, 10))
+        self._detail.pack(side="bottom", fill="both", padx=_PANEL_PADX, pady=(0, SPACE_LG))
 
         # The table is packed last, and that is deliberate: a container shorter
         # than the sum of its children takes the shortfall from the last ones
         # packed, and the table is the elastic part — it shows fewer rows in a
         # short pane, where a six-line detail pane would simply disappear.
-        self.tree.pack(fill="y", anchor="nw", expand=True, padx=_PANEL_PADX, pady=(0, 6))
+        self.tree.pack(fill="y", anchor="nw", expand=True, padx=_PANEL_PADX, pady=(0, SPACE_SM))
+
+    def set_rail(self, rail: bool) -> None:
+        """Show the panel as a rail strip, or as the full journal.
+
+        A 46-pixel column cannot show a table: the header, the search field, the
+        summary and the detail pane would all be cut, and a table cut at its
+        second column is worse than no table. So the rail is *not* the journal
+        squeezed — it is one control that brings the journal back, and who decided
+        on it (the room, or the user) is the board's business, not this panel's.
+
+        Nothing is destroyed: the widgets are forgotten and shown again, so a
+        collapse and an expand keep the events, the filter and the selection.
+        """
+        if rail == self._rail:
+            return
+        self._rail = rail
+        if rail:
+            self._hide_for_rail()
+        else:
+            self._show_after_rail()
+
+    @property
+    def rail(self) -> bool:
+        """Whether the panel is currently collapsed to its rail."""
+        return self._rail
+
+    def _hide_for_rail(self) -> None:
+        """Forget the journal's own widgets and show the strip that reopens it."""
+        for widget in (self._header, self._entry, self._summary, self.tree, self._detail):
+            with contextlib.suppress(Exception):
+                widget.pack_forget()
+        with contextlib.suppress(Exception):
+            self._placeholder.place_forget()
+        if self._subject_chip is not None:
+            with contextlib.suppress(Exception):
+                self._subject_chip.pack_forget()
+        frame = tk.Frame(self, bg=APP_BACKGROUND)
+        # The chevron is ASCII (» is not present in every UI font, and the
+        # project's lint rejects the guillemet's ambiguous lookalikes anyway):
+        # a ">" is the language's own "more to the right".
+        button = tk.Label(
+            frame,
+            text=">",
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_ROWS,
+            cursor="hand2",
+        )
+        button.pack(pady=(SPACE_LG, SPACE_TIGHT))
+        caption = tk.Label(
+            frame,
+            text="Journal",
+            bg=APP_BACKGROUND,
+            fg=TEXT_MUTED,
+            font=FONT_META,
+            # Three characters per line turns the word into a vertical one, which
+            # is the only way to label a 46-pixel column in Tk.
+            width=3,
+            height=3,
+            justify="center",
+        )
+        caption.pack()
+        frame.pack(fill="y")
+        self._rail_frame = frame
+
+        def reopen(_event: object = None) -> None:
+            if self._on_expand is not None:
+                self._on_expand()
+
+        for widget in (frame, button, caption):
+            with contextlib.suppress(Exception):
+                widget.bind("<Button-1>", reopen)
+        if self._tooltip is not None:
+            with contextlib.suppress(Exception):
+                self._tooltip(button, "Afficher le journal")
+
+    def _show_after_rail(self) -> None:
+        """Put the journal's widgets back exactly where they were packed.
+
+        The packing order is the layout rule, so it is written out again here
+        rather than remembered: the detail pane is packed before the table (the
+        elastic part goes last) and the table last of all.
+        """
+        if self._rail_frame is not None:
+            with contextlib.suppress(Exception):
+                self._rail_frame.destroy()
+            self._rail_frame = None
+        with contextlib.suppress(Exception):
+            self._header.pack(fill="x", padx=SPACE_XL, pady=(SPACE_LG, SPACE_TIGHT))
+        if self._subject_chip is not None and self._subject is not None:
+            with contextlib.suppress(Exception):
+                self._subject_chip.pack(side="left", padx=(SPACE_MD, 0))
+        with contextlib.suppress(Exception):
+            self._entry.pack(fill="x", padx=_PANEL_PADX, pady=(0, SPACE_TIGHT))
+        with contextlib.suppress(Exception):
+            self._summary.pack(fill="x", padx=_PANEL_PADX, pady=(0, SPACE_TIGHT))
+        with contextlib.suppress(Exception):
+            self._detail.pack(side="bottom", fill="both", padx=_PANEL_PADX, pady=(0, SPACE_LG))
+        with contextlib.suppress(Exception):
+            self.tree.pack(fill="y", anchor="nw", expand=True, padx=_PANEL_PADX, pady=(0, SPACE_SM))
+        if not self._entry.get():
+            with contextlib.suppress(Exception):
+                self._placeholder.place(in_=self._entry, x=8, rely=0.5, relheight=1.0, anchor="w")
 
     def layout_key(self, event: Event) -> str:
         """Return the stable row id for *event* (``id`` when stored)."""
@@ -547,10 +688,12 @@ class MonitoringPanel(tk.Frame):
             fg=TEXT_PRIMARY,
             font=FONT_META,
             anchor="w",
-            padx=6,
+            padx=SPACE_SM,
         )
         text.pack(side="left")
-        clear = tk.Label(chip, text="x", bg=SURFACE_HOVER, fg=TEXT_MUTED, font=FONT_META, padx=6)
+        clear = tk.Label(
+            chip, text="x", bg=SURFACE_HOVER, fg=TEXT_MUTED, font=FONT_META, padx=SPACE_SM
+        )
         clear.pack(side="left")
         clear.bind("<Button-1>", lambda _event: self.dismiss_subject())
         with contextlib.suppress(Exception):
@@ -598,7 +741,7 @@ class MonitoringPanel(tk.Frame):
             chip.pack_forget()
             return
         text.config(text=f"sujet : {subject.label}")
-        chip.pack(side="left", padx=(10, 0))
+        chip.pack(side="left", padx=(SPACE_LG, 0))
 
     def apply(
         self,
@@ -674,7 +817,10 @@ class MonitoringPanel(tk.Frame):
                 tags=(level_tag(event),),
             )
         scope = self._workspace.name if self._workspace is not None else "Tous les workspaces"
-        self._scope.config(text="" if self._workspace is None else scope)
+        # The raw name is what the ellipsize binding re-cuts; setting the label
+        # directly is what the fakes and the tests read back.
+        self._scope_text = "" if self._workspace is None else scope
+        self._scope.config(text=self._scope_text)
         self._summary_text = summary_text(
             visible,
             store=self._store,
@@ -710,6 +856,27 @@ class MonitoringPanel(tk.Frame):
             text=ellipsize(self._summary_text, budget, text_measure(self, FONT_META))
         )
         wrap_at(self._detail, budget, minimum=200, padding=2 * _PANEL_PADX)
+
+    def _table_room(self) -> int:
+        """Return the pixels the table actually has, margins deducted.
+
+        The panel is the pane the board hands us, so its mapped width *is* the
+        room the table may use — the dashboard sizes the pane, the table fits the
+        pane, and neither has to ask the window for more. A panel that has not
+        been mapped yet reports 1, which the fitter reads as "not measurable" and
+        leaves the table on its pure content sizing.
+        """
+        with contextlib.suppress(Exception):
+            return max(int(self.winfo_width()) - 2 * _PANEL_PADX, 1)
+        return 1
+
+    def table_widths(self) -> dict[str, int]:
+        """Return the column widths the fitter last applied (for the host)."""
+        return self._fitter.widths()
+
+    def minimum_table_width(self) -> int:
+        """Return the narrowest the table can be, for the board's breakpoints."""
+        return self._fitter.minimum_total()
 
     def _on_select(self, _event: object = None) -> None:
         """Refresh the detail pane when the selection changes."""
@@ -865,7 +1032,7 @@ class ServerPanel(tk.Frame):
         # Container logs and deploy history are long lines: let them use the
         # window's real width instead of a fixed 940 pixels.
         bind_wraplength(self._label, minimum=200, padding=28)
-        self._label.pack(fill="both", expand=True, padx=14, pady=(4, 12))
+        self._label.pack(fill="both", expand=True, padx=SPACE_2XL, pady=(SPACE_TIGHT, SPACE_XL))
 
     def apply(self, snapshot: ServerSnapshot) -> None:
         """Render *snapshot*, ignoring a read that landed after ``destroy``."""

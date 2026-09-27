@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
-from helpers import FakeTk, FakeTtk, fake_server_page_bases, make_workspace
+from helpers import FakeTk, FakeTtk, fake_board_bases, fake_server_page_bases, make_workspace
 
 from n8n_launcher.core.models import ServerConfig, Workspace
 from n8n_launcher.gui import server_page
@@ -46,11 +46,12 @@ def _snapshot(*, healthy: bool = True) -> ServerSnapshot:
 def _fake_page_gui():
     """Rebase the page classes and swap the modules they build widgets with."""
     with ExitStack() as stack:
-        for module in ("server_page", "monitoring"):
+        for module in ("board", "server_page", "monitoring"):
             stack.enter_context(patch(f"n8n_launcher.gui.{module}.tk", FakeTk()))
             stack.enter_context(patch(f"n8n_launcher.gui.{module}.ttk", FakeTtk()))
+        stack.enter_context(fake_board_bases())
         stack.enter_context(fake_server_page_bases())
-        yield stack.enter_context(patch("n8n_launcher.gui.pages.tk", FakeTk()))
+        yield stack
 
 
 @contextmanager

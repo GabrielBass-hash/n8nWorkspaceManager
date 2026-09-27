@@ -23,7 +23,6 @@ from n8n_launcher.gui.dialogs import (
     GitHubCreatePlan,
     GitHubRepoPick,
     GitHubTokenPlan,
-    _finish_dialog_setup,
     _int_or,
     _repo_name_from,
     default_creation_db,
@@ -42,16 +41,6 @@ from n8n_launcher.gui.dialogs import (
     prompt_server_config,
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
-
-
-def test_finish_dialog_setup_registers_fonts_on_root() -> None:
-    dialog = FakeTk.Toplevel(None)
-    root = FakeRoot()
-
-    with patch("n8n_launcher.gui.dialogs.configure_fonts") as fonts:
-        _finish_dialog_setup(dialog, root)
-
-    fonts.assert_called_once_with(root)
 
 
 def test_prompt_create_dir_creates_selected_nested_directory(tmp_path) -> None:
@@ -452,7 +441,7 @@ def test_create_with_real_manager_persists_and_selects_row(gui_mocks, tmp_path) 
 
     wrapper = types.SimpleNamespace(app=launcher)
     assert row_text(wrapper, created_id) == "wf-real"
-    assert row_chip_text(wrapper, created_id, "port_chip") == (f":{workspaces[0].port}")
+    assert row_chip_text(wrapper, created_id, "db_chip")
     assert row_chip_text(wrapper, created_id, "db_chip") == "locale"
     assert launcher._selected_id == created_id
     assert (folder / "n8nPipelines").is_dir()
@@ -980,10 +969,11 @@ def test_prompt_create_source_selects_clone(gui_mocks) -> None:
         ]
         assert radios, "Radiobutton 'clone' introuvable"
         radios[0]._options["variable"].set("clone")
-        # Le bouton « Continuer » appelle submit() → set result + destroy.
+        # Le bouton « Continuer » appelle submit() → settle le choix + destroy.
+        # Il vit dans la barre d'actions nommée, pas dans ``dialog.children``.
         continue_btn = next(
             button
-            for button in dialog.children
+            for button in dialog.actions.children
             if isinstance(button, gui_mocks.ttk.Button)
             and (button.text or "").startswith("Continuer")
         )
@@ -1473,6 +1463,49 @@ def test_a_dialog_never_opens_wider_than_its_screen(gui_mocks) -> None:
         )
 
     assert gui_mocks.tk.Toplevel.instances[-1]._geometry.startswith("922x")
+
+
+def test_repo_picker_columns_follow_the_dialog_it_was_dragged_to(gui_mocks) -> None:
+    # A resizable dialog is a pane the user controls: dragged wider, the name
+    # column takes the room that appeared; dragged narrower, the four columns are
+    # compressed down together instead of the last one being the one Tk cuts.
+    tree, _status = _open_repo_picker(
+        gui_mocks,
+        [
+            {
+                "full_name": "octo/a-very-long-repository-name-for-workflows",
+                "clone_url": "u",
+                "private": True,
+                "default_branch": "production",
+                "updated_at": "2026-09-25T10:00:00Z",
+            }
+        ],
+    )
+    wide = tree.column_widths()
+    dialog = gui_mocks.tk.Toplevel.instances[-1]
+
+    # The dialog is what the user drags, so its mapped width is the room.
+    narrow = _resize_to(gui_mocks, dialog, tree, 600)
+    assert sum(narrow.values()) <= 600 - 36
+    assert narrow["#0"] < wide["#0"]
+    for name, minimum in dialogs._REPO_MINIMUMS.items():
+        assert narrow[name] >= minimum
+
+    # Dragged below what the four columns can be, they keep their minimums and
+    # the last one is the only thing cut: a picker is not a board, there is no
+    # rail to fall back to.
+    squeezed = _resize_to(gui_mocks, dialog, tree, 320)
+    assert squeezed == dict(dialogs._REPO_MINIMUMS)
+
+
+def _resize_to(gui_mocks, dialog, tree, width):
+    """Drag *dialog* to *width* and return the columns the refit settled on."""
+    dialog._geometry = f"{width}x600"
+    handlers = dialog._bindings["<Configure>"]
+    for handler in handlers if isinstance(handlers, list) else [handlers]:
+        handler(SimpleNamespace(width=width))
+    tree.run_after()
+    return tree.column_widths()
 
 
 def test_repo_picker_status_wraps_at_its_own_width(gui_mocks) -> None:

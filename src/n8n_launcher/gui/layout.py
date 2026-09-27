@@ -1,36 +1,42 @@
-"""Shared sizing helpers: size a table to its content, and a window to its screen.
+"""Shared sizing helpers: fit a table to the room it is given, and a window to its screen.
 
 Every table in the launcher — the event journal, the GitHub Actions runs tree,
 the pipeline selection tree, the repository picker — used to declare fixed
 pixel widths for its columns. Those numbers cannot be right for every host: a
 column holding ``INFO`` reserved the room of a long traceback, so the column
-that actually needed the space (the message) was the one Tk clipped, and the
-table needed ~590 to ~1060 px before a single character was visible.
+that actually needed the space (the message) was the one Tk clipped.
 
-The rule implemented here is the same everywhere:
+The rule implemented here is the same everywhere, and it is **elastic**: a
+column is sized to the widest of its heading and its own values, within a
+declared minimum and maximum — and the table as a whole is then fitted to the
+room its pane actually has.
 
-* a column is sized to the widest of its heading and its own values, within a
-  declared minimum and maximum, so a column with little in it stays little;
-* the width does **not** depend on the pane. A table is never squeezed into
-  whatever room the window happens to leave: the pane is the user's to give
-  (window width, paned sash) and the declared maximums are the bound that keeps
-  a column — and the window asking for it — from growing without limit;
-* the table's own widget is exactly that sum, and its **container asks for it**,
-  so the header row and the cells always describe the same table and a pane
-  that can hand the room over does.
+* **Content first.** A column takes the width of its own widest value, so a
+  column with little in it stays little and nothing is reserved in advance.
+* **Then the room.** :func:`fit_budget` reconciles that natural width with the
+  room available: the surplus goes to the pane's slack, and a deficit is taken
+  back from the columns with the most of it, never below their declared
+  minimum. One column is declared ``flexible`` and absorbs what is left, up to
+  its maximum — the message in a journal, a pipeline name in a tree.
+* **The pane is the user's.** What is left after a fit stays empty rather than
+  being handed to a column that did not ask for it, and a table that needs more
+  than its pane has is compressed to its columns' minimums rather than widening
+  the window; the one case left cut is a room narrower than the sum of those
+  minimums, where the last column is what Tk clips.
 
-:class:`ColumnFitter` is the Tk half of that rule: it reads the rows back from
-the widget (never from the caller's data) and pushes the widths they ask for.
-Because the widths no longer depend on the widget's size, there is nothing to
-refit on ``<Configure>`` — the fitter is called once per render instead, and the
-table always describes what is currently on screen.
+Two consequences make the launcher responsive instead of merely content-sized:
+the widths are a function of *both* the rows and the pane, so :class:`ColumnFitter`
+**does** refit on ``<Configure>`` — debounced, and only when the room really
+changed, so a drag cannot start a push loop; and nothing anywhere grows the
+window any more, because a table that cannot be shown at its natural width is
+compressed down to its minimums instead of dragging the window wider.
 
-:class:`WindowFitter` closes the loop one level up. A dialog that never declares
-a width opens at whatever Tk negotiates from its children, which is the sum of
-the *minimum* column widths (what a table requests before its first render), so
-its content is clipped. Once the rows are in, ``winfo_reqwidth`` is the real
-content width — every child's own request, fitted tables included — and
-:func:`content_width` bounds it to the display the window is on.
+:class:`WindowFitter` closes the loop for the windows that are *not* a pane: a
+dialog that never declares a width opens at whatever Tk negotiates from its
+children, which is the sum of the *minimum* column widths, so its content is
+clipped. Once the rows are in, ``winfo_reqwidth`` is the real content width —
+every child's own request, fitted tables included — and :func:`content_width`
+bounds it to the display the window is on.
 
 :func:`ellipsize` applies the same "content first" idea to a single
 ``tk.Label``, and :func:`screen_fraction_size` gives windows that hold no table
@@ -63,11 +69,100 @@ _MEASURED_CANDIDATES = 8
 # floor of ``bind_wraplength`` so a collapsed pane degrades instead of vanishing.
 _MIN_WRAP_LENGTH = 120
 
+# How long a resize waits before the columns are re-fitted, in milliseconds. A
+# window drag fires ``<Configure>`` continuously, and every fit measures text and
+# pushes a width: coalescing the burst keeps a drag smooth, and the leading edge
+# of a real resize is under 100ms away.
+REFIT_DEBOUNCE_MS = 80
+
 
 def _longest(rows: Sequence[Mapping[str, str]], column: str) -> list[str]:
     """Return the *column*'s longest values, the only ones worth measuring."""
     texts = [str(row.get(column) or "") for row in rows]
     return heapq.nlargest(_MEASURED_CANDIDATES, texts, key=len)
+
+
+def _compress(
+    widths: Mapping[str, int], minimums: Mapping[str, int], available: int
+) -> dict[str, int]:
+    """Return *widths* shrunk to fit *available* pixels, floor by floor.
+
+    The shrink is a **water-filling**: a cap is lowered on every column at once
+    until the table fits, so the columns that gave room are the ones that had the
+    most of it and a narrow column keeps its natural width until the wide ones
+    are down to its level. The cap is found by binary search because the sum is
+    monotonic in the cap, which makes this exact and logarithmic in the widths
+    rather than a pixel-at-a-time walk.
+
+    Nothing ever goes below a declared minimum: when the room is narrower than
+    the sum of the minimums the cap bottoms out and the table is simply cut,
+    which is the one case the window's own floor is there to prevent.
+    """
+
+    def total_at(cap: int) -> int:
+        return sum(max(minimums.get(name, 0), min(width, cap)) for name, width in widths.items())
+
+    if total_at(max(widths.values(), default=0)) <= available:
+        return dict(widths)
+    low, high = 0, max(widths.values(), default=0)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if total_at(middle) <= available:
+            low = middle
+        else:
+            high = middle - 1
+    result = {name: max(minimums.get(name, 0), min(width, low)) for name, width in widths.items()}
+    # Water-filling leaves a remainder of fewer pixels than there are columns
+    # (one at a time is not enough to raise a whole column). Those pixels go to
+    # the columns with the largest remaining shortfall, so the cap is reached
+    # evenly rather than on whichever column happens to come first.
+    leftover = available - sum(result.values())
+    for name in sorted(widths, key=lambda item: (-(widths[item] - result[item]), item)):
+        if leftover <= 0:
+            break
+        if result[name] < widths[name]:
+            result[name] += 1
+            leftover -= 1
+    return result
+
+
+def fit_budget(
+    widths: Mapping[str, int],
+    minimums: Mapping[str, int],
+    maximums: Mapping[str, int],
+    *,
+    available: int,
+    flexible: str | None = None,
+) -> dict[str, int]:
+    """Return *widths* reconciled with the *available* room.
+
+    A table whose content does not fit is compressed (see :func:`_compress`); a
+    table that does fit is left as it is, and only the *flexible* column takes any
+    of the room left over, up to its maximum. Every other column keeps the width
+    its content asked for: a pane wider than the table must not stretch it,
+    because a stretched column is a column whose text ends nowhere.
+
+    A room of 1 or less means "not measured" — Tk's answer before the first
+    layout — and the widths are returned untouched, so an unmeasured table stays
+    on its content sizing instead of collapsing to its minimums.
+
+    *flexible* names the one column that may grow: the message of a journal
+    event, the pipeline name of a tree, the repository name of the picker. It is
+    the column whose content is prose, so it is the one that benefits from the
+    spare room — and the one that can be given more without inventing space for
+    a column that only holds ``INFO``.
+    """
+    if available <= 1:
+        return dict(widths)
+    result = dict(widths)
+    total = sum(result.values())
+    if total > available:
+        return _compress(result, minimums, available)
+    if flexible is not None and flexible in result:
+        room = maximums.get(flexible, result[flexible]) - result[flexible]
+        if room > 0:
+            result[flexible] += min(room, available - total)
+    return result
 
 
 def column_widths(
@@ -77,27 +172,31 @@ def column_widths(
     minimums: Mapping[str, int],
     maximums: Mapping[str, int],
     measure: Callable[[str], int],
+    available: int | None = None,
+    flexible: str | None = None,
 ) -> dict[str, int]:
     """Return the pixel width of every declared column of *rows*.
 
-    Each column takes the width of its widest heading or value (plus the cell
-    margin), clamped between ``minimums`` and ``maximums``. The width is a
-    property of the content alone: it is deliberately *not* a share of the pane,
-    because sharing made the column carrying the prose the one that got cut
-    whenever the window was narrower than the content. A table that overflows
-    its pane is not wrong — the user can widen the window, drag the paned sash,
-    or read the whole entry in the detail pane.
+    Each column first takes the width of its widest heading or value (plus the
+    cell margin), clamped between ``minimums`` and ``maximums``. The whole table
+    is then fitted to *available* pixels when that room is known: the deficit is
+    taken back from the columns that have the most slack and the surplus is given
+    to *flexible*. Passing no *available* keeps the pure content sizing, which is
+    what a dialog that sizes itself from its content wants.
 
     The maximums are what keep this from running away: they are the declared
-    bound on how much room a column may ever ask for, and therefore how much a
-    window hosting the table can be asked to open at.
+    bound on how much room a column may ever ask for.
     """
     widths: dict[str, int] = {}
     for name, heading in headings.items():
         widest = max((measure(text) for text in _longest(rows, name)), default=0)
         # The heading must stay readable even when its column holds nothing.
         natural = max(widest, measure(heading)) + _CELL_PADDING
-        widths[name] = min(max(natural, minimums[name]), maximums[name])
+        low = minimums.get(name, 0)
+        high = max(maximums.get(name, natural), low)
+        widths[name] = min(max(natural, low), high)
+    if available is not None:
+        return fit_budget(widths, minimums, maximums, available=available, flexible=flexible)
     return widths
 
 
@@ -127,20 +226,20 @@ def ellipsize(text: str, width: int, measure: Callable[[str], int]) -> str:
 
 
 class ColumnFitter:
-    """Keep a ``ttk.Treeview``'s columns — and its container — sized to content.
+    """Keep a ``ttk.Treeview``'s columns — and its container — sized to its room.
 
     One instance per table: declare the columns' headings and bounds, then call
     :meth:`rows` after every render. The fitter reads the rows back from the
     widget, so the widths always describe what is on screen.
 
-        The table is packed **without** a horizontal fill, which is what makes the
-        two halves of this work: a ``ttk.Treeview`` requests the sum of its columns,
-        so left unfilled it is exactly as wide as the table — the header row sits
-        over the cells instead of stretching past them — and *container* is given
-        that same width, so the widget holding the table asks its geometry manager
-        for the room the table needs. A pane that can give it does; a pane wider
-        than the table stretches nothing. That request only follows a push once the
-        table has been re-asked for it: see :meth:`_invalidate_request`.
+        The table is packed **without** a horizontal fill: a ``ttk.Treeview``
+        requests the sum of its columns, so left unfilled it is exactly as wide
+        as the table — the header row sits over the cells instead of stretching
+        past them — and *container* is given that same width, so the widget
+        holding the table asks its geometry manager for the room the table needs.
+        A pane that can give it does; a pane wider than the table stretches
+        nothing. That request only follows a push once the table has been
+        re-asked for it: see :meth:`_invalidate_request`.
 
 
     The container is only as wide as its **widest child**, so a view that keeps a
@@ -150,10 +249,12 @@ class ColumnFitter:
     columns but stops meeting the container's outline, the slack landing on the
     right because the table is packed ``anchor="nw"``.
 
-    There is no ``<Configure>`` handler: the widths are a function of the rows,
-    not of the widget's size, so a resize has nothing to recompute. That is also
-    why the fitter fits a table that has not been mapped yet — a dialog is sized
-    to its content before it is ever shown.
+    The widths are a function of the rows **and** of the room, so a resize does
+    have something to recompute and the fitter listens for it on the container's
+    ``<Configure>``. Two guards keep that from becoming a busy loop: the refit is
+    debounced (:data:`REFIT_DEBOUNCE_MS`, so a window drag is one fit and not a
+    hundred), and a room that has not actually changed is ignored outright. A
+    fit whose widths came out identical pushes nothing at all.
     """
 
     def __init__(
@@ -166,12 +267,19 @@ class ColumnFitter:
         maximums: Mapping[str, int],
         measure: Callable[[str], int],
         container: tk.Misc | None = None,
+        available: Callable[[], int] | None = None,
+        flexible: str | None = None,
     ) -> None:
         """Bind the fitter to *tree* and the column bounds it must respect.
 
         *container* is the widget whose width must follow the table (the panel,
         the page or the dialog holding it). It is optional: a table in a window
         that already sizes itself from ``winfo_reqwidth()`` needs no help.
+
+        *available* reports the room the table has, and is what makes the fitter
+        responsive: with it, the columns are fitted to the pane instead of asking
+        it to grow, and a ``<Configure>`` triggers a refit. *flexible* names the
+        one column allowed to absorb the room that is left over.
         """
         self._tree = tree
         self._headings = dict(headings)
@@ -179,6 +287,8 @@ class ColumnFitter:
         self._maximums = dict(maximums)
         self._measure = measure
         self._container = container
+        self._available = available
+        self._flexible = flexible
         # ``#0`` is the tree's own label column: its content is the item's text
         # rather than a slot of ``values``, hence the separate branch in
         # ``_rows``. Its display position is always first.
@@ -187,6 +297,10 @@ class ColumnFitter:
         self._widths: dict[str, int] = {}
         self._applied: dict[str, int] = {}
         self._applied_total = 0
+        self._room = 0
+        self._refit_id: str | None = None
+        if available is not None:
+            self._listen_resize()
 
     def widths(self) -> dict[str, int]:
         """Return the last computed widths (the state the fitter applied)."""
@@ -196,14 +310,34 @@ class ColumnFitter:
         """Return the width of the whole table: the sum of its column widths."""
         return sum(self._widths.values())
 
+    def minimum_total(self) -> int:
+        """Return the narrowest the table can be: the sum of its minimums.
+
+        This is the floor a pane has to honour for the table to show all of its
+        columns, which is what the dashboard's breakpoints are measured against:
+        below it the last column is cut, and the honest answer is to give the
+        table the room instead.
+        """
+        return sum(self._minimums.get(name, 0) for name in self._headings)
+
+    def room(self) -> int:
+        """Return the room the table was last fitted to (0 when unconstrained)."""
+        return self._room
+
     def rows(self) -> None:
         """Refit the columns to the rows the tree is currently showing."""
+        room = self._measure_room()
+        # Remembered even when the widget could not be measured, so a later
+        # ``<Configure>`` for the room it did have is recognised as a change.
+        self._room = room or 0
         self._widths = column_widths(
             self._rows(),
             headings=self._headings,
             minimums=self._minimums,
             maximums=self._maximums,
             measure=self._measure,
+            available=room,
+            flexible=self._flexible,
         )
         changed = False
         for name, width in self._widths.items():
@@ -211,13 +345,13 @@ class ColumnFitter:
                 continue
             with contextlib.suppress(Exception):
                 # Every table in the launcher is left-aligned, and no column
-                # stretches: each one keeps the exact width its content asked
-                # for, and the room the widget has to spare stays empty rather
-                # than being handed to a column that did not ask for it.
+                # stretches on its own: each one keeps the exact width the fit
+                # gave it, and the room the widget has to spare stays empty
+                # rather than being handed to a column that did not ask for it.
                 self._tree.column(
                     name,
                     width=width,
-                    minwidth=self._minimums[name],
+                    minwidth=self._minimums.get(name, 0),
                     stretch=False,
                     anchor="w",
                 )
@@ -226,6 +360,60 @@ class ColumnFitter:
         if changed:
             self._invalidate_request()
         self._align_container()
+
+    # --------------------------------------------------------------- responsive
+    def _listen_resize(self) -> None:
+        """Refit when the container's room changes, debounced.
+
+        The binding is *added* rather than set: a container can carry several
+        independent listeners for the same sequence — this refit and the
+        ``WindowFitter`` that watches a dialog for the user taking over — and a
+        plain ``bind`` would replace the first one with the second, which is how a
+        table inside a resizable dialog silently stopped following it.
+        """
+        if self._container is None:
+            return
+        with contextlib.suppress(Exception):
+            self._container.bind("<Configure>", self._on_resize, add="+")
+
+    def _on_resize(self, _event: object = None) -> None:
+        """Schedule a refit for the new room, unless the room did not change.
+
+        Tk reports the *event's* width on the container, which includes the
+        container's own padding and borders — so it is only a change detector,
+        never the budget itself: :meth:`_measure_room` asks the widget what the
+        table really has.
+        """
+        if self._refit_id is not None:
+            return
+        room = self._available() if self._available is not None else 0
+        if room == self._room:
+            return
+        with contextlib.suppress(Exception):
+            self._refit_id = self._tree.after(REFIT_DEBOUNCE_MS, self._refit)
+
+    def _refit(self) -> None:
+        """Run the debounced refit, unless the room came back unchanged."""
+        self._refit_id = None
+        if self._available is None:
+            return
+        room = self._available()
+        if room == self._room or room <= 1:
+            return
+        self.rows()
+
+    def _measure_room(self) -> int | None:
+        """Return the room to fit into, or ``None`` when it is unconstrained.
+
+        A widget that has not been mapped reports 1, which is Tk's "I do not
+        know" answer: fitting against it would push every column to its minimum,
+        so an unmeasured table keeps its pure content sizing until it is on
+        screen and has a real room to answer with.
+        """
+        if self._available is None:
+            return None
+        room = self._available()
+        return room if room > 1 else None
 
     def _invalidate_request(self) -> None:
         """Make an **already mapped** table ask for the widths just pushed to it.
@@ -342,6 +530,48 @@ def bind_wraplength(
             return
         last = target
         wrap_at(label, width, minimum=minimum, padding=padding)
+
+    label.bind("<Configure>", on_resize)
+    return label
+
+
+def bind_ellipsize(
+    label: tk.Label,
+    text: Callable[[], str],
+    measure: Callable[[str], int],
+    *,
+    apply: Callable[[str], None] | None = None,
+) -> tk.Label:
+    """Keep *label*'s text inside its own width, re-cut on every ``<Configure>``.
+
+    The single-label counterpart of :func:`bind_wraplength`, for a field that
+    must stay on one line: the caller owns the *raw* text and this re-applies it
+    cut to the widget's current width, so a value of unpredictable length — a
+    workspace name in a journal header — can never out-request its own label and
+    widen the card holding it. *apply* defaults to ``config(text=…)``.
+
+    The raw text is read from *text* on every resize rather than captured, so
+    the caller keeps setting it the plain way and this stays the only thing that
+    knows about the ellipsis.
+    """
+    last = -1
+
+    def on_resize(event: object = None) -> None:
+        """Re-cut the text at the label's current width."""
+        nonlocal last
+        width = event if isinstance(event, int) else getattr(event, "width", None)
+        if not isinstance(width, int) or width <= 1:
+            return
+        if width == last:
+            return
+        last = width
+        raw = text()
+        cut = ellipsize(raw, width, measure)
+        with contextlib.suppress(Exception):
+            if apply is None:
+                label.config(text=cut)
+            else:
+                apply(cut)
 
     label.bind("<Configure>", on_resize)
     return label
@@ -477,7 +707,11 @@ class WindowFitter:
         self._height = height
         self._applied = 0
         self._locked = False
-        window.bind("<Configure>", self.on_resize)
+        # Added, not set: a window holding a fitted table carries two listeners
+        # for ``<Configure>`` — this one and the table's refit — and a plain
+        # ``bind`` would drop whichever came first, which is how a table in a
+        # resizable dialog stopped following the dialog.
+        window.bind("<Configure>", self.on_resize, add="+")
 
     @property
     def locked(self) -> bool:
@@ -529,12 +763,16 @@ __all__ = [
     "DEFAULT_CONTENT_WIDTH",
     "DEFAULT_WIDTH_FRACTION",
     "ELLIPSIS",
+    "REFIT_DEBOUNCE_MS",
     "ColumnFitter",
     "WindowFitter",
+    "bind_ellipsize",
     "bind_wraplength",
     "column_widths",
     "content_width",
     "ellipsize",
+    "fit_budget",
     "screen_fraction_size",
     "screen_size",
+    "wrap_at",
 ]

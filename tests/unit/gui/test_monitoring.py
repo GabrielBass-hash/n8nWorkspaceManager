@@ -13,6 +13,7 @@ from helpers import (
     FakeTtk,
     fake_monitoring_panel_bases,
     fake_server_panel_bases,
+    fire,
 )
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
@@ -421,9 +422,9 @@ def test_download_icon_runs_its_command_on_click_and_from_the_keyboard():
 def test_download_icon_highlights_its_strokes_on_hover():
     with fake_gui():
         icon = monitoring._download_icon(FakeTk.Frame(None), command=lambda: None)
-        icon._bindings["<Enter>"](None)
+        fire(icon, "<Enter>", None)
         hovered = icon.lines()
-        icon._bindings["<Leave>"](None)
+        fire(icon, "<Leave>", None)
         left = icon.lines()
     assert all(line["fill"] == monitoring.TEXT_PRIMARY for line in hovered)
     assert all(line["fill"] == monitoring.TEXT_MUTED for line in left)
@@ -751,7 +752,7 @@ def test_monitoring_panel_search_reuses_cached_events():
         panel.apply([make_event(id=1, message="docker up"), make_event(id=2, message="git push")])
         entry = next(widget for widget in _walk(panel) if isinstance(widget, FakeTk.Entry))
         entry.insert(0, "git")
-        entry._bindings["<KeyRelease>"](None)
+        fire(entry, "<KeyRelease>", None)
     assert panel.tree.get_children() == ["event-2"]
 
 
@@ -761,7 +762,7 @@ def test_monitoring_panel_search_filters_by_level():
         panel.apply([make_event(id=1, level="INFO"), make_event(id=2, level="ERROR")])
         entry = next(widget for widget in _walk(panel) if isinstance(widget, FakeTk.Entry))
         entry.insert(0, "ERROR")
-        entry._bindings["<Return>"](None)
+        fire(entry, "<Return>", None)
     assert panel.tree.get_children() == ["event-2"]
 
 
@@ -790,7 +791,7 @@ def test_monitoring_panel_placeholder_hides_as_soon_as_the_field_is_used():
 def test_monitoring_panel_placeholder_click_focuses_the_search_field():
     with fake_gui():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
-        panel._placeholder._bindings["<Button-1>"](None)
+        fire(panel._placeholder, "<Button-1>", None)
     assert panel._entry._focused is True
 
 
@@ -809,7 +810,7 @@ def test_monitoring_panel_exports_through_the_download_icon():
             tooltip=lambda widget, _text: None,
         )
         assert FakeTk.Canvas.instances == [panel._export_icon]
-        panel._export_icon._bindings["<Button-1>"](None)
+        fire(panel._export_icon, "<Button-1>", None)
     assert exports == ["json"]
 
 
@@ -929,35 +930,151 @@ def test_the_table_is_packed_after_the_detail_pane():
     assert panel.children.index(panel.tree) > panel.children.index(panel._detail)
 
 
-def test_panel_tree_columns_do_not_depend_on_the_sash():
-    # The defect this fixes: the journal used to hand the flexible column the room
-    # the pane had left, so the same events were laid out differently depending on
-    # where the user had dragged the sash.
+def test_panel_tree_columns_do_not_depend_on_the_table_own_width():
+    # A tree's own ``winfo_width`` is the box the fitter gave it, not a budget it
+    # is allowed to grow into: reading it back would make the fit chase its own
+    # output. The room comes from the *pane* the board hands the panel.
     with fake_gui():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
-        panel.apply(
-            [
-                make_event(
-                    id=1,
-                    message="démarrage du workspace — docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s",
-                )
-            ],
-            store=None,
-        )
+        events = [
+            make_event(
+                id=1,
+                message="démarrage du workspace — docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s",
+            )
+        ]
+        panel.apply(events, store=None)
         first = panel.tree.column_widths()
 
         panel.tree._width = 1200
-        panel.apply(
-            [
-                make_event(
-                    id=1,
-                    message="démarrage du workspace — docker compose up -d sur n8n-ws-3f2a terminé en 12,4 s",
-                )
-            ],
-            store=None,
-        )
+        panel.apply(events, store=None)
 
     assert panel.tree.column_widths() == first
+
+
+def test_the_journal_follows_the_pane_it_is_shown_in():
+    # The one elastic column of the journal is the message, so a wider pane gives
+    # it exactly the room that appeared — and nothing else moves, because a
+    # timestamp and a level are the same length whatever the window is.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel._width = 1200
+        panel.apply([make_event(id=1, message="démarrage du workspace")], store=None)
+        wide = panel.table_widths()
+
+        panel._width = 520
+        panel.apply([make_event(id=1, message="démarrage du workspace")], store=None)
+        narrow = panel.table_widths()
+
+    assert wide["message"] > narrow["message"]
+    assert wide["time"] == narrow["time"]
+    assert wide["level"] == narrow["level"]
+    assert sum(narrow.values()) <= 520 - 2 * monitoring._PANEL_PADX
+
+
+# --- the rail: a collapsed journal, and the one control that brings it back ---
+
+
+def test_a_collapsed_journal_is_one_button_not_a_cut_table():
+    # 46 pixels cannot show a tree, a search field and a detail pane: what is left
+    # of them is worse than none of them. The rail is a single control, and the
+    # journal's own widgets are simply forgotten — nothing is destroyed, so the
+    # events, the filter and the selection all survive the round trip.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1, message="un événement")], store=None)
+        assert panel.rail is False
+
+        panel.set_rail(True)
+
+        assert panel.rail is True
+        assert panel._rail_frame is not None
+        assert panel._rail_frame.packed
+        for widget in (panel._header, panel._entry, panel._summary, panel.tree, panel._detail):
+            assert widget.packed is False
+
+        panel.set_rail(False)
+
+        assert panel.rail is False
+        assert panel._rail_frame is None
+        for widget in (panel._header, panel._entry, panel._summary, panel.tree, panel._detail):
+            assert widget.packed is True
+
+
+def test_the_rail_reopens_the_journal_through_the_host():
+    # The panel never resizes itself: it is the board that owns the split, so the
+    # rail's only action is a callback and the user keeps the decision.
+    reopened: list[int] = []
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None), on_expand=lambda: reopened.append(1))
+        panel.set_rail(True)
+
+        strip = panel._rail_frame
+        assert strip is not None
+        # Frame, chevron and caption are all bound, so the whole strip is a
+        # target — clicking anywhere on it brings the journal back.
+        for child in (strip, *strip.children):
+            fire(child, "<Button-1>", SimpleNamespace())
+
+    assert reopened == [1, 1, 1]
+
+
+def test_the_rail_keeps_the_detail_pane_below_the_table_when_it_comes_back():
+    # The packing order *is* the layout rule (the elastic part last), so a
+    # collapse and an expand must not quietly invert it: a six-line detail pane
+    # packed after the table would absorb the shortfall of a short pane.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.set_rail(True)
+        panel.set_rail(False)
+        children = panel.children
+
+    assert children.index(panel.tree) > children.index(panel._detail)
+    assert children.index(panel.tree) > children.index(panel._summary)
+
+
+def test_the_journal_is_the_same_panel_after_a_round_trip():
+    # The rail must not cost the panel its state: a user who collapses the log to
+    # read the list and opens it again expects the same rows, not a fresh one.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.apply([make_event(id=1, message="un événement")], store=None)
+        rows = list(panel.tree._items)
+        panel.set_rail(True)
+        panel.set_rail(False)
+
+    assert list(panel.tree._items) == rows
+
+
+def test_a_rail_state_that_did_not_change_touches_nothing():
+    # The board decides the rail on every reflow, most of the time with the answer
+    # it already gave: rebuilding the strip each time would flicker.
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+        panel.set_rail(True)
+        strip = panel._rail_frame
+        panel.set_rail(True)
+
+        assert panel._rail_frame is strip
+
+
+def test_the_rail_carries_a_tooltip_when_the_host_provides_one():
+    told: list[tuple[object, str]] = []
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(
+            FakeTk.Frame(None), tooltip=lambda widget, text: told.append((widget, text))
+        )
+        panel.set_rail(True)
+
+    assert told and told[-1][1] == "Afficher le journal"
+
+
+def test_a_rail_without_a_host_tooltip_is_harmless():
+    with fake_gui():
+        panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
+
+        panel.set_rail(True)
+
+    assert panel.rail is True
 
 
 def test_panel_detail_wraps_at_its_own_width():
@@ -965,7 +1082,7 @@ def test_panel_detail_wraps_at_its_own_width():
         panel = monitoring.MonitoringPanel(FakeTk.Frame(None))
         panel._detail._width = 524
 
-    panel._detail._bindings["<Configure>"](SimpleNamespace(width=524))
+    fire(panel._detail, "<Configure>", SimpleNamespace(width=524))
 
     # 500 = 524 - 24 of padding: the detail never wraps at a stale hard-coded px.
     assert panel._detail._options["wraplength"] == 500
@@ -977,7 +1094,7 @@ def test_server_panel_label_wraps_at_its_own_width():
         panel.apply(ServerSnapshot(health=_health(), logs="ready"))
         panel._label._width = 628
 
-    panel._label._bindings["<Configure>"](SimpleNamespace(width=628))
+    fire(panel._label, "<Configure>", SimpleNamespace(width=628))
 
     assert panel._label._options["wraplength"] == 600
 
@@ -1012,12 +1129,12 @@ def test_ctrl_c_copies_the_selected_event_whole():
         panel.apply([make_event(id=1), event], store=None)
         # A click on a row selects it and refreshes the detail pane, as Tk does.
         panel.tree.selection_set("event-2")
-        panel.tree._bindings["<<TreeviewSelect>>"](None)
+        fire(panel.tree, "<<TreeviewSelect>>", None)
         copied: list[str] = []
         panel.clipboard_clear = lambda: copied.clear()
         panel.clipboard_append = copied.append
 
-        result = panel.tree._bindings["<Control-c>"](None)
+        result = fire(panel.tree, "<Control-c>", None)
 
     # Exactly one event, and the whole of it: the same text the detail pane shows.
     assert result == "break"
@@ -1035,7 +1152,7 @@ def test_ctrl_c_without_a_selection_leaves_the_clipboard_alone():
         panel.clipboard_clear = lambda: copied.clear()
         panel.clipboard_append = copied.append
 
-        result = panel.tree._bindings["<Control-c>"](None)
+        result = fire(panel.tree, "<Control-c>", None)
 
     assert result == "break"
     assert copied == []
@@ -1052,9 +1169,9 @@ def test_ctrl_c_follows_the_current_selection():
         panel.clipboard_append = copied.append
 
         panel.tree.selection_set("event-1")
-        panel.tree._bindings["<Control-c>"](None)
+        fire(panel.tree, "<Control-c>", None)
         panel.tree.selection_set("event-2")
-        panel.tree._bindings["<Control-c>"](None)
+        fire(panel.tree, "<Control-c>", None)
 
     assert [text.splitlines()[1] for text in copied] == ["premier", "deuxième"]
 
@@ -1066,4 +1183,4 @@ def test_copy_survives_a_clipboard_that_is_unavailable():
         panel.tree.selection_set("event-1")
         panel.clipboard_clear = lambda: (_ for _ in ()).throw(RuntimeError("no clipboard"))
 
-        assert panel.tree._bindings["<Control-c>"](None) == "break"
+        assert fire(panel.tree, "<Control-c>", None) == "break"

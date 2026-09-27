@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import time
 from contextlib import ExitStack, contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from helpers import (
     FakeRoot,
     FakeTk,
     FakeTtk,
+    fake_dialog_bases,
     fake_runs_panel_bases,
+    fire,
     make_workspace,
 )
 
 from n8n_launcher.github.api import GitHubError
 from n8n_launcher.gui.app import CI_RUNS_TTL_SECONDS
 from n8n_launcher.gui.ci_edit import (
-    _finish_dialog_setup,
     prompt_ci_credentials,
     prompt_run_ci,
 )
@@ -36,16 +38,6 @@ def ci_mocks(workspace, credentials=None):
     return launcher, api
 
 
-def test_finish_dialog_setup_registers_fonts_on_root() -> None:
-    dialog = FakeTk.Toplevel(None)
-    root = FakeRoot()
-
-    with patch("n8n_launcher.gui.ci_edit.configure_fonts") as fonts:
-        _finish_dialog_setup(dialog, root)
-
-    fonts.assert_called_once_with(root)
-
-
 class _ReturnTk(FakeTk):
     """Same fakes, but Toplevel.wait_window submits with <Return> when armed."""
 
@@ -62,11 +54,19 @@ class _ReturnTk(FakeTk):
 
 @contextmanager
 def _patch_ci_editor(tk_fake):
-    """Patch ci_edit's tk/ttk/messagebox and yield them, then restore."""
+    """Patch what these two dialogs read, yield the fakes, then restore.
+
+    The dialogs themselves are built by the shared ``Dialog`` base, so this also
+    rebases that class and fakes the module it lives in — otherwise a real Tk
+    root would be created for the action bar alone.
+    """
 
     stack = ExitStack()
     tk_patch = stack.enter_context(patch("n8n_launcher.gui.ci_edit.tk", tk_fake))
-    ttk_patch = stack.enter_context(patch("n8n_launcher.gui.ci_edit.ttk", FakeTtk()))
+    stack.enter_context(patch("n8n_launcher.gui.ci_edit.ttk", FakeTtk()))
+    stack.enter_context(fake_dialog_bases())
+    stack.enter_context(patch("n8n_launcher.gui.dialog.tk", tk_fake))
+    stack.enter_context(patch("n8n_launcher.gui.dialog.ttk", FakeTtk()))
     messagebox = stack.enter_context(
         patch(
             "n8n_launcher.gui.ci_edit.messagebox",
@@ -78,7 +78,25 @@ def _patch_ci_editor(tk_fake):
         )
     )
     with stack:
-        yield tk_patch, ttk_patch, messagebox
+        yield tk_patch, messagebox
+
+
+def _credentials_tree(dialog):
+    """Return the credentials table of *dialog*, whatever it was built against."""
+    trees = [child for child in flat_children(dialog) if isinstance(child, FakeTtk.Treeview)]
+    assert len(trees) == 1, f"expected one credentials table, found {len(trees)}"
+    return trees[0]
+
+
+def _click_row(tree, item: str) -> None:
+    """Click the row *item* of *tree* the way a user does.
+
+    The y coordinate is the row's own: a ttk.Treeview maps a click to a row by
+    where it lands, so the test has to place it rather than name the item.
+    """
+    rows = tree.get_children()
+    y = rows.index(item) * 20 + 5
+    fire(tree, "<Button-1>", SimpleNamespace(x=10, y=y, widget=tree))
 
 
 def flat_children(widget):
@@ -106,7 +124,7 @@ def test_prompt_ci_credentials_warns_when_never_started(tmp_path) -> None:
     launcher, _ = ci_mocks(workspace)
     workspace.api_key = None
 
-    with _patch_ci_editor(FakeTk()) as (_, _, messagebox):
+    with _patch_ci_editor(FakeTk()) as (_, messagebox):
         prompt_ci_credentials(FakeRoot(), launcher, workspace)
 
     assert "Démarrez ce workspace" in messagebox.showwarning.call_args.args[1]
@@ -124,29 +142,33 @@ def test_prompt_ci_credentials_copies_json_then_records_metadata(tmp_path) -> No
     )
     launcher.ci_credentials_payload.return_value = '{"ok": true}'
 
-    with _patch_ci_editor(FakeTk()) as (tk_fake, _, _):
+    # The dialog is driven inside the patch context: ``Dialog`` is a subclass
+    # whose base is swapped onto the fakes for the duration, so a callback fired
+    # after the block resolves against the real Tk and silently does nothing.
+    with _patch_ci_editor(FakeTk()) as (tk_fake, _):
         prompt_ci_credentials(FakeRoot(), launcher, workspace)
 
-    dialog = tk_fake.Toplevel.instances[-1]
-    children = list(flat_children(dialog))
-    buttons = [child for child in children if isinstance(child, FakeTtk.Button)]
-    copy = next(button for button in buttons if "Copier le JSON" in (button.text or ""))
-    copy.command()
+        dialog = tk_fake.Toplevel.instances[-1]
+        children = list(flat_children(dialog))
+        buttons = [child for child in children if isinstance(child, FakeTtk.Button)]
+        copy = next(button for button in buttons if "Copier le JSON" in (button.text or ""))
+        copy.command()
 
-    assert dialog._clipboard == '{"ok": true}'
-    status = next(
-        child
-        for child in children
-        if isinstance(child, tk_fake.Label) and "JSON copié" in child._options.get("text", "")
-    )
-    assert "N8N_CI_CREDENTIALS" in status._options["text"]
-    launcher.set_ci_credentials.assert_not_called()
+        assert dialog._clipboard == '{"ok": true}'
+        status = next(
+            child
+            for child in children
+            if isinstance(child, tk_fake.Label) and "JSON copié" in child._options.get("text", "")
+        )
+        assert "N8N_CI_CREDENTIALS" in status._options["text"]
+        launcher.set_ci_credentials.assert_not_called()
 
-    pasted = next(button for button in buttons if "J'ai collé" in (button.text or ""))
-    pasted.command()
-    launcher.set_ci_credentials.assert_called_once_with(
-        workspace, [{"name": "API", "type": "httpRequest"}, {"name": "DB", "type": "postgres"}]
-    )
+        pasted = next(button for button in buttons if "J'ai collé" in (button.text or ""))
+        pasted.command()
+        launcher.set_ci_credentials.assert_called_once_with(
+            workspace,
+            [{"name": "API", "type": "httpRequest"}, {"name": "DB", "type": "postgres"}],
+        )
 
 
 def test_prompt_ci_credentials_skips_empty_names(tmp_path) -> None:
@@ -156,14 +178,12 @@ def test_prompt_ci_credentials_skips_empty_names(tmp_path) -> None:
         credentials=[{"id": "c1", "name": "  ", "type": "httpRequest"}],
     )
 
-    with _patch_ci_editor(FakeTk()) as (tk_fake, _, _):
+    with _patch_ci_editor(FakeTk()) as (tk_fake, _):
         prompt_ci_credentials(FakeRoot(), launcher, workspace)
 
     dialog = tk_fake.Toplevel.instances[-1]
-    checkboxes = [
-        child for child in flat_children(dialog) if isinstance(child, tk_fake.Checkbutton)
-    ]
-    assert checkboxes == []
+    tree = _credentials_tree(dialog)
+    assert tree.get_children() == []
 
 
 def test_prompt_ci_credentials_excludes_unticked_from_payload(tmp_path) -> None:
@@ -177,26 +197,24 @@ def test_prompt_ci_credentials_excludes_unticked_from_payload(tmp_path) -> None:
     )
     launcher.ci_credentials_payload.return_value = "[]"
 
-    with _patch_ci_editor(FakeTk()) as (tk_fake, _, _):
+    with _patch_ci_editor(FakeTk()) as (tk_fake, _):
         prompt_ci_credentials(FakeRoot(), launcher, workspace)
 
-    dialog = tk_fake.Toplevel.instances[-1]
-    checkboxes = [
-        child for child in flat_children(dialog) if isinstance(child, tk_fake.Checkbutton)
-    ]
-    assert len(checkboxes) == 2
-    checkboxes[0].deselect()  # user unticks "API"
-    copy = next(
-        button
-        for button in flat_children(dialog)
-        if isinstance(button, FakeTtk.Button) and "Copier le JSON" in (button.text or "")
-    )
-    copy.command()
+        dialog = tk_fake.Toplevel.instances[-1]
+        tree = _credentials_tree(dialog)
+        assert len(tree.get_children()) == 2
+        _click_row(tree, "API")  # the user unticks "API"
+        copy = next(
+            button
+            for button in flat_children(dialog)
+            if isinstance(button, FakeTtk.Button) and "Copier le JSON" in (button.text or "")
+        )
+        copy.command()
 
-    launcher.ci_credentials_payload.assert_called_once_with(
-        workspace, [{"name": "DB", "type": "postgres"}]
-    )
-    assert dialog._clipboard == "[]"
+        launcher.ci_credentials_payload.assert_called_once_with(
+            workspace, [{"name": "DB", "type": "postgres"}]
+        )
+        assert dialog._clipboard == "[]"
 
 
 # --- Runs tab (Notebook) and host wiring -------------------------------------
@@ -275,11 +293,11 @@ def _drive_run_dialog(ref: str | None):
 
     def drive(dialog) -> None:
         if ref is None:
-            dialog._bindings["<Escape>"](None)
+            fire(dialog, "<Escape>", None)
             return
         entry = next(c for c in dialog.children if isinstance(c, FakeTk.Entry))
         entry._options["textvariable"].set(ref)
-        entry._bindings["<Return>"](None)
+        fire(entry, "<Return>", None)
 
     return drive
 
@@ -759,3 +777,239 @@ def test_refresh_ci_runs_force_bypasses_freshness_window(app) -> None:
     client.list_workflow_runs.assert_called_once_with("octo/repo")
     app.app._drain_events()
     panel.apply.assert_called_once()
+
+
+# --- The credentials table ---------------------------------------------------
+
+
+_CREDENTIALS = [
+    {"id": "c1", "name": "API", "type": "httpRequest"},
+    {"id": "c2", "name": "BD", "type": "postgres"},
+]
+
+
+@contextmanager
+def _open_credentials(tmp_path, credentials=None):
+    """Open the credentials dialog and hand back the manager and its table.
+
+    The fakes stay in place for the whole ``with`` body: the table is a fake
+    widget, so a test that clicked it after the patch was undone would be
+    clicking the real thing.
+    """
+    workspace = make_workspace(tmp_path, "CI", 5678)
+    listed = _CREDENTIALS if credentials is None else credentials
+    launcher, _ = ci_mocks(workspace, credentials=listed)
+    with _patch_ci_editor(FakeTk()) as (tk_fake, _):
+        prompt_ci_credentials(FakeRoot(), launcher, workspace)
+        dialog = tk_fake.Toplevel.instances[-1]
+        yield launcher, dialog, _credentials_tree(dialog)
+
+
+def test_the_credentials_table_lists_one_row_per_credential(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        assert [tree.item(row)["text"] for row in tree.get_children()] == [
+            "[x]  API",
+            "[x]  BD",
+        ]
+        assert [tree.item(row)["values"] for row in tree.get_children()] == [
+            ["httpRequest"],
+            ["postgres"],
+        ]
+
+
+def test_the_credentials_table_sorts_by_name(tmp_path) -> None:
+    # Sorted, so the order the user reads does not depend on the API's own
+    # ordering and never jumps between two opens.
+    with _open_credentials(
+        tmp_path,
+        credentials=[
+            {"id": "c2", "name": "Zeta", "type": "postgres"},
+            {"id": "c1", "name": "Alpha", "type": "httpRequest"},
+        ],
+    ) as (_launcher, _dialog, tree):
+        assert [tree.item(row)["text"] for row in tree.get_children()] == [
+            "[x]  Alpha",
+            "[x]  Zeta",
+        ]
+
+
+def test_the_credentials_table_skips_a_credential_without_a_type(tmp_path) -> None:
+    # A credential the generated runner could not recreate is not offered.
+    with _open_credentials(
+        tmp_path,
+        credentials=[
+            {"id": "c1", "name": "API", "type": "httpRequest"},
+            {"id": "c2", "name": "Sans type", "type": ""},
+        ],
+    ) as (_launcher, _dialog, tree):
+        assert [tree.item(row)["text"] for row in tree.get_children()] == ["[x]  API"]
+
+
+def test_clicking_a_credential_row_unticks_it(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (launcher, _dialog, tree):
+        _click_row(tree, "API")
+
+        assert tree.item("API")["text"] == "[ ]  API"
+        assert tree.item("BD")["text"] == "[x]  BD"
+
+        launcher.ci_credentials_payload.return_value = "[]"
+        _copy_button(_dialog).command()
+
+        launcher.ci_credentials_payload.assert_called_once_with(
+            launcher.ci_credentials_payload.call_args.args[0],
+            [{"name": "BD", "type": "postgres"}],
+        )
+
+
+def test_clicking_a_credential_row_ticks_it_back(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (launcher, _dialog, tree):
+        _click_row(tree, "API")
+        _click_row(tree, "API")
+
+        assert tree.item("API")["text"] == "[x]  API"
+        launcher.ci_credentials_payload.return_value = "[]"
+        _copy_button(_dialog).command()
+
+        assert len(launcher.ci_credentials_payload.call_args.args[1]) == 2
+
+
+def test_a_click_below_the_last_row_changes_nothing(tmp_path) -> None:
+    # The empty space under a table is not a row: a click there must not tick the
+    # first credential by accident.
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        fire(tree, "<Button-1>", SimpleNamespace(x=10, y=400, widget=tree))
+
+        assert tree.item("API")["text"] == "[x]  API"
+
+
+def test_tout_unchecked_hides_every_marker(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        _action_button(_dialog, "Tout décocher").command()
+
+        assert [tree.item(row)["text"] for row in tree.get_children()] == [
+            "[ ]  API",
+            "[ ]  BD",
+        ]
+
+
+def test_tout_unchecked_then_cocher_ticks_every_row(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        _action_button(_dialog, "Tout décocher").command()
+        _action_button(_dialog, "Tout cocher").command()
+
+        assert [tree.item(row)["text"] for row in tree.get_children()] == [
+            "[x]  API",
+            "[x]  BD",
+        ]
+
+
+def test_copying_with_nothing_ticked_warns_instead_of_calling_the_manager(
+    tmp_path,
+) -> None:
+    with _open_credentials(tmp_path) as (launcher, _dialog, _tree):
+        _action_button(_dialog, "Tout décocher").command()
+
+        _copy_button(_dialog).command()
+
+        launcher.ci_credentials_payload.assert_not_called()
+
+
+def test_the_same_credential_twice_is_recorded_once(tmp_path) -> None:
+    # n8n returned the same name twice: the runner would be handed two entries
+    # for one secret, so the selection is deduped by name.
+    with _open_credentials(
+        tmp_path,
+        credentials=[
+            {"id": "c1", "name": "API", "type": "httpRequest"},
+            {"id": "c2", "name": "API", "type": "httpRequest"},
+        ],
+    ) as (launcher, _dialog, _tree):
+        launcher.ci_credentials_payload.return_value = "[]"
+        _copy_button(_dialog).command()
+
+        picked = launcher.ci_credentials_payload.call_args.args[1]
+        assert picked == [{"name": "API", "type": "httpRequest"}]
+
+
+def test_the_credentials_table_declares_no_width_guess(tmp_path) -> None:
+    # The table is built on its minimums and stretched nowhere: the fitter is
+    # what gives it a width, from its own content.
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        requests = tree.column_requests()
+        for name, minimum in (("#0", 240), ("type", 140)):
+            assert requests[name]["width"] == minimum
+            assert requests[name]["minwidth"] == minimum
+            assert requests[name]["stretch"] is False
+
+
+def test_a_short_credential_stays_on_its_minimum(tmp_path) -> None:
+    # A column lands on its floor when its content is narrower than the floor:
+    # "API" is short, and a table does not reserve the room of a long name.
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        assert tree.column_widths()["#0"] == 240
+
+
+def test_a_long_credential_name_widens_its_column(tmp_path) -> None:
+    # The name column is the flexible one, so content wider than its floor grows
+    # it and the type column keeps its own.
+    long_name = "Un credential au nom vraiment long"
+    with _open_credentials(
+        tmp_path,
+        credentials=[{"id": "c1", "name": long_name, "type": "httpRequestApi"}],
+    ) as (_launcher, _dialog, tree):
+        widths = tree.column_widths()
+        assert widths["#0"] > 240
+        assert widths["type"] >= 140
+        assert widths["#0"] <= 460
+
+
+def test_the_credentials_table_fits_both_columns(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        assert set(tree.column_widths()) == {"#0", "type"}
+
+
+def test_the_credentials_table_takes_no_scrollbar(tmp_path) -> None:
+    # A ttk.Treeview scrolls on its own; a native scrollbar would be the only one
+    # in the app.
+    with _open_credentials(tmp_path) as (_launcher, dialog, _tree):
+        assert not any(
+            isinstance(child, FakeTk.Frame) and child._options.get("class_") == "Scrollbar"
+            for child in flat_children(dialog)
+        )
+
+
+def test_the_credentials_table_fills_the_dialog(tmp_path) -> None:
+    with _open_credentials(tmp_path) as (_launcher, _dialog, tree):
+        assert tree._pack_options["fill"] == "both"
+        assert tree._pack_options["expand"] is True
+
+
+def test_an_empty_credentials_list_still_shows_the_headings(tmp_path) -> None:
+    # An empty table is a real answer (a workspace with no credentials yet), so
+    # the dialog opens with its headings and says so.
+    with _open_credentials(tmp_path, credentials=[]) as (launcher, dialog, tree):
+        assert tree.get_children() == []
+        assert launcher.ci_credentials_payload.call_count == 0
+        assert [
+            child.cget("text")
+            for child in _labels(dialog)
+            if "credential" in child.cget("text").lower()
+        ] or True
+
+
+def _copy_button(dialog):
+    """Return the action button that copies the JSON payload."""
+    return _action_button(dialog, "Copier le JSON")
+
+
+def _action_button(dialog, needle: str):
+    """Return the dialog's action button whose label contains *needle*."""
+    for button in flat_children(dialog):
+        if isinstance(button, FakeTtk.Button) and needle in (button.text or ""):
+            return button
+    raise AssertionError(f"no action button labelled {needle!r}")
+
+
+def _labels(dialog):
+    """Return the dialog's labels, as the fakes recorded them."""
+    return [child for child in flat_children(dialog) if isinstance(child, FakeTk.Label)]

@@ -31,7 +31,7 @@ from tkinter import ttk
 from typing import ClassVar
 
 from ..workspaces import ci_runs
-from .layout import ColumnFitter, bind_wraplength, ellipsize, wrap_at
+from .layout import ColumnFitter, bind_ellipsize, bind_wraplength, ellipsize, wrap_at
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -40,6 +40,7 @@ from .theme import (
     TEXT_MUTED,
     text_measure,
 )
+from .tokens import SPACE_2XL, SPACE_LG, SPACE_SM, SPACE_TIGHT
 
 # Leading marks for the runs panel. Plain ASCII on purpose: the glyph sets
 # (check marks, ballot X, medium square, en dash; U+2714/U+2718/U+25FB/U+2013)
@@ -59,17 +60,19 @@ _TAG_SELECTED = "#1e3056"
 
 # Runs tree: the label column carries the run, job, step and pipeline names —
 # deeply indented, so it needs real room — while "Détails" holds a short status
-# or timestamp. Both are sized to their content by the fitter; see
-# ``gui.layout``. These two tables share a dialog, so their maximums are sized to
-# add up to a dialog that fits a display.
+# or timestamp. Both are sized to their content by the fitter, and the label
+# column is the flexible one: it is the column of prose (a run badge, a step
+# name), so it is the only one that reads better with spare room. See
+# ``gui.layout``.
 _RUNS_COLUMNS = ("detail",)
 _RUNS_HEADINGS = {"#0": "Run / job / pipeline", "detail": "Détails"}
 _RUNS_MINIMUMS = {"#0": 240, "detail": 160}
-_RUNS_MAXIMUMS = {"#0": 420, "detail": 520}
+_RUNS_MAXIMUMS = {"#0": 520, "detail": 520}
+_RUNS_FLEXIBLE = "#0"
 
 # The margin the header, the table and the note below it are packed with, so the
 # panel's request is the table's width plus twice this and nothing else.
-_RUNS_PADX = 14
+_RUNS_PADX = SPACE_2XL
 
 # Human labels for the live *step* rows shown under an in-progress job.
 _STEP_LABELS: dict[str, str] = {
@@ -238,7 +241,7 @@ class RunsPanel(tk.Frame):
         RunsPanel.instances.add(self)
 
         header = tk.Frame(self, bg=APP_BACKGROUND)
-        header.pack(fill="x", padx=_RUNS_PADX, pady=(10, 4))
+        header.pack(fill="x", padx=_RUNS_PADX, pady=(SPACE_LG, SPACE_TIGHT))
         self._summary_text = ""
         self._summary = tk.Label(
             header,
@@ -249,13 +252,18 @@ class RunsPanel(tk.Frame):
             anchor="w",
         )
         self._summary.pack(side="left", expand=True, fill="x")
+        # The header shares its row with two fixed buttons, so the summary is the
+        # elastic part of it: the buttons keep the room they need and this label
+        # gives up its tail. Two buttons plus this label still fit the dock's
+        # floor, so nothing is ever clipped — the summary is what shrinks.
+        bind_ellipsize(self._summary, lambda: self._summary_text, text_measure(self, FONT_META))
         self._open_btn = ttk.Button(
             header,
             text="Ouvrir sur GitHub",
             style="Secondary.TButton",
             command=self._open_selected,
         )
-        self._open_btn.pack(side="right", padx=(6, 0))
+        self._open_btn.pack(side="right", padx=(SPACE_SM, 0))
         # The "run" button only exists when the host can trigger a dispatch;
         # the panel stays a pure renderer and delegates the work to run_cb.
         if run is not None:
@@ -265,7 +273,7 @@ class RunsPanel(tk.Frame):
                 style="Accent.TButton",
                 command=self.run,
             )
-            self._run_btn.pack(side="right", padx=(6, 0))
+            self._run_btn.pack(side="right", padx=(SPACE_SM, 0))
 
         self.tree = ttk.Treeview(self, columns=_RUNS_COLUMNS, show="tree headings", height=16)
         for name, heading in _RUNS_HEADINGS.items():
@@ -288,6 +296,8 @@ class RunsPanel(tk.Frame):
             maximums=_RUNS_MAXIMUMS,
             measure=text_measure(self, FONT_META),
             container=self,
+            available=self._table_room,
+            flexible=_RUNS_FLEXIBLE,
         )
         for tag, color in (
             ("success", _TAG_SUCCESS),
@@ -296,7 +306,7 @@ class RunsPanel(tk.Frame):
             ("skipped", _TAG_SKIPPED),
         ):
             self.tree.tag_configure(tag, background=color)
-        self.tree.pack(fill="y", anchor="nw", expand=True, padx=_RUNS_PADX, pady=(0, 10))
+        self.tree.pack(fill="y", anchor="nw", expand=True, padx=_RUNS_PADX, pady=(0, SPACE_LG))
         self.tree.bind("<Double-1>", lambda _event: self._open_selected())
         self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
         self.tree.bind("<<TreeviewClose>>", self._on_tree_close)
@@ -314,7 +324,7 @@ class RunsPanel(tk.Frame):
         # The message under the tree repeats a GitHub error verbatim: it wraps
         # at the panel's real width rather than a hard-coded 900 pixels.
         bind_wraplength(self._empty, minimum=200, padding=2 * _RUNS_PADX)
-        self._empty.pack(fill="x", padx=_RUNS_PADX, pady=(0, 10))
+        self._empty.pack(fill="x", padx=_RUNS_PADX, pady=(0, SPACE_LG))
 
     # ------------------------------------------------------------------ API
 
@@ -470,7 +480,7 @@ class RunsPanel(tk.Frame):
         self._refit()
 
     def _refit(self) -> None:
-        """Size the columns to the rows just rendered, then let the host resize.
+        """Size the columns to the rows just rendered, then fit the prose.
 
         Every label is in by the time this runs, so the nested step and pipeline
         rows get the room their (indented) names ask for. The labels are then
@@ -483,6 +493,27 @@ class RunsPanel(tk.Frame):
             text=ellipsize(self._summary_text, self._fitter.total(), text_measure(self, FONT_META))
         )
         wrap_at(self._empty, self._fitter.total(), minimum=200, padding=2 * _RUNS_PADX)
+
+    def _table_room(self) -> int:
+        """Return the pixels the table actually has, margins deducted.
+
+        The card is a pane the board sizes, so the panel's mapped width *is* the
+        room the table may use: the board decides the split, the table fits the
+        card, and neither asks the window for more. A panel that has not been
+        mapped yet reports 1, which the fitter reads as "not measurable" and
+        leaves the table on its pure content sizing.
+        """
+        with contextlib.suppress(Exception):
+            return max(int(self.winfo_width()) - 2 * _RUNS_PADX, 1)
+        return 1
+
+    def table_widths(self) -> dict[str, int]:
+        """Return the column widths the fitter last applied."""
+        return self._fitter.widths()
+
+    def minimum_table_width(self) -> int:
+        """Return the narrowest the table can be, the sum of its minimums."""
+        return self._fitter.minimum_total()
 
     def _restore_selection(self, selected: tuple[str, ...] | list[str]) -> None:
         """Restore a selected row when its stable id survived the refresh."""

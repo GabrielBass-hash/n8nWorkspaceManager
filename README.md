@@ -156,6 +156,10 @@ Le fichier `.github/workflows/ci.yml` enchaîne 4 jobs sur chaque PR (branches `
 
 L'union des chemins de tous les widgets est de toute façon vérifiée sur les 3 OS : `WATCHED_PATHS` rend la surveillance explicite et documentée, et c'est le seul endroit à éditer.
 
+`tests/test_structure.py` vérifie en plus, sur l'OS qui génère le snapshot, que **chaque entrée de `WATCHED_PATHS` nomme un widget que ce build crée vraiment**. Sans cette contre-vérification une entrée périmée peut rester fausse indéfiniment : le job `parity` compare les snapshots entre eux et se *skip* tant qu'il n'en a pas trois, donc une entrée qui ne correspond à rien n'échoue jamais. (C'est arrivé : `root.!frame4.…` a survécu au jour où la liste des workspaces est devenue le premier volet d'une `PanedWindow`.)
+
+Les chemins sont des noms **stables**, posés sur les widgets que l'application détient (`accent_bar`, `paned`, `list_column`, `dock`, `journal_column`, les `actions` des dialogues…) et non les noms automatiques de Tk : un `!frame4` devient `!frame5` dès qu'un widget est ajouté avant lui, ce qui renommerait silencieusement tous les chemins enregistrés. Si vous renommez un widget suivi, mettez à jour son alias dans `tests/test_structure.py::_friendly_names` en même temps que `WATCHED_PATHS`.
+
 ## Installation
 
 ### macOS — no paid Apple Developer account needed
