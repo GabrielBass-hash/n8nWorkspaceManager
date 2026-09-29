@@ -14,6 +14,9 @@ dependencies = [
     "platformdirs>=4.0",
     "PyYAML>=6.0",
     "requests>=2.31",
+    # Planned UI toolkit. Declared so the future PyQt6 layer resolves against a
+    # pinned floor; nothing under src/ imports it yet (the package is headless).
+    "PyQt6>=6.6",
 ]
 
 [project.scripts]
