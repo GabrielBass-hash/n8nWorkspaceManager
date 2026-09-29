@@ -35,7 +35,7 @@ from helpers import (
 from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, GitConfig, ServerConfig, WorkspaceState
 from n8n_launcher.core.paths import browser_app_dir
-from n8n_launcher.gui import LauncherApp, board, display, pages, server_page
+from n8n_launcher.gui import LauncherApp, board, pages, server_page
 from n8n_launcher.gui.app import (
     _CHIP_GAP,
     _CHIP_PADX,
@@ -52,12 +52,12 @@ from n8n_launcher.gui.app import (
 )
 from n8n_launcher.gui.ci_runs import RunsPanel
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
-from n8n_launcher.gui.display import GitRowStatus
 from n8n_launcher.gui.layout import ELLIPSIS
 from n8n_launcher.monitoring.events import Event
 from n8n_launcher.monitoring.store import EventStore
 from n8n_launcher.remote import RemoteExecution, RemoteExecutionStatus, RemoteHealth
-from n8n_launcher.workspaces import ci_runs
+from n8n_launcher.workspaces import ci_runs, display
+from n8n_launcher.workspaces.display import GitRowStatus
 
 
 def test_window_size_scales_with_screen() -> None:
@@ -230,7 +230,7 @@ def test_refresh_renders_workflow_rows_with_indicators(app, tmp_path) -> None:
     def pick_status(_workspace):
         return statuses[_workspace.id]()
 
-    with patch("n8n_launcher.gui.display.git_row_status", side_effect=pick_status):
+    with patch("n8n_launcher.workspaces.display.git_row_status", side_effect=pick_status):
         app.app.refresh()
 
     assert row_text(app, "ws-gitws") == "GitWs"
@@ -266,7 +266,7 @@ def test_git_row_status_chips(app, tmp_path) -> None:
     app.manager.list.return_value = [ws]
 
     for status, (expected_label, expected_palette, expected_dot) in cases:
-        with patch("n8n_launcher.gui.display.git_row_status", return_value=status):
+        with patch("n8n_launcher.workspaces.display.git_row_status", return_value=status):
             app.app.refresh()
         assert row_chip_text(app, "ws-g", "git_chip") == expected_label, status
         assert row_chip_colors(app, "ws-g", "git_chip") == expected_palette, status
@@ -280,7 +280,7 @@ def test_refresh_updates_rows_in_place_when_order_unchanged(app) -> None:
         for wid, (frame, _label) in app.app._rows.items()
     }
     status = GitRowStatus(is_repo=True, diverged=True)
-    with patch("n8n_launcher.gui.display.git_row_status", return_value=status):
+    with patch("n8n_launcher.workspaces.display.git_row_status", return_value=status):
         app.app.refresh()
 
     # Same workspace set + order: nothing is destroyed, widgets are patched.
@@ -385,7 +385,7 @@ def test_row_name_survives_a_refresh_before_it_was_ever_mapped(app) -> None:
     label._width = 30
     app.app._fit_row_name("ws-running", workspace=app.manager.list.return_value[0])
 
-    with patch("n8n_launcher.gui.display.git_row_status", return_value=GitRowStatus()):
+    with patch("n8n_launcher.workspaces.display.git_row_status", return_value=GitRowStatus()):
         app.app.refresh()
 
     assert row_full_name(app, "ws-running") == "Running"

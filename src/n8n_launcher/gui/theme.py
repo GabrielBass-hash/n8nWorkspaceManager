@@ -37,20 +37,10 @@ CHIP_INACTIVE = ("#7f1d1d", "#fca5a5")
 CHIP_NEUTRAL = ("#334155", "#cbd5e1")
 CHIP_WARN = ("#78350f", "#fcd34d")
 
-STATE_LABELS = {
-    WorkspaceState.STOPPED: "Arrêté",
-    WorkspaceState.STARTING: "Démarrage",
-    WorkspaceState.RUNNING: "En cours",
-    WorkspaceState.STOPPING: "Arrêt",
-    WorkspaceState.ERROR: "Erreur",
-}
-
+# How often the list re-reads the docker project states. A view decision (it is
+# the refresh rate of a polling list), unlike the state *words*, which are
+# domain facts and live in ``core.state_labels``.
 STATE_POLL_MS = 5000
-
-
-def state_label(state: WorkspaceState) -> str:
-    """Return the French display label for a workspace state."""
-    return STATE_LABELS.get(state, state.value)
 
 
 # The UI renders through *named* fonts registered by ``configure_fonts``:

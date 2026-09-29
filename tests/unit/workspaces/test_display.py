@@ -12,7 +12,7 @@ from n8n_launcher.core.models import (
     WorkspaceState,
 )
 from n8n_launcher.git import GitProbeStatus
-from n8n_launcher.gui.display import (
+from n8n_launcher.workspaces.display import (
     GitRowStatus,
     ci_enabled,
     ci_tooltip,
@@ -138,7 +138,7 @@ def test_format_row_shows_none_db_and_no_pipelines(tmp_path) -> None:
 
 
 def test_db_label_maps_mode(tmp_path) -> None:
-    from n8n_launcher.gui.display import db_label as db_lbl
+    from n8n_launcher.workspaces.display import db_label as db_lbl
 
     assert db_lbl(make_workspace(tmp_path, mode=DbMode.MANAGED)) == "locale"
     assert db_lbl(make_workspace(tmp_path, mode=DbMode.NONE)) == "aucune"
@@ -199,8 +199,8 @@ def test_git_row_status_flat_when_not_a_repo(tmp_path) -> None:
     workspace = make_workspace(tmp_path, mode=DbMode.NONE)
 
     with (
-        patch("n8n_launcher.gui.display.git_probe_status", return_value=GitProbeStatus()),
-        patch("n8n_launcher.gui.display.git_has_unpushed_commits") as unpushed,
+        patch("n8n_launcher.workspaces.display.git_probe_status", return_value=GitProbeStatus()),
+        patch("n8n_launcher.workspaces.display.git_has_unpushed_commits") as unpushed,
     ):
         status = git_row_status(workspace)
 
@@ -213,11 +213,11 @@ def test_git_row_status_clean_repo(tmp_path) -> None:
 
     with (
         patch(
-            "n8n_launcher.gui.display.git_probe_status",
+            "n8n_launcher.workspaces.display.git_probe_status",
             return_value=GitProbeStatus(is_repo=True),
         ),
         patch(
-            "n8n_launcher.gui.display.git_has_unpushed_commits",
+            "n8n_launcher.workspaces.display.git_has_unpushed_commits",
             return_value=False,
         ) as unpushed,
     ):
@@ -239,7 +239,7 @@ def test_git_row_status_reports_dirty_diverged_and_remote(tmp_path) -> None:
         remote_url="https://example.test/repo.git",
     )
 
-    with patch("n8n_launcher.gui.display.git_probe_status", return_value=probe):
+    with patch("n8n_launcher.workspaces.display.git_probe_status", return_value=probe):
         status = git_row_status(workspace)
 
     assert status.is_repo is True
@@ -254,8 +254,10 @@ def test_git_row_status_falls_back_to_unpushed_probe_without_upstream(tmp_path) 
     probe = GitProbeStatus(is_repo=True, remote_url="https://example.test/repo.git")
 
     with (
-        patch("n8n_launcher.gui.display.git_probe_status", return_value=probe),
-        patch("n8n_launcher.gui.display.git_has_unpushed_commits", return_value=True) as unpushed,
+        patch("n8n_launcher.workspaces.display.git_probe_status", return_value=probe),
+        patch(
+            "n8n_launcher.workspaces.display.git_has_unpushed_commits", return_value=True
+        ) as unpushed,
     ):
         status = git_row_status(workspace)
 
@@ -268,7 +270,7 @@ def test_git_row_status_reads_workspace_fields_live_through_cache(tmp_path) -> N
     workspace.git_push_failed = True
     probe = GitProbeStatus(is_repo=True, dirty=True)
 
-    with patch("n8n_launcher.gui.display.git_probe_status", return_value=probe) as probed:
+    with patch("n8n_launcher.workspaces.display.git_probe_status", return_value=probe) as probed:
         first = git_row_status(workspace)
         workspace.git_push_failed = False
         workspace.git = GitConfig(ci_enabled=True)
@@ -290,8 +292,8 @@ def test_git_row_status_cache_expires_after_ttl(tmp_path) -> None:
     clock = [0.0, 0.1, 4.0]
 
     with (
-        patch("n8n_launcher.gui.display.git_probe_status", return_value=probe) as probed,
-        patch("n8n_launcher.gui.display.time.monotonic", side_effect=lambda: clock.pop(0)),
+        patch("n8n_launcher.workspaces.display.git_probe_status", return_value=probe) as probed,
+        patch("n8n_launcher.workspaces.display.time.monotonic", side_effect=lambda: clock.pop(0)),
     ):
         git_row_status(workspace)  # miss, caches at t=0.0
         git_row_status(workspace)  # hit at t=0.1
@@ -311,7 +313,7 @@ def test_invalidate_git_status_forces_reprobe(tmp_path) -> None:
     )
 
     with patch(
-        "n8n_launcher.gui.display.git_probe_status", side_effect=lambda _f: next(probes)
+        "n8n_launcher.workspaces.display.git_probe_status", side_effect=lambda _f: next(probes)
     ) as probed:
         first = git_row_status(workspace)
         assert first.dirty is True

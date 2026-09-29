@@ -11,7 +11,7 @@ from pathlib import Path
 from ..core.models import DbMode, Workspace
 from ..database import has_db_layout
 from ..git import git_has_unpushed_commits, git_is_repo, git_probe_status
-from ..workspaces import ci
+from . import ci
 
 # Rows refresh on a timer; a 3-second TTL keeps the git probe from re-spawning
 # git for every workspace on every tick while still showing near-live status.
@@ -52,7 +52,7 @@ def pipelines_count(workflows_dir: Path) -> int:
 
 @dataclass
 class GitRowStatus:
-    """Per-workspace git state for the row widget.
+    """Per-workspace git state for one list row.
 
     All probes are local (no network) so they are safe to run at every render.
     """
@@ -85,8 +85,8 @@ class GitRowStatus:
 def git_row_status(workspace: Workspace) -> GitRowStatus:
     """Probe the workspace folder and return its git state without networking.
 
-    The git probe is cached per (id, folder) for a few seconds so a GUI tick
-    re-rendering every row does not spawn git for each workspace every time.
+    The git probe is cached per (id, folder) for a few seconds so a refresh
+    re-probing every row does not spawn git for each workspace every time.
     Workspace-derived fields (push failure, CI toggle) are read live on every
     call, so a status change never waits for the cache to expire.
     """

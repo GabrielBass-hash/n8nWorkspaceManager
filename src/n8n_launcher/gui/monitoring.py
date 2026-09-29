@@ -6,40 +6,45 @@ the store (in a background worker, since the store is a SQLite file) and hands
 the rows to :meth:`MonitoringPanel.apply`. That keeps the Tk main thread free
 and makes the whole panel testable without a display.
 
-Two behaviours deserve their own home here because they are pure logic:
-
-* :func:`level_tag` / :func:`event_row` decide how an event is drawn, and
-  :func:`event_detail` renders the context of the selected row.
-* :class:`CriticalGate` implements the "surface critical incidents" rule: an
-  ``ERROR``/``CRITICAL`` event updates the status bar, while repeating failures
-  of the same operation are grouped so a retry loop cannot flood the user.
+Everything that decides *what* an event means lives outside this module, in
+:mod:`n8n_launcher.monitoring.present` (the row values, the detail text, the
+filters, the :class:`CriticalGate` anti-spam rule) and in
+:mod:`n8n_launcher.workspaces.server_snapshot` (the server snapshot and its
+text). They are pure logic and are shared with the headless CLI, which has to
+render the same journal without a toolkit. What is left here is the *palette* —
+this module's whole reason to exist — plus the two Tk widgets that render it.
 
 Filtering is deliberately reduced to a single free-text field: the severity is
-part of the searched text (see :func:`filter_events`), so there is no level
-control to keep in sync with it. On top of that, one *subject* filter follows
-the page the user is looking at (:class:`~n8n_launcher.gui.pages.PageSubject`):
-it is shown as a chip so a narrowed table never reads as lost rows, and the
-user can drop it with one click.
+part of the searched text (see :func:`~n8n_launcher.monitoring.present.filter_events`),
+so there is no level control to keep in sync with it. On top of that, one
+*subject* filter follows the page the user is looking at
+(:class:`~n8n_launcher.core.subjects.PageSubject`): it is shown as a chip so a
+narrowed table never reads as lost rows, and the user can drop it with one click.
 """
 
 from __future__ import annotations
 
 import contextlib
-import json
-import re
-import time
 import tkinter as tk
 import weakref
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from datetime import datetime
 from tkinter import ttk
 from typing import ClassVar
 
 from ..core.models import Workspace
+from ..core.subjects import PageSubject
 from ..monitoring.events import Event
-from ..monitoring.store import RETENTION_DAYS, EventStore
-from ..remote import RemoteExecutionStatus, RemoteHealth
+from ..monitoring.present import (
+    CriticalGate,
+    event_detail,
+    event_row,
+    filter_events,
+    level_tag,
+    summary_text,
+    workspace_events,
+)
+from ..monitoring.store import EventStore
+from ..workspaces.server_snapshot import ServerSnapshot, server_snapshot_text
 from .layout import (
     ColumnFitter,
     bind_ellipsize,
@@ -47,7 +52,6 @@ from .layout import (
     ellipsize,
     wrap_at,
 )
-from .pages import PageSubject
 from .theme import (
     ACCENT,
     APP_BACKGROUND,
@@ -71,24 +75,14 @@ from .tokens import (
 
 # Row colouring by severity. ERROR/CRITICAL reuse the destructive row colour
 # already used for workspace deletion rows so the palette stays coherent.
-_TAG_INFO = SURFACE
-_TAG_WARNING = "#3a2f0f"
-_TAG_ERROR = ROW_DELETE_BG
-_TAG_CRITICAL = "#450a0a"
-
-CRITICAL_LEVELS = frozenset({"ERROR", "CRITICAL"})
-
-# One incident status must not be raised more than once per this many seconds
-# for the same failure signature; the very first occurrence always surfaces.
-DEFAULT_GROUP_WINDOW_SECONDS = 60.0
-
-_LEVEL_TAGS = {
-    "DEBUG": _TAG_INFO,
-    "INFO": _TAG_INFO,
-    "WARNING": _TAG_WARNING,
-    "WARN": _TAG_WARNING,
-    "ERROR": _TAG_ERROR,
-    "CRITICAL": _TAG_CRITICAL,
+# The keys are the *semantic* tags :func:`present.level_tag` returns, not the
+# raw level names: deciding "how bad is this" is headless, deciding "what colour
+# is that" is this module's job and its only reason to exist.
+_TAG_COLORS = {
+    "info": SURFACE,
+    "warning": "#3a2f0f",
+    "error": ROW_DELETE_BG,
+    "critical": "#450a0a",
 }
 
 # Journal table: columns, headings and per-column bounds handed to the fitter.
@@ -121,139 +115,6 @@ _PANEL_PADX = SPACE_XL
 # The supervision window is a *reader* (logs, deploy history, executions), so it
 # follows the screen the same way the main window does instead of asking for a
 # fixed 1000x680 that overflows a small laptop.
-
-
-def level_tag(event: Event) -> str:
-    """Return the tree tag encoding *event*'s severity."""
-    return _LEVEL_TAGS.get(event.level.upper(), _TAG_INFO)
-
-
-def is_critical(event: Event) -> bool:
-    """Return whether *event* counts as a critical incident."""
-    return event.level.upper() in CRITICAL_LEVELS
-
-
-def _format_time(value: datetime) -> str:
-    """Render an event timestamp as local wall-clock time."""
-    return value.astimezone().strftime("%d/%m %H:%M:%S")
-
-
-def event_row(event: Event) -> tuple[str, str, str, str]:
-    """Return the tree columns for *event* (time, level, source, message)."""
-    return (_format_time(event.timestamp), event.level, event.name, event.message)
-
-
-def event_detail(event: Event | None) -> str:
-    """Render the context and traceback of the selected *event*.
-
-    ``None`` (nothing selected) yields the hint line, so the pane is never
-    blank and the user knows the row is clickable. The line is also what
-    ``Ctrl+C`` puts on the clipboard: one event, whole, as a bug report needs it.
-    """
-    if event is None:
-        return "Sélectionnez une ligne pour voir le détail (contexte, exception). Ctrl+C la copie."
-    lines = [f"{event.level} · {event.name} · {_format_time(event.timestamp)}", event.message]
-    if event.context:
-        lines.append("")
-        lines.append(json.dumps(event.context, ensure_ascii=False, indent=2, sort_keys=True))
-    if event.exception:
-        lines.append("")
-        lines.append(event.exception.rstrip())
-    return "\n".join(lines)
-
-
-def summary_text(
-    events: Sequence[Event],
-    *,
-    store: EventStore | None,
-    scope: str = "Tous les workspaces",
-    subject: str = "",
-) -> str:
-    """Return the line describing *scope*, the visible rows and the retention.
-
-    ``store`` is only used to know whether a journal exists at all: the panel is
-    embedded in a narrow pane, so the line stays short and the full path lives in
-    the "Exporter" target instead. *subject* names the page the table is filtered
-    on, so a narrowed table never reads as a log that has stopped coming.
-    """
-    parts = [scope, f"{len(events)} événement(s)" if events else "aucun événement"]
-    criticals = sum(1 for event in events if event.level.upper() == "CRITICAL")
-    errors = sum(1 for event in events if event.level.upper() == "ERROR")
-    warnings = sum(1 for event in events if event.level.upper() in ("WARNING", "WARN"))
-    if criticals:
-        parts.append(f"{criticals} critique(s)")
-    if errors:
-        parts.append(f"{errors} erreur(s)")
-    if warnings:
-        parts.append(f"{warnings} avertissement(s)")
-    parts.append(
-        f"conservation {RETENTION_DAYS} j" if store is not None else "journal indisponible"
-    )
-    if subject:
-        parts.append(f"sujet : {subject}")
-    return " · ".join(parts)
-
-
-def event_text(event: Event) -> str:
-    """Return every text of *event* a filter may look at, as one string.
-
-    The context is searched as its JSON dump rather than key by key, so a query
-    matches a value whatever key it is filed under.
-    """
-    parts = [event.name, event.message, event.level]
-    if event.context:
-        parts.append(json.dumps(event.context, ensure_ascii=False, sort_keys=True))
-    if event.exception:
-        parts.append(event.exception)
-    return " ".join(parts)
-
-
-def _haystack(event: Event) -> str:
-    """Return the case-folded text a free-text query is matched against."""
-    return event_text(event).casefold()
-
-
-def matches_tokens(event: Event, tokens: Sequence[str]) -> bool:
-    """Return whether *event* carries any of *tokens*.
-
-    Unlike the free-text query, the match is **case-sensitive**: a page's
-    subject tokens are chosen to be distinctive ("CI", "Published"), and a
-    case-insensitive match on a two-letter token would sweep in every event
-    carrying "credential", "specifique" or "spécifique". No token means no
-    narrowing at all.
-    """
-    wanted = [token for token in tokens if token]
-    if not wanted:
-        return True
-    text = event_text(event)
-    return any(token in text for token in wanted)
-
-
-def filter_events(
-    events: Sequence[Event],
-    *,
-    query: str | None = None,
-    tokens: Sequence[str] = (),
-) -> list[Event]:
-    """Return the events matching a case-insensitive *query* and *tokens*.
-
-    The two filters combine with AND and answer two different questions: the
-    *query* is what the user typed, the *tokens* are the subject of the page
-    they are looking at. They run here rather than in SQL so the panel and the
-    in-memory snapshot can never disagree about what a filter means. Severity
-    needs no dedicated control because :func:`_haystack` includes the level:
-    typing ``ERROR`` (or ``WARNING``…) narrows the table to that severity.
-    """
-    needle = query.strip().casefold() if query else ""
-    wanted = [token for token in tokens if token]
-    if not needle and not wanted:
-        return list(events)
-    return [
-        event
-        for event in events
-        if (not wanted or matches_tokens(event, wanted))
-        and (not needle or needle in _haystack(event))
-    ]
 
 
 # Geometry of the download glyph, in the 24x20 canvas of ``_download_icon``:
@@ -326,44 +187,6 @@ def _download_icon(
     if tooltip is not None:
         tooltip(canvas, label)
     return canvas
-
-
-class CriticalGate:
-    """Decide when a critical event must surface, grouping repeats.
-
-    The first ``ERROR``/``CRITICAL`` event always surfaces. The same signature
-    (``name`` + ``level``) then stays quiet for
-    :attr:`window_seconds`, which keeps one failing operation — retried by a
-    timer — from replacing the status message per attempt while a *different*
-    failure still gets through immediately.
-    """
-
-    def __init__(
-        self,
-        window_seconds: float = DEFAULT_GROUP_WINDOW_SECONDS,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        """Create a gate with a grouping window and an injectable clock."""
-        self.window_seconds = window_seconds
-        self._clock = clock
-        self._last_surfaced: dict[str, float] = {}
-
-    def accept(self, event: Event) -> bool:
-        """Return whether *event* should surface in the status bar now."""
-        if not is_critical(event):
-            return False
-        signature = f"{event.level.upper()}|{event.name}"
-        now = self._clock()
-        previous = self._last_surfaced.get(signature)
-        if previous is not None and now - previous < self.window_seconds:
-            return False
-        self._last_surfaced[signature] = now
-        return True
-
-    def forget(self, signature: str) -> None:
-        """Drop the grouping state of *signature*."""
-        self._last_surfaced.pop(signature, None)
 
 
 class MonitoringPanel(tk.Frame):
@@ -526,12 +349,7 @@ class MonitoringPanel(tk.Frame):
             available=self._table_room,
             flexible=_JOURNAL_FLEXIBLE,
         )
-        for tag, color in (
-            ("info", _TAG_INFO),
-            ("warning", _TAG_WARNING),
-            ("error", _TAG_ERROR),
-            ("critical", _TAG_CRITICAL),
-        ):
+        for tag, color in _TAG_COLORS.items():
             self.tree.tag_configure(tag, background=color)
         # No horizontal fill (the table is packed at the end of this method): the
         # table is exactly the sum of its columns, so the header row sits over
@@ -901,118 +719,6 @@ class MonitoringPanel(tk.Frame):
         self._detail.config(text=event_detail(event))
 
 
-# ------------------------------------------------------ server supervision
-@dataclass(frozen=True)
-class ServerSnapshot:
-    """One read-only view of a deployed workspace on the remote server.
-
-    Every field is already redacted and bounded by the ``remote`` layer, so the
-    panel only has to render it. ``error`` carries a whole failed read (SSH
-    unreachable, deployment not confirmed yet) while the other fields keep
-    whatever was collected before the failure. ``note`` is the opposite: the
-    read was skipped on purpose (no server configured for this workspace), so
-    the view says why it is empty instead of reporting a failure.
-    """
-
-    health: RemoteHealth | None = None
-    logs: str = ""
-    marker: dict[str, object] | None = None
-    history: tuple[dict[str, object], ...] = ()
-    executions: RemoteExecutionStatus | None = None
-    error: str | None = None
-    note: str | None = None
-
-    @property
-    def healthy(self) -> bool:
-        """Return whether the remote stack reported itself healthy."""
-        return self.health is not None and self.health.healthy
-
-
-def _deploy_history_text(history: Sequence[dict[str, object]]) -> str:
-    """Render the newest deploy entries, one compact line each."""
-    if not history:
-        return "Aucun déploiement enregistré sur le serveur."
-    lines = []
-    for entry in reversed(history):
-        sha = str(entry.get("sha", ""))[:7]
-        status = entry.get("status", "?")
-        at = entry.get("at", "?")
-        detail = entry.get("error")
-        line = f"{at} · {status} · {sha or '—'}"
-        if detail:
-            line = f"{line} · {detail}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def _executions_text(status: RemoteExecutionStatus) -> str:
-    """Render the remote executions, newest first.
-
-    The remote script answers in n8n's own order and the contract only promises
-    "up to *limit* entries", so the display sorts on ``startedAt`` itself rather
-    than trusting the order of the wire payload.
-    """
-    if not status.supported:
-        return "Exécutions n8n : non supporté par ce déploiement. " + (status.error or "")
-    if not status.executions:
-        return "Exécutions n8n : aucune exécution enregistrée."
-    ordered = sorted(status.executions, key=lambda item: item.started_at or "", reverse=True)
-    lines = []
-    for item in ordered:
-        # ``finished`` is derived from the status server-side; None means the
-        # status was one the launcher does not know, so say so instead of lying.
-        if item.finished is True:
-            state = "terminé"
-        elif item.finished is False:
-            state = "en cours"
-        else:
-            state = "état inconnu"
-        name = item.workflow_name or "—"
-        lines.append(
-            f"{item.started_at or '—'} · {item.status} · {name} · #{item.execution_id} · {state}"
-        )
-    return "Exécutions n8n :\n" + "\n".join(lines)
-
-
-def server_snapshot_text(snapshot: ServerSnapshot) -> str:
-    """Render the whole server snapshot as plain text (health, deploy, logs).
-
-    A ``note`` short-circuits the whole rendering: there is no server to
-    describe, and an empty health section next to a "lecture partielle" line
-    would read like a broken deployment.
-    """
-    if snapshot.note:
-        return snapshot.note
-    parts: list[str] = []
-    health = snapshot.health
-    if health is None:
-        parts.append("Santé : inconnue.")
-    else:
-        headline = (
-            "Santé : serveur injoignable."
-            if not health.available
-            else f"Santé : {'ok' if health.healthy else 'dégradée'}."
-        )
-        parts.append(headline)
-        if health.services:
-            services = " · ".join(
-                f"{name} {value}{'/' + health.health[name] if name in health.health else ''}"
-                for name, value in health.services.items()
-            )
-            parts.append(f"Services : {services}")
-        if health.error:
-            parts.append(f"Diagnostic : {health.error}")
-    parts.append("Dernier déploiement :\n" + _deploy_history_text(snapshot.history[-1:]))
-    if len(snapshot.history) > 1:
-        parts.append("Historique :\n" + _deploy_history_text(snapshot.history))
-    if snapshot.executions is not None:
-        parts.append(_executions_text(snapshot.executions))
-    parts.append("Logs n8n (dernières lignes) :\n" + (snapshot.logs.strip() or "—"))
-    if snapshot.error:
-        parts.append(f"Lecture partielle : {snapshot.error}")
-    return "\n\n".join(parts)
-
-
 class ServerPanel(tk.Frame):
     """Render a :class:`ServerSnapshot` in a single scrollable-free text block."""
 
@@ -1052,43 +758,15 @@ class ServerPanel(tk.Frame):
         return str(self._label.cget("text"))
 
 
-# ------------------------------------------------------ workspace detail
-def workspace_events(workspace: Workspace, events: Sequence[Event]) -> list[Event]:
-    """Return the events that belong to *workspace*, preserving input order.
-
-    Two signals are used because not every call site tags its records with a
-    structured ``workspace_id``: the exact context field when present, and the
-    workspace name in the message otherwise. A name that is a prefix of another
-    one is disambiguated by requiring a word boundary.
-    """
-    identifier = workspace.id.casefold()
-    name = workspace.name.casefold()
-    pattern = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)")
-    selected: list[Event] = []
-    for event in events:
-        context_id = event.context.get("workspace_id")
-        if isinstance(context_id, str) and context_id.casefold() == identifier:
-            selected.append(event)
-            continue
-        if pattern.search(f"{event.name} {event.message}".casefold()):
-            selected.append(event)
-    return selected
-
-
 __all__ = [
-    "CRITICAL_LEVELS",
-    "DEFAULT_GROUP_WINDOW_SECONDS",
     "CriticalGate",
     "MonitoringPanel",
     "ServerPanel",
     "ServerSnapshot",
     "event_detail",
     "event_row",
-    "event_text",
     "filter_events",
-    "is_critical",
     "level_tag",
-    "matches_tokens",
     "server_snapshot_text",
     "summary_text",
     "workspace_events",

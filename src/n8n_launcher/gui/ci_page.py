@@ -29,11 +29,12 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from ..core.models import Workspace
+from ..core.subjects import log_page_event
 from ..workspaces import ci, ci_runs
+from ..workspaces.ci import CI_SUBJECT, NO_REMOTE_NOTE
 from .board import Card
 from .ci_runs import RunsPanel
 from .layout import ColumnFitter, bind_wraplength, ellipsize, wrap_at
-from .pages import PageSubject, log_page_event
 from .theme import (
     APP_BACKGROUND,
     FONT_META,
@@ -47,11 +48,6 @@ from .tokens import (
     SPACE_LG,
     SPACE_MD,
 )
-
-# The subject the journal filters on while this card is the focused one: the CI
-# setup, its credentials and its runs. Every action taken here is journalled
-# through ``log_page_event``, so those events are what this filter finds.
-CI_SUBJECT = PageSubject("Tests CI", ("CI", "GitHub"))
 
 # Colours used for the tree tags (dark theme).
 _COLOR_WARN = "#fcd34d"
@@ -88,10 +84,6 @@ _BLOCKED = "-"
 
 # Auto-refresh cadence of the runs card: quick while a run is in flight (that's
 # the phase the user watches), much slower otherwise to spare the API.
-NO_REMOTE_NOTE = (
-    "Ce workspace n'a pas de dépôt GitHub : les exécutions de la CI ne peuvent pas y être lues."
-)
-
 RUNS_POLL_ACTIVE_MS = 5000
 RUNS_POLL_IDLE_MS = 30000
 

@@ -89,7 +89,9 @@ def gui_mocks():
             patch("n8n_launcher.gui.app.ThreadPoolExecutor", SyncThreadPoolExecutor)
         )
         stack.enter_context(
-            patch("n8n_launcher.gui.display.git_row_status", side_effect=_safe_git_row_status)
+            patch(
+                "n8n_launcher.workspaces.display.git_row_status", side_effect=_safe_git_row_status
+            )
         )
         yield mocks
 

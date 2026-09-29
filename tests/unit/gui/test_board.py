@@ -307,7 +307,7 @@ def test_dock_actions_are_journalled(dock, caplog: pytest.LogCaptureFixture) -> 
     page_dock, _ = dock
     workspace = make_workspace(Path("/tmp"), "Demo", 5678)
     other = make_workspace(Path("/tmp"), "Other", 5679)
-    with caplog.at_level(logging.INFO, logger="n8n_launcher.gui.pages"):
+    with caplog.at_level(logging.INFO, logger="n8n_launcher.core.subjects"):
         _open(dock, PageKind.CI, workspace, CI_SUBJECT)
         page_dock.open(PageKind.CI, other, lambda *_args: pytest.fail("page rebuilt"))
         page_dock.close(PageKind.CI)

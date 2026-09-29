@@ -5,8 +5,8 @@ the close sequence, the update flow and the workspace display helpers live
 in dedicated sibling modules.
 """
 
+from ..workspaces.display import GitRowStatus
 from .app import LauncherApp
 from .dialogs import CreatePlan
-from .display import GitRowStatus
 
 __all__ = ["CreatePlan", "GitRowStatus", "LauncherApp"]

@@ -1,65 +1,32 @@
-"""First-launch configuration workflow."""
+"""The first-launch wizard, as far as Tk is concerned.
+
+Everything this wizard *decides* — n8n's password policy, the config it builds,
+the Docker precondition, the shortcut — lives in
+:mod:`n8n_launcher.core.first_launch`, which prompts for nothing. What is left
+here is the one thing a headless module cannot do: ask the person. The prompts
+collect the same three values and hand them to the very same
+:func:`~n8n_launcher.core.first_launch.run_first_launch` a CLI would call, so
+there is one first-launch flow, not two that can drift.
+"""
 
 from __future__ import annotations
 
 import contextlib
-import re
 import sys
 import tkinter as tk
-from collections.abc import Callable
 from pathlib import Path
 from tkinter import messagebox, simpledialog
 
 from ..core.config import ConfigStore
+from ..core.first_launch import (
+    SetupWizardError,
+    build_initial_config,
+    run_first_launch,
+    validate_password,
+)
 from ..core.models import AppConfig
 from ..docker.manager import DockerError, DockerManager
-from ..platform.shortcuts import install_desktop_shortcut
 from .theme import configure_fonts
-
-
-class SetupWizardError(RuntimeError):
-    """Raised when first-launch setup cannot complete."""
-
-
-def validate_password(password: str) -> None:
-    """Enforce n8n's own password policy (8-64 chars, one number, one uppercase)."""
-    if not password or not 8 <= len(password) <= 64:
-        raise SetupWizardError("An owner password of 8 to 64 characters is required")
-    if not re.search(r"\d", password):
-        raise SetupWizardError("An owner password must contain at least one number")
-    if not re.search(r"[A-Z]", password):
-        raise SetupWizardError("An owner password must contain at least one uppercase letter")
-
-
-def build_initial_config(email: str, password: str, work_dir: Path) -> AppConfig:
-    """Validate the first-launch inputs and return a new :class:`AppConfig`."""
-    if not email.strip() or "@" not in email:
-        raise SetupWizardError("A valid owner email is required")
-    validate_password(password)
-    if not work_dir:
-        raise SetupWizardError("A work directory is required")
-    work_dir.mkdir(parents=True, exist_ok=True)
-    return AppConfig(email.strip(), password, work_dir)
-
-
-def run_first_launch(
-    store: ConfigStore,
-    docker: DockerManager,
-    *,
-    email: str,
-    password: str,
-    work_dir: Path,
-    executable: str | Path,
-    shortcut_installer: Callable[..., Path] = install_desktop_shortcut,
-) -> AppConfig:
-    """Check Docker, build and save the initial config, and install a shortcut."""
-    status = docker.check_available()
-    if not status.available:
-        raise SetupWizardError(f"Docker is not ready: {status.message}")
-    config = build_initial_config(email, password, work_dir)
-    store.save(config)
-    shortcut_installer(executable)
-    return config
 
 
 def run_interactive_first_launch(
@@ -98,3 +65,12 @@ def run_interactive_first_launch(
     finally:
         if owns_root:
             root.destroy()
+
+
+__all__ = [
+    "SetupWizardError",
+    "build_initial_config",
+    "run_first_launch",
+    "run_interactive_first_launch",
+    "validate_password",
+]

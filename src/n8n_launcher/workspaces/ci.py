@@ -25,6 +25,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..core.subjects import PageSubject
+
 # Files managed by the launcher inside the workspace repository. They are all
 # generated (``GENERATED_MARKER`` header) and safe to delete on disable.
 CI_DIR = ".n8n-tests"
@@ -86,6 +88,21 @@ def github_repo_path(remote_url: str | None) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+#: The journal subject the CI view filters on while it is in focus: the setup,
+#: its credentials and its runs. Every action taken there is journalled through
+#: :func:`n8n_launcher.core.subjects.log_page_event`, so those are the events
+#: this filter is guaranteed to find.
+CI_SUBJECT = PageSubject("Tests CI", ("CI", "GitHub"))
+
+#: Shown instead of a run list when the workspace has no GitHub remote. It is a
+#: *note* rather than an error because nothing failed: runs cannot be read from
+#: a repository that was never configured, which is a configuration, not a
+#: failure — and the view must say so rather than looking broken.
+NO_REMOTE_NOTE = (
+    "Ce workspace n'a pas de dépôt GitHub : les exécutions de la CI ne peuvent pas y être lues."
+)
 
 
 def actions_url(repo_path: str) -> str:

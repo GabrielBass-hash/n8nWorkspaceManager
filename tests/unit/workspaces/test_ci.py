@@ -372,3 +372,19 @@ def test_rendered_scripts_compile_and_validate_static_exports(tmp_path: Path) ->
     )
     assert result.returncode == 0
     assert "SystemExit" not in result.stderr
+
+
+def test_ci_subject_scopes_the_journal_to_the_ci_view() -> None:
+    # The tokens must be the ones the view's own journalled actions contain,
+    # otherwise scoping the journal to this view would find nothing. "CI" is
+    # matched case-sensitively, so it only catches the launcher's own
+    # "Enabled CI for …" wording.
+    assert ci.CI_SUBJECT.label == "Tests CI"
+    assert ci.CI_SUBJECT.tokens == ("CI", "GitHub")
+
+
+def test_no_remote_note_explains_a_configuration_rather_than_a_failure() -> None:
+    # It replaces the run list when there is no GitHub remote, so it has to say
+    # *why* the list is empty instead of reading like a broken CI.
+    assert "dépôt GitHub" in ci.NO_REMOTE_NOTE
+    assert "ne peuvent pas" in ci.NO_REMOTE_NOTE

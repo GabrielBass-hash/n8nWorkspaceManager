@@ -187,20 +187,6 @@ def test_registered_font_names_returns_empty_on_tcl_failure() -> None:
     assert theme._registered_font_names(SimpleNamespace(tk=tk)) == set()
 
 
-@pytest.mark.parametrize(
-    ("state", "label"),
-    [
-        (theme.WorkspaceState.STOPPED, "Arrêté"),
-        (theme.WorkspaceState.STARTING, "Démarrage"),
-        (theme.WorkspaceState.RUNNING, "En cours"),
-        (theme.WorkspaceState.STOPPING, "Arrêt"),
-        (theme.WorkspaceState.ERROR, "Erreur"),
-    ],
-)
-def test_state_label_maps_workspace_states(state: theme.WorkspaceState, label: str) -> None:
-    assert theme.state_label(state) == label
-
-
 def test_configure_fonts_returns_false_without_tk_root() -> None:
     # Fake/headless roots (unit-test harness) must leave the fonts unregistered
     # without raising, so widgets keep working against the fakes.

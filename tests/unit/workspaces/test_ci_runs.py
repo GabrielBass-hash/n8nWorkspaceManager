@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from n8n_launcher.workspaces import ci_runs
@@ -410,3 +412,130 @@ def test_pipeline_display_detail_contains_label_and_detail() -> None:
     result = ci_runs.PipelineResult(rel="a.json", status="failure", detail="HTTP 500", mark="!")
 
     assert result.display_detail == "en échec — HTTP 500"
+
+
+# --- human-readable summary --------------------------------------------------
+
+
+def snapshot(**overrides) -> ci_runs.RunsSnapshot:
+    """Return a snapshot with sensible empty defaults, overridden per test."""
+    fields = {
+        "repo_path": "octo/repo",
+        "runs": (),
+        "jobs": {},
+        "pipelines": {},
+        "error": None,
+        "fetched_at": None,
+        "warnings": (),
+        "partial_errors": (),
+        "note": None,
+    }
+    fields.update(overrides)
+    return ci_runs.RunsSnapshot(**fields)
+
+
+def run_summary(run_id: int = 11, **overrides) -> ci_runs.RunSummary:
+    fields = {
+        "id": run_id,
+        "run_number": run_id,
+        "branch": "dev",
+        "head_sha": "a" * 40,
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-01-01T00:00:00Z",
+        "url": f"https://github.com/octo/repo/actions/runs/{run_id}",
+    }
+    fields.update(overrides)
+    return ci_runs.RunSummary(**fields)
+
+
+def test_runs_summary_reports_a_read_failure_and_no_runs() -> None:
+    assert ci_runs.runs_summary_text(snapshot(error="boom")) == (
+        "GitHub Actions indisponible : boom"
+    )
+
+
+def test_runs_summary_reports_an_empty_snapshot_with_its_messages() -> None:
+    assert ci_runs.runs_summary_text(snapshot()) == "Aucun run GitHub Actions pour ce workspace."
+    with_messages = snapshot(partial_errors=("Rate limited.",))
+    assert ci_runs.runs_summary_text(with_messages).endswith("Rate limited.")
+
+
+def test_runs_summary_lets_a_note_outrank_an_error() -> None:
+    # A note explains an empty view nobody asked for: a configuration, not a
+    # failure, so it must not be reported as one.
+    assert ci_runs.runs_summary_text(snapshot(note="pas de dépôt")) == "pas de dépôt"
+    assert ci_runs.runs_summary_text(snapshot(error="boom", note="pas de dépôt")) == "pas de dépôt"
+
+
+def test_runs_summary_counts_finished_and_in_flight_runs() -> None:
+    text = ci_runs.runs_summary_text(
+        snapshot(
+            runs=[
+                run_summary(11, conclusion="success"),
+                run_summary(12, conclusion=None, status="in_progress"),
+            ]
+        )
+    )
+    assert text == "2 run(s) · 1 terminé(s) · 1 en cours"
+
+
+def test_runs_summary_omits_the_in_flight_count_when_nothing_is_running() -> None:
+    text = ci_runs.runs_summary_text(snapshot(runs=[run_summary(11)]))
+    assert text == "1 run(s) · 1 terminé(s)"
+
+
+def test_runs_summary_appends_the_last_poll_time() -> None:
+    text = ci_runs.runs_summary_text(
+        snapshot(runs=[run_summary(11)], fetched_at="2026-09-18T14:03:05+02:00")
+    )
+    assert text == "1 run(s) · 1 terminé(s) — à jour 14:03:05"
+
+
+def test_runs_summary_appends_partial_failures_without_hiding_the_runs() -> None:
+    text = ci_runs.runs_summary_text(
+        snapshot(runs=[run_summary(11)], partial_errors=("Le log du job 21 est indisponible.",))
+    )
+    assert text.startswith("1 run(s) · 1 terminé(s)")
+    assert "Avertissement : Le log du job 21 est indisponible." in text
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2026-09-18T14:03:05+02:00", "14:03:05"),
+        ("2026-09-18T12:03:05Z", "12:03:05"),
+        ("2026-09-18T14:03:05", "14:03:05"),
+        ("garbage", ""),
+        ("", ""),
+    ],
+)
+def test_format_fetched_at_renders_or_gives_up(raw: str, expected: str) -> None:
+    assert ci_runs.format_fetched_at(raw) == expected
+
+
+@pytest.mark.parametrize(
+    # A naive timestamp has no zone to shift, so these are exact everywhere.
+    ("raw", "expected"),
+    [
+        ("2026-09-18T14:03:05", "18/09/2026 14:03"),
+        ("garbage", ""),
+        (None, ""),
+    ],
+)
+def test_format_timestamp_renders_or_gives_up(raw: str | None, expected: str) -> None:
+    assert ci_runs.format_timestamp(raw) == expected
+
+
+def test_format_timestamp_converts_an_aware_timestamp_to_local_time() -> None:
+    # GitHub sends UTC with a ``Z``, which older fromisoformat rejects; the
+    # rendered value is local, so it is compared against the same conversion
+    # rather than a hardcoded hour.
+    rendered = ci_runs.format_timestamp("2026-01-01T00:00:00Z")
+    assert rendered == datetime.fromisoformat("2026-01-01T00:00:00+00:00").astimezone().strftime(
+        "%d/%m/%Y %H:%M"
+    )
+    # An explicit offset is honoured the same way.
+    assert ci_runs.format_timestamp("2026-09-18T14:03:05+02:00") == (
+        datetime.fromisoformat("2026-09-18T14:03:05+02:00").astimezone().strftime("%d/%m/%Y %H:%M")
+    )

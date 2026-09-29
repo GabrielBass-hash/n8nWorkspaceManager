@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 # Status values the generated runner uses inside the CI container.
@@ -571,3 +572,74 @@ def compose_snapshot(
         partial_errors=_normalise_messages(combined_errors),
         note=note,
     )
+
+
+# ------------------------------------------------------- human-readable summary
+# The one thing worth showing in one line about a whole snapshot: how many runs
+# there are, how many finished, whether any is in flight, and — when the host
+# stamped it — when it was last refreshed. Every branch below is a distinct
+# state the reader has to be told about differently, so they are spelled out
+# rather than composed from optional fragments.
+
+
+def format_timestamp(iso_timestamp: str | None) -> str:
+    """Render an ISO timestamp in local time; ``""`` when it is invalid.
+
+    GitHub sends UTC with a ``Z``, which :meth:`datetime.fromisoformat` does not
+    accept on every supported version, so the suffix is rewritten to an explicit
+    offset first. An unparseable value is not an error: it is a display field,
+    and a run whose timestamp the API omitted should show no timestamp rather
+    than take the whole summary down.
+    """
+    if not iso_timestamp:
+        return ""
+    try:
+        value = iso_timestamp[:-1] + "+00:00" if iso_timestamp.endswith("Z") else iso_timestamp
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%d/%m/%Y %H:%M")
+
+
+def format_fetched_at(iso_timestamp: str) -> str:
+    """Render the snapshot's poll time as ``HH:MM:SS``; ``""`` when invalid."""
+    try:
+        return datetime.fromisoformat(iso_timestamp).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+
+
+def runs_summary_text(snapshot: RunsSnapshot) -> str:
+    """Return a short header describing *snapshot* and any partial failure.
+
+    Counts finished and in-flight runs and, when the host populated
+    ``fetched_at``, appends the time of the last successful poll so an
+    auto-refresh is visible without a button. Warnings and partial errors are
+    appended without suppressing the runs themselves.
+
+    A ``note`` replaces the header entirely: it explains an empty view that
+    nobody asked for (no GitHub remote), which is a configuration, not a
+    failure — and it outranks ``error`` for the same reason.
+    """
+    if snapshot.note:
+        return snapshot.note
+    if snapshot.error and not snapshot.runs:
+        return f"GitHub Actions indisponible : {snapshot.error}"
+    if not snapshot.runs:
+        text = "Aucun run GitHub Actions pour ce workspace."
+        if snapshot.messages:
+            return f"{text}\n" + " · ".join(snapshot.messages)
+        return text
+    completed = sum(1 for run in snapshot.runs if run.conclusion)
+    active = sum(1 for run in snapshot.runs if run_status_is_active(run.status))
+    parts = [f"{len(snapshot.runs)} run(s)", f"{completed} terminé(s)"]
+    if active:
+        parts.append(f"{active} en cours")
+    text = " · ".join(parts)
+    if snapshot.fetched_at:
+        text += f" — à jour {format_fetched_at(snapshot.fetched_at)}"
+    if snapshot.messages:
+        text += " — " + " · ".join(f"Avertissement : {message}" for message in snapshot.messages)
+    return text

@@ -23,6 +23,8 @@ import requests
 from ..core.config import ConfigStore
 from ..core.models import Workspace, WorkspaceState
 from ..core.paths import browser_app_dir
+from ..core.state_labels import state_label
+from ..core.subjects import PageKind
 from ..core.throttle import Throttle
 from ..docker.manager import DockerManager
 from ..git.manager import git_seed_remote, workspace_branch
@@ -32,10 +34,10 @@ from ..monitoring.events import Event
 from ..monitoring.store import EventStore
 from ..platform.browser import open_app, open_url
 from ..platform.files import open_folder
-from ..workspaces import ci, ci_runs
+from ..workspaces import ci, ci_runs, display
 from ..workspaces.ci_runs import RunsSnapshot
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
-from . import board, ci_edit, ci_page, display, monitoring, pages, server_page
+from . import board, ci_edit, ci_page, monitoring, pages, server_page
 from .ci_runs import RunsPanel
 from .close import CloseController
 from .dialogs import (
@@ -58,7 +60,6 @@ from .dialogs import (
     prompt_server_config,
 )
 from .layout import ellipsize, screen_fraction_size, screen_size
-from .pages import PageKind
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
@@ -85,7 +86,6 @@ from .theme import (
     TEXT_MUTED,
     TEXT_PRIMARY,
     configure_fonts,
-    state_label,
     text_measure,
 )
 from .tokens import (

@@ -1493,7 +1493,7 @@ def make_workspace(tmp_path: Path, name: str, port: int) -> Workspace:
 
 def _safe_git_row_status(_workspace):
     """Return a default status without ever touching real git in tests."""
-    from n8n_launcher.gui.display import GitRowStatus
+    from n8n_launcher.workspaces.display import GitRowStatus
 
     return GitRowStatus()
 

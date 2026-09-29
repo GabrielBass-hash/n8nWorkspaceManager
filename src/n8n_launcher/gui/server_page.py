@@ -22,13 +22,15 @@ from tkinter import ttk
 from typing import Protocol
 
 from n8n_launcher.core.models import Workspace
+from n8n_launcher.core.subjects import log_page_event
 from n8n_launcher.gui import monitoring
-from n8n_launcher.gui.monitoring import ServerSnapshot
-from n8n_launcher.gui.pages import PageSubject, log_page_event
 from n8n_launcher.gui.theme import APP_BACKGROUND, FONT_META, TEXT_MUTED
 from n8n_launcher.gui.tokens import GUTTER, SPACE_2XL
-
-SERVER_SUBJECT = PageSubject("Serveur", ("Serveur", "Déploiement"))
+from n8n_launcher.workspaces.server_snapshot import (
+    NO_SERVER_NOTE,
+    SERVER_SUBJECT,
+    ServerSnapshot,
+)
 
 
 class ServerReader(Protocol):
@@ -46,12 +48,6 @@ class ServerReader(Protocol):
         *,
         force: bool = False,
     ) -> None: ...
-
-
-NO_SERVER_NOTE = (
-    "Ce workspace n'a pas de serveur configuré. Définissez-en un via "
-    "« Configurer le serveur… » pour superviser son déploiement et ses exécutions."
-)
 
 
 class ServerPage(tk.Frame):
