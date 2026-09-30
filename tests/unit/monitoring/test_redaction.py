@@ -84,7 +84,13 @@ def test_converts_containers_to_json_friendly_values() -> None:
     # lists through the module's private ``_jsonable`` step.
     assert redacted["tuple"] == ("a", "b")
     assert redacted["set"] == ["only"]
-    assert redacted["path"] == "/tmp/ws"
+    # A ``Path`` is not JSON-encodable, so it has to come back as text — and the
+    # text is the host's own rendering of it (``/tmp/ws`` on POSIX,
+    # ``\tmp\ws`` on Windows), because that is the path the reader has to be
+    # able to paste back in. Spelling the POSIX form here would only pin the
+    # test to one leg of the CI matrix.
+    assert isinstance(redacted["path"], str)
+    assert redacted["path"] == str(Path("/tmp/ws"))
     assert redacted["when"].startswith("2026-01-01")
     assert "bytes-secret" not in redacted["blob"]
 
