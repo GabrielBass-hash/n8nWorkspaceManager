@@ -1,10 +1,20 @@
 # n8n-launcher
 
-Cross-platform desktop launcher for isolated n8n workspaces.
+Cross-platform launcher for isolated n8n workspaces.
+
+> **The interface is gone.** Tkinter has been removed and the launcher is
+> headless: it manages workspaces, Git, remote deployments and CI, but it has
+> nothing to draw. `run_gui()` raises `NotImplementedError` on purpose. The
+> logic the windows used to drive is all still here and tested — see
+> [`MIGRATION.md`](MIGRATION.md) for what phase 2 rebuilds over it.
 
 ## Status
 
-The current slice provides domain models, platform-specific paths, persistent configuration, Compose rendering, Docker lifecycle commands, database migration/validation helpers, port allocation, browser app mode, workspace CRUD/lifecycle orchestration, a Tkinter GUI, the first-launch setup wizard, the n8n public-API client with owner bootstrap, workflow sync, GitHub repo creation, GitHub Actions CI harness generation and live runs, desktop shortcuts, and PyInstaller packaging. Unit and integration test suites are green.
+The launcher provides domain models, platform-specific paths, persistent configuration, Compose rendering, Docker lifecycle commands, database migration/validation helpers, port allocation, browser app mode, workspace CRUD/lifecycle orchestration, Git synchronization, GitHub repo creation, GitHub Actions CI harness generation and live runs, remote server deployment, an event journal, desktop shortcuts, and PyInstaller packaging.
+
+Everything that used to be reachable from a window is a **callable** now. Creation collects a `CreatePlan` (`workspaces/dialogs.py`), the update flow is `UpdateController` with injected questions (`platform/update_flow.py`), shutdown is `CloseSequence` (`workspaces/close.py`), and the sizing rules the tables obeyed are pure functions of their content (`gui_utils/text.py`). Unit and integration test suites are green; there is no GUI suite, because there is no GUI.
+
+What runs today: `main()` opens the journal, finds no interface to show, logs that, and shuts every workspace down cleanly on the way out.
 
 ## Key concepts
 
@@ -19,7 +29,7 @@ Each workspace is a user-defined n8n instance bound to a folder of workflow expo
 
 ### Git synchronization
 
-Git is optional per-workspace and configured at creation or later via the "Configurer Git…" context menu. Every launcher-created repo works on its own branch **`dev`** (legacy `main`/`n8n/*` branches are renamed once on first start); git lifecycle calls are serialized per-workspace. When enabled with a remote:
+Git is optional per-workspace and configured at creation or later through `prompt_git_config` / `workspaces/dialogs.py`. Every launcher-created repo works on its own branch **`dev`** (legacy `main`/`n8n/*` branches are renamed once on first start); git lifecycle calls are serialized per-workspace. When enabled with a remote:
 
 - **Auto-pull on start** — `git pull --rebase` brings remote JSON changes into the workspace folder before workflow import.
 - **Auto-push on close** — n8n workflows are exported to JSON, staged, committed with a timestamped message, and pushed. Push is skipped when there is nothing to commit *and* no unpushed commits. Server-side push rejections are retried once.
@@ -31,7 +41,7 @@ When no remote is set, the "Créer sur GitHub…" flow creates the repository vi
 
 ### Remote server deployment
 
-Deployment to a production server is optional per-workspace ("Configurer le serveur…", persisted as `ServerConfig`) and driven from the same git repo: publishing pushes the workspace **`dev`** branch to the server's bare repo as its `main` (the production reference). "Publier sur le serveur…" waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
+Deployment to a production server is optional per-workspace (persisted as `ServerConfig`) and driven from the same git repo: `publish()` pushes the workspace **`dev`** branch to the server's bare repo as its `main` (the production reference), then waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
 
 - `install_server` creates the bare repo (`git init --bare`), ships a generated `post-receive` hook and `deploy.py` (marker-commented, template strings), all transferred atomically (`write_remote_file`: `cat > path.tmp && mv`).
 - The server Compose file adds a top-level `name: n8n-ws-<id>` so the project is stable regardless of the checkout directory; the hook runs `docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d` and every remote import uses that pinned project.
@@ -39,21 +49,17 @@ Deployment to a production server is optional per-workspace ("Configurer le serv
 
 ### GitHub Actions CI
 
-Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests, configured entirely from the GUI. Runs are triggered manually or by pushes on the per-workspace `dev` branch (the repo default branch is set to `dev` on enable):
+Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests. Runs are triggered manually or by pushes on the per-workspace `dev` branch (the repo default branch is set to `dev` on enable):
 
-- **Enabling** (`Configurer les tests GitHub Actions…`) generates three files in the workspace repo — `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed selection `.n8n-tests/tests.json`. Every generated file carries the marker *« n8n-launcher : généré — ne pas modifier à la main »*. Changes are committed and pushed on enable.
-- **Pipeline eligibility**: a pipeline is testable iff it has a manual trigger, a schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every non-pinned node's credential types are covered by the recorded CI credentials. Ineligible pipelines are greyed out with a reason.
+- **Enabling** (`enable_ci()`) generates three files in the workspace repo — `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed selection `.n8n-tests/tests.json`. Every generated file carries the marker *« n8n-launcher : généré — ne pas modifier à la main »*. Changes are committed and pushed on enable.
+- **Pipeline eligibility** (`workflow_eligibility`): a pipeline is testable iff it has a manual trigger, a schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every non-pinned node's credential types are covered by the recorded CI credentials. Each ineligibility carries a human-readable reason.
 - **Credentials**: values are read once from the running workspace's n8n instance and copied to the clipboard as a JSON document for the `N8N_CI_CREDENTIALS` secret. The launcher keeps only `(name, type)` metadata, never the values.
-- **Runs panel** ("Déroulement" tab): a tree view of runs → jobs → pipelines with live progress (✔ success, ✘ failure, ◻ in-progress), auto-refresh every 5 s while a run is in flight, an "Ouvrir sur GitHub" link to open a run on GitHub, and a "Lancer la CI" button that dispatches the workflow via `workflow_dispatch` on a chosen ref (prefilled with the latest run's branch). The button is disabled while a run is already in flight (generated workflow uses `concurrency: cancel-in-progress`).
+- **Runs** (`workspaces/ci_runs.py`): a runs → jobs → pipelines model parsed from the GitHub REST payloads and the runner's log lines, refreshed on demand. Dispatching is `dispatch_workflow()` (`workflow_dispatch` on a chosen ref, prefilled with the latest run's branch); the generated workflow's `concurrency: cancel-in-progress` cancels a run already in flight.
 - **Disabling** removes only the generated harness files and keeps `tests.json`.
 
 ### GitHub token management
 
-Tokens are resolved automatically from the OS Git credential helper (the same credential `git push` uses) or `gh auth token`, with a 10 s timeout. The GUI adds:
-
-- "Configurer le token GitHub…" context menu entry to override the token for the session (or persist it once via "Se souvenir").
-- "Détecter via gh CLI" and "Coller depuis le presse-papiers" buttons in token dialogs — the token is never typed or logged.
-- A cancel is recorded per session so the user is not prompted again on every action.
+Tokens are resolved automatically from the OS Git credential helper (the same credential `git push` uses) or `gh auth token`, with a 10 s timeout, and never logged or persisted on its own. An override can be persisted once as `AppConfig.github_token`; otherwise the resolved token lives in memory only. Nothing has to be typed into a dialog, and nothing has to be configured.
 
 ### n8n 2.33.x integration notes
 
@@ -67,7 +73,7 @@ Findings from the integration spikes, baked into the code:
 - `docker compose ps --format json` is validated by the integration suite to derive per-service state.
 - Browser app mode uses the `--app` flag of Chrome/Edge/Brave/Chromium when one is installed, and falls back to `webbrowser.open`. Flag construction is unit-tested; real flags are exercised on the three-OS e2e pass.
 
-### macOS PATH in GUI-launched apps
+### macOS PATH in bundle-launched apps
 
 Finder/Dock/Launchpad start apps with a minimal `PATH`, so `docker` is resolved via `resolve_docker_command()` — probing `/opt/homebrew/bin`, `/opt/homebrew/sbin`, `/usr/local/bin`, `/usr/local/sbin`, and `/Applications/Docker.app/Contents/Resources/bin` before falling back to `PATH` lookup — instead of relying on the environment `PATH`.
 
@@ -108,14 +114,14 @@ Integration tests are opt-in (require Docker):
 uv run pytest -m integration
 ```
 
-Build the desktop distribution locally:
+Build the distribution locally:
 
 ```bash
 uv sync --group packaging
 uv run python scripts/build.py
 ```
 
-On macOS the onedir `.app` bundle embeds the app icon and a full `Info.plist` (display name, version, retina support), is ad-hoc signed, and is packaged into a styled drag-and-drop `.dmg` rendered by `dmgbuild`. Because the app may be launched from the Dock/Finder where `PATH` is minimal, the launcher resolves the `docker` CLI from standard macOS install locations.
+On macOS the onedir `.app` bundle embeds the app icon and a full `Info.plist` (display name, version, retina support), is ad-hoc signed, and is packaged into a styled drag-and-drop `.dmg` rendered by `dmgbuild`. The bundle ships a headless launcher: it will log that no interface is available and exit, which is why the CLI form is the useful one today.
 
 On Linux, additionally build the AppImage:
 
@@ -145,20 +151,11 @@ Les intégrations, opt-in et nécessitant Docker, se lancent avec `uv run pytest
 Le fichier `.github/workflows/ci.yml` enchaîne 4 jobs sur chaque PR (branches `dev`/`main`) :
 
 1. **`lint`** — `ubuntu-latest`. `ruff check .`, `ruff format --check .` et `basedpyright`. Échoue si le code est sale ; bloque tous les jobs suivants.
-2. **`test`** — matrix `ubuntu` / `windows` / `macos` (Python 3.12, `fail-fast: false`). Installe les deps via `uv sync --frozen`, lance `pytest` (sous `xvfb-run -a` sur Linux, DPI awareness géré dans le test sur Windows) et vérifie la couverture `--cov-fail-under=80`. Chaque OS upload en artefact son **snapshot structurel** (`structure-<os>.json`) et son rapport JUnit (`pytest-report-<os>.xml`).
-3. **`parity`** — `ubuntu-latest`, après `test`. Télécharge les 3 snapshots et lance `pytest tests/test_parity.py`. **Échoue si un widget du snapshot existe sur un OS mais pas sur les autres** ; sans les 3 fichiers il est simplement skippé.
+2. **`test`** — matrix `ubuntu` / `windows` / `macos` (Python 3.12, `fail-fast: false`). Installe les deps via `uv sync --frozen`, lance `pytest` et vérifie la couverture `--cov-fail-under=80`. Chaque OS upload son rapport JUnit (`pytest-report-<os>.xml`). Aucun toolkit graphique n'est installé ni invoqué : la suite tourne telle quelle sur un runner sans écran, `xvfb-run` n'a plus lieu d'être.
+3. **`integration`** — `ubuntu-latest`, en parallèle de `test`. Lance `tests/integration` (Docker requis) : déploiement distant (`install_server`, `publish`, hook `post-receive`) et statut d'exécution distant.
 4. **`build`** — après `test`, produit le `.dmg`/`.exe`/binaire et les upload.
 
-### Ajouter un widget à surveiller
-
-1. Récupérez son chemin logique : lancez `uv run pytest tests/test_structure.py` (sur Linux sans écran : `xvfb-run -a uv run pytest tests/test_structure.py`) puis lisez `artifacts/structure-linux.json` — le champ `path` de votre widget.
-2. Ajoutez ce chemin à la constante `WATCHED_PATHS` dans `tests/test_parity.py` ; le job `parity` exigera alors sa présence sur les trois OS.
-
-L'union des chemins de tous les widgets est de toute façon vérifiée sur les 3 OS : `WATCHED_PATHS` rend la surveillance explicite et documentée, et c'est le seul endroit à éditer.
-
-`tests/test_structure.py` vérifie en plus, sur l'OS qui génère le snapshot, que **chaque entrée de `WATCHED_PATHS` nomme un widget que ce build crée vraiment**. Sans cette contre-vérification une entrée périmée peut rester fausse indéfiniment : le job `parity` compare les snapshots entre eux et se *skip* tant qu'il n'en a pas trois, donc une entrée qui ne correspond à rien n'échoue jamais. (C'est arrivé : `root.!frame4.…` a survécu au jour où la liste des workspaces est devenue le premier volet d'une `PanedWindow`.)
-
-Les chemins sont des noms **stables**, posés sur les widgets que l'application détient (`accent_bar`, `paned`, `list_column`, `dock`, `journal_column`, les `actions` des dialogues…) et non les noms automatiques de Tk : un `!frame4` devient `!frame5` dès qu'un widget est ajouté avant lui, ce qui renommerait silencieusement tous les chemins enregistrés. Si vous renommez un widget suivi, mettez à jour son alias dans `tests/test_structure.py::_friendly_names` en même temps que `WATCHED_PATHS`.
+Les jobs **`parity`** et les suites `tests/test_structure.py` / `tests/test_parity.py` ont été supprimés avec l'interface : ils capturaient l'arbre des widgets sous un Xvfb et comparaient les trois OS entre eux, ce qui n'avait de sens que tant que ces arbres existaient.
 
 ## Installation
 

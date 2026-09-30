@@ -7,16 +7,16 @@ name = "n8n-launcher"
 
 dynamic = ["version"]
 
-description = "Cross-platform desktop launcher for isolated n8n workspaces"
+description = "Cross-platform launcher for isolated n8n workspaces"
 requires-python = ">=3.12"
+# No GUI toolkit. The launcher is headless: it manages workspaces, Git, CI and
+# remote deployments, and has no interface to draw. Adding one means choosing a
+# toolkit then, not shipping a 90 MB wheel nobody imports.
 dependencies = [
     "bcrypt>=4.0",
     "platformdirs>=4.0",
     "PyYAML>=6.0",
     "requests>=2.31",
-    # Planned UI toolkit. Declared so the future PyQt6 layer resolves against a
-    # pinned floor; nothing under src/ imports it yet (the package is headless).
-    "PyQt6>=6.6",
 ]
 
 [project.scripts]
