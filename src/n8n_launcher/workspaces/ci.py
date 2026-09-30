@@ -88,11 +88,6 @@ def github_repo_path(remote_url: str | None) -> str | None:
     return None
 
 
-def actions_url(repo_path: str) -> str:
-    """Return the GitHub Actions page URL for an ``owner/repo`` path."""
-    return f"https://github.com/{repo_path}/actions"
-
-
 def collect_workflows(workflows_dir: Path) -> list[str]:
     """Return POSIX relative paths of every workflow export in the workspace.
 
@@ -160,17 +155,6 @@ def write_selection(workflows_dir: Path, selected: set[str]) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def provided_credentials(credentials: list[dict[str, str]]) -> set[str]:
-    """Build the set of ``type/name`` keys from locally recorded metadata."""
-    keys: set[str] = set()
-    for item in credentials:
-        name = str(item.get("name") or "").strip()
-        ctype = str(item.get("type") or "").strip()
-        if name and ctype:
-            keys.add(f"{ctype}/{name}")
-    return keys
-
-
 def _is_trigger_type(node_type: str) -> bool:
     """Return True when the n8n node type is a trigger (type ends with Trigger)."""
     return str(node_type).rsplit(".", 1)[-1].endswith("Trigger")
@@ -226,14 +210,31 @@ def default_start_trigger(export: dict[str, Any]) -> str | None:
     return None
 
 
-def workflow_eligibility(export: dict[str, Any], provided: set[str]) -> tuple[bool, str]:
+def _credential_keys(credentials: list[dict[str, str]]) -> set[str]:
+    """Build the ``type/name`` set from recorded ``(name, type)`` metadata."""
+    keys: set[str] = set()
+    for item in credentials:
+        name = str(item.get("name") or "").strip()
+        ctype = str(item.get("type") or "").strip()
+        if name and ctype:
+            keys.add(f"{ctype}/{name}")
+    return keys
+
+
+def workflow_eligibility(
+    export: dict[str, Any], credentials: list[dict[str, str]]
+) -> tuple[bool, str]:
     """Return (eligible, reason) for a pipeline.
 
     A pipeline is eligible for CI when it has a trigger n8n can start from
     without external input (manual, schedule, or a pinned webhook/chat
-    trigger) *and* every non-pinned node's credentials are covered by the
-    locally recorded credential set. Otherwise a French, user-facing reason
-    explains why the pipeline is greyed out.
+    trigger) *and* every non-pinned node's credentials are covered by
+    *credentials* — the ``(name, type)`` metadata ``set_ci_credentials``
+    persisted. Otherwise a French, user-facing reason explains the refusal.
+
+    Takes the recorded metadata rather than a pre-built key set so the rule
+    answers the question a caller actually has, and cannot be handed a set
+    built from something other than what the workspace really has.
     """
     raw_nodes = export.get("nodes", [])
     nodes = (
@@ -252,64 +253,10 @@ def workflow_eligibility(export: dict[str, Any], provided: set[str]) -> tuple[bo
     )
     if not runnable:
         return False, "déclencheur webhook/chat non épinglé (épinglez-le dans l'éditeur)"
-    missing = missing_credentials(export, provided)
+    missing = missing_credentials(export, _credential_keys(credentials))
     if missing:
         return False, f"credentials manquantes : {', '.join(missing)}"
     return True, ""
-
-
-def start_description(export: dict[str, Any]) -> str:
-    """Return a short French description of how the pipeline will be started."""
-    nodes = export.get("nodes") or []
-    pin_data = export.get("pinData") or {}
-    for node in nodes:
-        if isinstance(node, dict) and node.get("type") in MANUAL_TRIGGER_TYPES:
-            return f"déclencheur manuel « {node.get('name')} »"
-    for node in nodes:
-        if isinstance(node, dict) and node.get("type") in SCHEDULE_TRIGGER_TYPES:
-            return "déclencheur programmé"
-    for node in nodes:
-        if (
-            isinstance(node, dict)
-            and _is_trigger_type(str(node.get("type", "")))
-            and node.get("name") in pin_data
-        ):
-            return f"déclencheur épinglé « {node.get('name')} »"
-    return "aucun déclencheur testable"
-
-
-def node_detail(export: dict[str, Any], node: dict[str, Any]) -> tuple[str, str]:
-    """Return (subtitle, style) describing a node row in the CI dialog.
-
-    The subtitle reports the node type plus a pinned badge; style is used by
-    the dialog to tint missing-credential or pinned rows.
-    """
-    parts = [str(node.get("type", ""))]
-    pin_data = export.get("pinData") or {}
-    if node.get("name") in pin_data:
-        parts.append("épinglé")
-    return ", ".join(parts), ("muted" if parts[-1] == "épinglé" else "warn")
-
-
-def ci_counts(workflows_dir: Path, provided: set[str]) -> dict[str, int]:
-    """Return selection counters for chips and dialogs.
-
-    ``eligible`` counts pipelines that can be run, ``selected`` the number of
-    lines in tests.json, and ``selected_eligible`` those that are both.
-    """
-    selected = read_selection(workflows_dir)
-    eligible = 0
-    selected_eligible = 0
-    for rel in collect_workflows(workflows_dir):
-        export = load_export(workflows_dir, rel)
-        if export is None:
-            continue
-        ok, _ = workflow_eligibility(export, provided)
-        if ok:
-            eligible += 1
-            if rel in selected:
-                selected_eligible += 1
-    return {"eligible": eligible, "selected": len(selected), "selected_eligible": selected_eligible}
 
 
 def _safe_image_tag(version: str) -> str:

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TypeVar, overload
 
 from .models import AppConfig
-from .paths import config_dir, config_file, launcher_db
+from .paths import config_file, launcher_db
 
 logger = logging.getLogger(__name__)
 
@@ -297,8 +297,3 @@ def _restrict_db_files(path: Path) -> None:
     for sidecar in (Path(f"{path}-wal"), Path(f"{path}-shm")):
         if sidecar.exists():
             _restrict_file(sidecar)
-
-
-def ensure_directories() -> None:
-    """Create the configuration directory if it does not exist yet."""
-    _restrict_dir(config_dir())

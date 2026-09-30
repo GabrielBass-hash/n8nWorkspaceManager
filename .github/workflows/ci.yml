@@ -55,7 +55,6 @@ jobs:
         include:
           - os: ubuntu-latest
             os_name: linux
-            xvfb: true
           - os: macos-latest
             os_name: macos
           - os: windows-latest
@@ -69,32 +68,14 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      # The GUI imports ``tkinter`` at module level. uv's managed CPython bundles
-      # Tk, but if uv ever resolves a bare system CPython (no ``python3-tk``),
-      # collection would error instead of running the GUI suite — install it so
-      # the ubuntu leg always runs those tests. ``xvfb`` gives the structural
-      # snapshot test a real display on headless runners.
-      - name: Install tkinter and xvfb (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
-
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Run tests (Linux, under xvfb)
-        if: matrix.xvfb
-        run: xvfb-run -a uv run pytest --cov-fail-under=80 --junitxml=pytest-report-linux.xml
-
-      - name: Run tests (macOS / Windows)
-        if: ${{ !matrix.xvfb }}
+      # No display needed: nothing imports a GUI toolkit any more, so there is
+      # no ``python3-tk`` to install and no ``xvfb`` to wrap the suite in. The
+      # coverage floor is kept where it was — headless does not mean untested.
+      - name: Run tests
         run: uv run pytest --cov-fail-under=80 --junitxml=pytest-report-${{ matrix.os_name }}.xml
-
-      - name: Upload structural snapshot
-        uses: actions/upload-artifact@v4
-        with:
-          name: structure-${{ matrix.os_name }}
-          path: artifacts/structure-${{ matrix.os_name }}.json
-          if-no-files-found: error
 
       - name: Upload pytest report
         uses: actions/upload-artifact@v4
@@ -104,10 +85,17 @@ jobs:
           if-no-files-found: error
 
   integration:
-    # The remote-deployment flow (install_server/publish/hook) is the code
-    # most likely to ship a silent bug to production, and it can only run end
-    # to end when Docker is present. GitHub's ubuntu runners already have a
-    # daemon; unit runs keep excluding these via ``-m 'not integration'``.
+    # The remote-deployment flow (install_server/publish/hook) and the remote
+    # execution-status contract are the code most likely to ship a silent bug to
+    # production, and they can only run end to end when Docker is present.
+    # Linux-only on purpose: the sshd sandbox is a Linux container and the
+    # harness reaches the deployed n8n through an SSH reverse tunnel, which is
+    # proven here but not on the macOS/Windows runners. What the harness needs
+    # from the runner: a Docker daemon (its socket is the default
+    # ``/var/run/docker.sock``, so no N8N_LAUNCHER_TEST_DOCKER_SOCKET override),
+    # the ``ssh`` client used to open that tunnel (preinstalled), and a free
+    # ephemeral port for the sandbox's sshd bridge. Unit runs keep excluding
+    # these via ``-m 'not integration'``.
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -123,6 +111,7 @@ jobs:
 
       - name: Run integration tests
         run: uv run pytest tests/integration -m integration --junitxml=pytest-report-integration.xml
+        timeout-minutes: 60
 
       - name: Upload pytest report
         uses: actions/upload-artifact@v4
@@ -130,32 +119,6 @@ jobs:
           name: pytest-report-integration
           path: pytest-report-integration.xml
           if-no-files-found: error
-
-  parity:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --frozen
-
-      - name: Download the three structural snapshots
-        uses: actions/download-artifact@v4
-        with:
-          pattern: structure-*
-          path: parity-snapshots
-          merge-multiple: true
-
-      # The single test that is allowed to fail a build for structural reasons:
-      # it must see all three snapshots or the job is skipped.
-      - name: Cross-OS structural parity
-        run: uv run pytest tests/test_parity.py --structure-dir parity-snapshots
 
   build:
     needs: test

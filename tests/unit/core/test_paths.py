@@ -47,12 +47,6 @@ def test_compose_file_appends_compose_yml(tmp_path: Path, monkeypatch: pytest.Mo
     assert paths.compose_file("w1") == tmp_path / "workspaces" / "w1" / "compose.yml"
 
 
-def test_browser_app_dir_appends_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(paths, "config_dir", lambda: tmp_path)
-
-    assert paths.browser_app_dir("w1") == tmp_path / "browser" / "w1"
-
-
 def test_updates_dir_appends_updates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paths, "config_dir", lambda: tmp_path)
 
@@ -69,9 +63,24 @@ def test_path_helpers_do_not_create_directories(
 
     paths.workspace_runtime_dir("w1")
     paths.compose_file("w1")
-    paths.browser_app_dir("w1")
     paths.updates_dir()
     paths.logs_dir()
 
     assert not config.exists()
     assert not logs.exists()
+
+
+def test_default_paths_stay_inside_the_session_sandbox(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The root ``sandbox_platform_dirs`` fixture must cover the unpatched calls.
+
+    A test that builds a default ``ConfigStore()`` or calls the real
+    ``bootstrap_logging()`` resolves these two functions; if they ever pointed
+    back at the developer's home, the unit suite would write into the real
+    launcher config and monitoring journal.
+    """
+    base = str(tmp_path_factory.getbasetemp())
+
+    assert str(paths.config_dir()).startswith(base)
+    assert str(paths.logs_dir()).startswith(base)

@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -21,6 +22,7 @@ from n8n_launcher.git import GitError, workspace_branch
 from n8n_launcher.github.api import GitHubError
 from n8n_launcher.n8n.api import N8nApiError
 from n8n_launcher.n8n.owner import OwnerSetupError
+from n8n_launcher.remote import RemoteExecution, RemoteExecutionStatus, RemoteHealth
 from n8n_launcher.remote.ssh import SshError
 from n8n_launcher.workspaces.manager import WorkspaceError, WorkspaceManager
 
@@ -1861,6 +1863,7 @@ def test_publish_exports_pushes_main_and_records_status(tmp_path: Path) -> None:
     assert args[2] == "dev"
     assert args[3] == "main"
     assert kwargs["env"] == {"GIT_SSH_COMMAND": "ssh -i k"}
+    assert kwargs["timeout"] == 300
     poll.assert_called_once_with(workspace.server, workspace.id, expected_sha="abc123")
     stored = store.load().workspaces[0]
     assert stored.server_last_error is None
@@ -2089,3 +2092,141 @@ def test_export_all_credentials_reads_values(tmp_path: Path) -> None:
     payload = launcher._export_all_credentials(workspace)
 
     assert payload == [{"name": "API", "type": "httpRequest", "data": {"url": "https://x"}}]
+
+
+def test_start_and_stop_are_journalled(tmp_path: Path, caplog) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        caplog.at_level(logging.INFO, logger="n8n_launcher.workspaces.manager"),
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file",
+            return_value=tmp_path / "compose.yml",
+        ),
+    ):
+        launcher.start(workspace.id)
+        launcher.stop(workspace.id)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Starting Demo" in message for message in messages)
+    assert any("Started Demo" in message for message in messages)
+    assert any("Stopped Demo" in message for message in messages)
+
+
+def test_failed_start_is_journalled_as_an_error_with_its_traceback(tmp_path: Path, caplog) -> None:
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    docker.up.side_effect = RuntimeError("docker daemon injoignable")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="n8n_launcher.workspaces.manager"),
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file",
+            return_value=tmp_path / "compose.yml",
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        launcher.start(workspace.id)
+
+    record = caplog.records[-1]
+    assert "Start failed for Demo" in record.getMessage()
+    assert record.exc_info is not None
+    assert record.levelno == logging.ERROR
+    assert record.workspace_id == workspace.id
+    assert launcher._find(launcher.store.load(), workspace.id).state is WorkspaceState.ERROR
+
+
+# ---------------------------------------------------------------------------
+# Supervision du serveur (lecture seule)
+# ---------------------------------------------------------------------------
+
+
+def deployed_workspace(launcher: WorkspaceManager, tmp_path: Path):
+    """Return a workspace with an enabled server configuration."""
+    workspace = create_none(launcher, tmp_path)
+    return launcher.update(workspace.id, server=server_cfg())
+
+
+def test_server_health_returns_the_remote_snapshot(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = deployed_workspace(launcher, tmp_path)
+    health = RemoteHealth(available=True, healthy=True, services={"n8n": "running"})
+
+    with patch("n8n_launcher.workspaces.manager.remote_health", return_value=health) as remote:
+        result = launcher.server_health(workspace.id)
+
+    assert result is health
+    remote.assert_called_once_with(workspace.server, workspace.id, timeout=30.0)
+
+
+def test_server_health_logs_a_degraded_stack(tmp_path: Path, caplog) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = deployed_workspace(launcher, tmp_path)
+    health = RemoteHealth(available=True, healthy=False, services={"n8n": "exited"})
+
+    with (
+        caplog.at_level(logging.WARNING, logger="n8n_launcher.workspaces.manager"),
+        patch("n8n_launcher.workspaces.manager.remote_health", return_value=health),
+    ):
+        launcher.server_health(workspace.id)
+
+    assert "Server health degraded for Demo" in caplog.text
+
+
+def test_server_logs_are_returned_from_the_remote(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = deployed_workspace(launcher, tmp_path)
+
+    with patch("n8n_launcher.workspaces.manager.remote_logs", return_value="n8n ready") as remote:
+        logs = launcher.server_logs(workspace.id, lines=50)
+
+    assert logs == "n8n ready"
+    remote.assert_called_once_with(workspace.server, workspace.id, lines=50)
+
+
+def test_server_deploy_status_returns_marker_and_history(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = deployed_workspace(launcher, tmp_path)
+    marker = {"sha": "abc", "status": "ok"}
+    history = ({"sha": "abc", "status": "ok"},)
+
+    with (
+        patch("n8n_launcher.workspaces.manager.read_remote_deploy_marker", return_value=marker),
+        patch("n8n_launcher.workspaces.manager.read_remote_deploy_history", return_value=history),
+    ):
+        got_marker, got_history = launcher.server_deploy_status(workspace.id)
+
+    assert got_marker == marker
+    assert got_history == history
+
+
+def test_server_execution_status_delegates_to_the_remote(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = deployed_workspace(launcher, tmp_path)
+    status = RemoteExecutionStatus(
+        supported=True,
+        executions=(RemoteExecution("9001", "success", "Demo", finished=True),),
+    )
+
+    with patch(
+        "n8n_launcher.workspaces.manager.remote_execution_status", return_value=status
+    ) as remote:
+        got = launcher.server_execution_status(workspace.id, limit=5)
+
+    assert got is status
+    remote.assert_called_once_with(workspace.server, workspace.id, limit=5)
+
+
+def test_server_observability_requires_a_configured_server(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    for call in (
+        launcher.server_health,
+        launcher.server_logs,
+        launcher.server_deploy_status,
+        launcher.server_execution_status,
+    ):
+        with pytest.raises(WorkspaceError, match="Aucun serveur configuré"):
+            call(workspace.id)

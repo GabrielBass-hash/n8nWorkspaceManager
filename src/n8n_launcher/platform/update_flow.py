@@ -1,4 +1,18 @@
-"""Update-flow controller: check, offer, download and self-install."""
+"""Update flow: check for a newer launcher release, offer it, download, self-install.
+
+Every check is best effort and every outcome is a *question asked to the user*.
+Both facts belong to this module: an update check must never delay or disturb a
+launch, and a user who does not want the update is not an error. What the user
+is asked is therefore injected rather than drawn — :meth:`UpdateController.setup`
+schedules :meth:`check`, and the caller supplies ``on_offer`` / ``on_error`` /
+``on_status_link`` for however it puts a question or a message on screen. A
+dialog, a prompt or a log line all drive the same flow.
+
+All the network and filesystem work already lives in :mod:`.updater`; this is the
+ordering around it — run the check off the launch path, route the answer back to
+the caller's thread, download on a worker, and only restart once the asset has
+been handed to the installer.
+"""
 
 from __future__ import annotations
 
@@ -6,49 +20,59 @@ import contextlib
 import os
 import queue
 import threading
-import tkinter as tk
-import webbrowser
 from collections.abc import Callable
 from pathlib import Path
-from tkinter import messagebox
 from typing import cast
 
 from ..core.paths import updates_dir
-from ..platform import updater
-from ..platform.updater import Asset, Release
-from .theme import ACCENT
+from . import updater
+from .updater import Asset, Release
+
+#: How long after launch the automatic check fires. Long enough that the window
+#: is up and usable, short enough that the offer lands while it is still fresh.
+LAUNCH_CHECK_DELAY_MS = 1500
 
 
 class UpdateController:
     """Check for a newer launcher release and drive the update.
 
     The launch-time check runs on a daemon thread; results are routed back
-    through the app event queue. Tk-bound side effects are limited to the
-    injected ``root``/``status_label`` so the flow stays unit-testable.
+    through the ``events`` queue so they are applied on the caller's own thread
+    (the GUI's event loop, a CLI's prompt). ``is_closed`` guards every step that
+    would otherwise raise into a window that no longer exists.
     """
 
     def __init__(
         self,
         *,
-        root: tk.Tk,
         events: queue.Queue,
         set_status: Callable[[str], None],
-        status_label: tk.Label | None,
+        on_offer: Callable[[str, str], bool],
+        on_error: Callable[[str, str], None],
+        on_status_link: Callable[[str, str], None],
+        schedule: Callable[[int, Callable[[], None]], None],
         is_closed: Callable[[], bool],
         finish_close: Callable[[], None],
     ) -> None:
-        self._root = root
+        """Bind the event queue, the caller's questions and its close guard."""
         self._events = events
         self._set_status = set_status
-        self._status_label = status_label
+        self._on_offer = on_offer
+        self._on_error = on_error
+        self._on_status_link = on_status_link
+        self._schedule = schedule
         self._is_closed = is_closed
         self._finish_close = finish_close
 
     def setup(self) -> None:
-        """Schedule the launch-time check when the app runs from a bundle."""
+        """Schedule the launch-time check when the app runs from a bundle.
+
+        A source checkout has no install target, so there is nothing to replace
+        there; the failure path of :meth:`check` is not even entered.
+        """
         if updater.install_target() is not None:
             with contextlib.suppress(Exception):
-                self._root.after(1500, self.check)
+                self._schedule(LAUNCH_CHECK_DELAY_MS, self.check)
 
     def check(self) -> None:
         """Kick off the update check on a background thread (never blocks launch)."""
@@ -86,31 +110,26 @@ class UpdateController:
     def _show_link(self, release: Release) -> None:
         """Point the status bar at the release page when the app is not writable.
 
-        Clicking the message opens ``releases/latest`` in the browser; the
-        binding is reset by the next ``set_status`` call.
+        Clicking the message opens ``releases/latest`` in the browser, so the
+        user gets the same offer as a writable install, just delivered by hand.
         """
         if self._is_closed():
             return
-        self._set_status(f"Nouvelle version {release.tag_name} disponible — cliquer pour ouvrir")
-        label = self._status_label
-        if label is None:
-            return
-        try:
-            label.config(cursor="hand2", fg=ACCENT)
-            label.bind("<Button-1>", lambda _event: webbrowser.open(updater.release_page_url()))
-        except Exception:
-            pass
+        self._on_status_link(
+            f"Nouvelle version {release.tag_name} disponible — cliquer pour ouvrir",
+            updater.release_page_url(),
+        )
 
     def _offer(self, release: Release, asset: Asset) -> None:
+        """Ask whether to install, then download on a worker thread."""
         if self._is_closed():
             return
-        if not messagebox.askyesno(
+        if not self._on_offer(
             "Mise à jour disponible",
             f"Une nouvelle version de n8n Launcher est disponible :\n\n"
             f"{updater.current_version()} -> {release.tag_name}\n\n"
             "Voulez-vous la télécharger et l'installer ?\n"
             "L'application redémarrera automatiquement.",
-            parent=self._root,
         ):
             return
         self._set_status(f"Téléchargement de la mise à jour {release.tag_name}…")
@@ -123,7 +142,7 @@ class UpdateController:
         ).start()
 
     def _download(self, asset: Asset, dest: Path) -> None:
-        """Stream the asset to ``dest`` and report a throttle progress message."""
+        """Stream the asset to *dest* and report a throttle progress message."""
         last_megabyte = 0
 
         def progress(received: int) -> None:
@@ -144,23 +163,18 @@ class UpdateController:
             updater.download_asset(asset.url, dest, expected_size=asset.size, progress=progress)
         except Exception as exc:
             message = f"Téléchargement impossible : {exc}"
-            self._events.put(
-                (
-                    lambda: messagebox.showerror("Mise à jour", message, parent=self._root),
-                    None,
-                )
-            )
+            self._events.put((lambda: self._on_error("Mise à jour", message), None))
             return
         self._events.put((lambda: self._confirm_install(dest), None))
 
     def _confirm_install(self, dest: Path) -> None:
+        """Ask whether to restart now, and hand the installer its script if so."""
         if self._is_closed():
             return
-        if not messagebox.askyesno(
+        if not self._on_offer(
             "Mise à jour prête",
             "La nouvelle version est téléchargée.\n"
             "Redémarrer n8n Launcher maintenant pour l'appliquer ?",
-            parent=self._root,
         ):
             self._set_status("")
             return
@@ -173,6 +187,9 @@ class UpdateController:
             script = updater.installer_script(dest, cast("Path", target))
             updater.spawn_installer(script)
         except Exception as exc:
-            messagebox.showerror("Mise à jour", str(exc), parent=self._root)
+            self._on_error("Mise à jour", str(exc))
             return
         self._finish_close()
+
+
+__all__ = ["LAUNCH_CHECK_DELAY_MS", "UpdateController"]
