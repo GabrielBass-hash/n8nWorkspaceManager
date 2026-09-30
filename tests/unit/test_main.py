@@ -1,4 +1,4 @@
-"""Entry-point tests: first-launch routing and corrupt-config backup."""
+"""Entry-point tests: session bracketing, config routing and the missing shell."""
 
 import logging
 from contextlib import ExitStack
@@ -8,11 +8,8 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-pytest.importorskip("tkinter")
-
 from n8n_launcher.__main__ import (
     _backup_unreadable_config,
-    _center,
     _close_session,
     _session_length,
     _signal_shutdown,
@@ -23,88 +20,41 @@ from n8n_launcher.__main__ import (
 from n8n_launcher.core.config import ConfigStore
 
 
-class RootStub:
-    """Minimal root exposing the geometry surface the entry point uses."""
-
-    def __init__(self):
-        self._geometry_calls: list[str] = []
-        self.destroyed = False
-
-    def geometry(self, value: str) -> None:
-        self._geometry_calls.append(value)
-
-    def update_idletasks(self) -> None:
-        pass
-
-    def winfo_screenwidth(self) -> int:
-        return 7680
-
-    def winfo_screenheight(self) -> int:
-        return 2160
-
-    def destroy(self) -> None:
-        self.destroyed = True
-
-
-def test_center_uses_responsive_window_size() -> None:
-    root = RootStub()
-
-    _center(root)
-
-    assert root._geometry_calls[0] == "1600x900"
-    assert root._geometry_calls[1] == "+3040+420"
-
-
-def test_backup_unreadable_config_preserves_file_and_warns(tmp_path: Path) -> None:
-    store = ConfigStore(tmp_path / "launcher.db")
-    store.path.write_text("{broken json", encoding="utf-8")
-    messagebox = MagicMock()
-
-    with patch("n8n_launcher.__main__.messagebox", messagebox):
-        _backup_unreadable_config(store)
-
-    assert not store.path.exists()
-    backups = list(tmp_path.glob("launcher.db.corrupt-*"))
-    assert len(backups) == 1
-    assert backups[0].read_text(encoding="utf-8") == "{broken json"
-    messagebox.showwarning.assert_called_once()
-
-
-def _patch_main(store: ConfigStore, wizard_value):
-    """Return a namespace wiring ``main`` to *store* and a fake root.
+def _patch_main(store: ConfigStore):
+    """Return a namespace wiring ``main`` to *store*, a fake journal and a fake Docker.
 
     ``_start_monitoring`` is stubbed here for every ``main()`` test: left real,
     it would call ``bootstrap_logging(logs_dir())`` and register the pytest
     process in the developer's real monitoring journal, where the corrupt-config
     test's warning reads like a launcher failure. The patches stay un-entered:
-    each test drives them through an ``ExitStack`` so extra patches (e.g.
-    ``LauncherApp``) can be added.
+    each test drives them through an ``ExitStack`` so it can add its own — the
+    interface call is the seam every one of them has to decide about.
     """
-    root = RootStub()
-    messagebox = MagicMock()
     monitor = MagicMock()
     docker = MagicMock()
     # Patching a class with a mock makes *calling* it return ``return_value``,
     # so the factory is what gets patched and ``docker`` is the instance
     # ``main`` works with.
     docker_factory = MagicMock(return_value=docker)
-    wizard = MagicMock(return_value=wizard_value)
     return SimpleNamespace(
-        root=root,
-        messagebox=messagebox,
         monitor=monitor,
         docker=docker,
-        wizard=wizard,
         patches=(
             patch("n8n_launcher.__main__.ConfigStore", return_value=store),
-            patch("n8n_launcher.__main__.tk.Tk", return_value=root),
-            patch("n8n_launcher.__main__.run_interactive_first_launch", wizard),
-            patch("n8n_launcher.__main__.messagebox", messagebox),
             patch("n8n_launcher.__main__.resolve_docker_command", return_value="docker"),
             patch("n8n_launcher.__main__.DockerManager", docker_factory),
             patch("n8n_launcher.__main__._start_monitoring", return_value=monitor),
         ),
     )
+
+
+def _configured(tmp_path: Path) -> ConfigStore:
+    """A store holding a usable config, so ``main`` gets past ``store.load()``."""
+    from n8n_launcher.core.models import AppConfig
+
+    store = ConfigStore(tmp_path / "launcher.db")
+    store.save(AppConfig("owner@example.test", "secret", tmp_path))
+    return store
 
 
 def _enter(ctx) -> ExitStack:
@@ -274,14 +224,11 @@ def test_close_session_persists_the_closing_event_in_the_open_store(tmp_path: Pa
     assert any(message.startswith("Surveillance terminée") for message in messages)
 
 
-def test_main_closes_the_journal_session_after_the_app_returns(
+def test_main_closes_the_journal_session_after_the_interface_returns(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from n8n_launcher.core.models import AppConfig
-
-    store = ConfigStore(tmp_path / "launcher.db")
-    store.save(AppConfig("owner@example.test", "secret", tmp_path))
-    ctx = _patch_main(store, wizard_value=None)
+    store = _configured(tmp_path)
+    ctx = _patch_main(store)
     closing_events_when_store_closed: list[int] = []
     ctx.monitor.close.side_effect = lambda *_args: closing_events_when_store_closed.append(
         len([record for record in caplog.records if "Surveillance terminée" in record.getMessage()])
@@ -289,12 +236,7 @@ def test_main_closes_the_journal_session_after_the_app_returns(
 
     with (
         _enter(ctx) as stack,
-        stack.enter_context(
-            patch(
-                "n8n_launcher.__main__.LauncherApp",
-                return_value=SimpleNamespace(run=MagicMock()),
-            )
-        ),
+        stack.enter_context(patch("n8n_launcher.__main__.run_gui")),
         patch("n8n_launcher.__main__.stop_all") as stop,
         caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"),
     ):
@@ -306,76 +248,104 @@ def test_main_closes_the_journal_session_after_the_app_returns(
     assert closing_events_when_store_closed == [1]
 
 
-def test_main_passes_the_monitor_to_the_app(tmp_path: Path) -> None:
-    from n8n_launcher.core.models import AppConfig
-
-    store = ConfigStore(tmp_path / "launcher.db")
-    store.save(AppConfig("owner@example.test", "secret", tmp_path))
-    ctx = _patch_main(store, wizard_value=None)
+def test_main_hands_the_store_manager_and_journal_to_the_interface(tmp_path: Path) -> None:
+    store = _configured(tmp_path)
+    ctx = _patch_main(store)
 
     with _enter(ctx) as stack:
-        launcher = stack.enter_context(
-            patch(
-                "n8n_launcher.__main__.LauncherApp",
-                return_value=SimpleNamespace(run=MagicMock()),
-            )
-        )
+        run_gui = stack.enter_context(patch("n8n_launcher.__main__.run_gui"))
         main()
 
-    assert launcher.call_args.kwargs["monitor"] is ctx.monitor
+    run_gui.assert_called_once()
+    args = run_gui.call_args.args
+    assert args[0] is store
+    assert args[1].store is store
+    assert args[1].docker is ctx.docker
+    assert args[2] is ctx.monitor
     ctx.monitor.close.assert_called_once()
 
 
-def test_main_missing_config_runs_wizard_without_backup(tmp_path: Path) -> None:
+def test_main_shuts_the_workspaces_down_when_the_shell_is_not_implemented(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The stub refusing is a normal exit, not a crash that skips the teardown.
+
+    ``run_gui`` is left *real* here: this is the run every launch is a run of
+    today, and the one thing that must not regress is that a launcher with no
+    interface still stops what it started.
+    """
+    store = _configured(tmp_path)
+    ctx = _patch_main(store)
+
+    with (
+        _enter(ctx),
+        patch("n8n_launcher.__main__.stop_all") as stop,
+        caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"),
+    ):
+        main()  # must not raise
+
+    stop.assert_called_once_with(store, ctx.docker)
+    ctx.monitor.close.assert_called_once()
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert any("phase 2" in record.getMessage() for record in errors)
+    assert any("Surveillance terminée" in record.getMessage() for record in caplog.records)
+
+
+def test_main_without_a_config_stops_and_creates_no_backup(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A true first launch has nothing to show and nothing to preserve."""
     store = ConfigStore(tmp_path / "launcher.db")
-    ctx = _patch_main(store, wizard_value=None)
+    ctx = _patch_main(store)
 
-    with _enter(ctx):
-        main()
+    with _enter(ctx) as stack:
+        run_gui = stack.enter_context(patch("n8n_launcher.__main__.run_gui"))
+        with caplog.at_level(logging.ERROR, logger="n8n_launcher.__main__"):
+            main()
 
-    ctx.wizard.assert_called_once()
-    assert ctx.root.destroyed
-    ctx.messagebox.showwarning.assert_not_called()
+    run_gui.assert_not_called()
     assert not list(tmp_path.glob("launcher.db.corrupt-*"))
+    assert any("phase 2" in record.getMessage() for record in caplog.records)
 
 
-def test_main_corrupt_config_is_backed_up_before_wizard(
+def test_main_corrupt_config_is_backed_up_before_stopping(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     store = ConfigStore(tmp_path / "launcher.db")
     store.path.write_text("{broken json", encoding="utf-8")
-    ctx = _patch_main(store, wizard_value=None)
+    ctx = _patch_main(store)
 
-    with _enter(ctx), caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"):
-        main()
+    with _enter(ctx) as stack:
+        run_gui = stack.enter_context(patch("n8n_launcher.__main__.run_gui"))
+        with caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"):
+            main()
 
-    ctx.wizard.assert_called_once()
-    assert ctx.root.destroyed
-    ctx.messagebox.showwarning.assert_called_once()
+    run_gui.assert_not_called()
     backups = list(tmp_path.glob("launcher.db.corrupt-*"))
     assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{broken json"
     # The journal entry must name the file and carry the cause: an
     # unattributable "configuration illisible" is what made this warning
-    # undiagnosable from the monitoring panel. Looked up by level, because the
-    # session now closes with an INFO line of its own.
+    # undiagnosable from the monitoring panel.
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert str(store.path) in warnings[0].getMessage()
     assert warnings[0].exc_info is not None
     assert any("Surveillance terminée" in record.getMessage() for record in caplog.records)
 
 
-def test_main_valid_config_skips_wizard(tmp_path: Path) -> None:
-    from n8n_launcher.core.models import AppConfig
-
+def test_backup_unreadable_config_leaves_the_original_alone_when_it_cannot_move(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A copy that could not be created must not be announced as if it exists."""
     store = ConfigStore(tmp_path / "launcher.db")
-    store.save(AppConfig("owner@example.test", "secret", tmp_path))
-    ctx = _patch_main(store, wizard_value=None)
+    store.path.write_bytes(b"\x00corrupt")
 
-    with _enter(ctx) as stack:
-        launcher = stack.enter_context(patch("n8n_launcher.__main__.LauncherApp"))
-        main()
+    with (
+        patch("n8n_launcher.__main__.os.replace", side_effect=OSError("busy")),
+        caplog.at_level(logging.WARNING, logger="n8n_launcher.__main__"),
+    ):
+        _backup_unreadable_config(store)
 
-    ctx.wizard.assert_not_called()
-    ctx.messagebox.showwarning.assert_not_called()
-    assert ctx.root.destroyed is False
-    launcher.return_value.run.assert_called_once()
+    assert store.path.read_bytes() == b"\x00corrupt"
+    assert not list(tmp_path.glob("launcher.db.corrupt-*"))
+    assert "aucune sauvegarde" in caplog.text

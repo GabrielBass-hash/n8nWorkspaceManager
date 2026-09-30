@@ -7,17 +7,14 @@ import os
 import signal
 import sys
 import time
-import tkinter as tk
 from datetime import datetime, timedelta
-from tkinter import messagebox
 
 from .core.config import ConfigError, ConfigStore
 from .core.filelock import LockError, acquire_single_instance_lock
 from .core.models import WorkspaceState
 from .core.paths import logs_dir
 from .docker.manager import DockerManager, resolve_docker_command
-from .gui.app import LauncherApp, window_size
-from .gui.first_launch import run_interactive_first_launch
+from .gui import run_gui
 from .monitoring.bootstrap import bootstrap_logging
 from .monitoring.store import EventStore
 from .workspaces.manager import WorkspaceManager
@@ -25,40 +22,26 @@ from .workspaces.manager import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 
-def _center(root: tk.Tk) -> None:
-    """Centre the root window on screen with a reasonable vertical offset."""
-    width, height = window_size(root.winfo_screenwidth(), root.winfo_screenheight())
-    root.geometry(f"{width}x{height}")
-    root.update_idletasks()
-    x = (root.winfo_screenwidth() - width) // 2
-    y = max((root.winfo_screenheight() - height) // 3, 0)
-    root.geometry(f"+{x}+{y}")
-
-
 def _backup_unreadable_config(store: ConfigStore) -> None:
-    """Move an unreadable config aside before the wizard rewrites the live file.
+    """Move an unreadable config aside so a later write cannot destroy it.
 
-    ``main`` only routes an unreadable config to the first-launch wizard when
-    the file exists (true first launch is when the file is absent). The wizard
-    then calls ``store.save()``, which would silently overwrite the user's
-    workspace list — so the offending file is preserved under
-    ``config.json.corrupt-<timestamp>`` and the user is told, never wiped
-    without trace.
+    A config that exists but cannot be read is the user's workspace list, their
+    owner password and their GitHub token. Whatever happens next must never
+    overwrite it silently, so the file is preserved under
+    ``launcher.db.corrupt-<timestamp>`` and the copy is named in the journal.
     """
     backup = store.path.with_name(f"{store.path.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
     try:
         os.replace(store.path, backup)
-    except OSError:
+    except OSError as exc:
+        # Nothing moved, so the original is still where it was: say that instead
+        # of pointing the user at a copy that does not exist.
+        logger.warning("Configuration illisible : aucune sauvegarde créée (%s)", exc)
         return
-    messagebox.showwarning(
-        "Configuration illisible",
-        "Le fichier de configuration n'a pas pu être lu.\n"
-        "Une copie a été sauvegardée sous :\n"
-        f"{backup}\n\n"
-        "⚠ Ce fichier contient vos identifiants (mot de passe du compte owner, "
-        "token GitHub) — ne le partagez pas.\n\n"
-        "L'assistant de premier lancement va vous permettre de repartir.\n"
-        "Ré-importez vos workspaces après coup si besoin.",
+    logger.warning(
+        "Configuration illisible : copie de sauvegarde créée sous %s "
+        "(elle contient vos identifiants — ne la partagez pas)",
+        backup,
     )
 
 
@@ -137,7 +120,13 @@ def _close_session(store: ConfigStore, docker: DockerManager, started: float) ->
 
 
 def main() -> None:
-    """Application entry point: config, first-launch wizard, Tkinter GUI."""
+    """Application entry point: open the journal, hand off to the interface, close cleanly.
+
+    There is no interface yet, so this bracketed run is what the launcher
+    currently does end to end: it takes the single-instance lock, opens the
+    journal, and shuts every workspace down properly on the way out. A shell
+    that cannot be built is not a reason to leave containers running.
+    """
     started = time.monotonic()
     store = ConfigStore()
     # Exactly one launcher process may hold the config + compose files at a
@@ -145,11 +134,9 @@ def main() -> None:
     try:
         instance_lock = acquire_single_instance_lock(store.path.parent)
     except LockError:
-        with contextlib.suppress(Exception):
-            messagebox.showwarning(
-                "n8n Launcher",
-                "Une autre instance de l'application est déjà en cours d'exécution.",
-            )
+        # No window to warn in; the journal is not open yet either, and opening
+        # it here would take the very lock this instance does not hold.
+        logger.warning("Une autre instance de l'application est déjà en cours d'exécution.")
         return
     monitor = _start_monitoring()
     docker = DockerManager(command=resolve_docker_command())
@@ -165,37 +152,38 @@ def main() -> None:
         signal.signal(signal.SIGINT, lambda *_args: _signal_shutdown(store, docker, *_args))
     except ValueError:
         pass
-    root: tk.Tk | None = None
     try:
         try:
             store.load()
         except ConfigError as exc:
-            # The wizard only represents a true first launch when no config file
-            # exists at all; an existing-but-unreadable file must be backed up
-            # instead of silently replaced with an empty workspace list.
-            root = tk.Tk()
-            _center(root)
+            # A config that exists but cannot be read is the user's workspace
+            # list and credentials: preserve it and stop. One that is absent is
+            # a true first launch, and the wizard that would create it is part
+            # of the interface that does not exist yet — either way there is
+            # nothing to show, and an empty workspace list would be a lie.
             if store.path.exists():
+                logger.warning("Configuration illisible, arrêt du lanceur (%s)", exc, exc_info=True)
                 _backup_unreadable_config(store)
-                # The reason is the whole point of the journal here: without it
-                # the warning is unattributable, and the traceback (chained to
-                # the underlying sqlite/OSError) tells a corrupt database from a
-                # permission or locking problem.
-                logger.warning(
-                    "Configuration illisible (%s) : copie de sauvegarde créée",
-                    exc,
+            else:
+                logger.error(
+                    "Aucune configuration : le lanceur n'est pas encore configuré "
+                    "(l'assistant de premier lancement fait partie de l'interface, phase 2)",
                     exc_info=True,
                 )
-            logger.info("Assistant de premier lancement affiché")
-            if run_interactive_first_launch(store, docker, root=root) is None:
-                root.destroy()
-                return
+            return
         manager = WorkspaceManager(store, docker)
         logger.info(
-            "Interface ouverte",
+            "Ouverture de l'interface",
             extra={"workspaces": len(manager.list())},
         )
-        LauncherApp(store, manager, manager.docker, root=root, monitor=monitor).run()
+        try:
+            run_gui(store, manager, monitor)
+        except NotImplementedError as exc:
+            # The shell is not written yet. Say so and exit through the normal
+            # path, so the session is still bracketed and the workspaces are
+            # still stopped by `finally`.
+            logger.error("Interface indisponible : %s", exc)
+            return
     finally:
         # The journal session is closed *before* the store: this stops the
         # workspaces (logging the teardown) and writes the closing event, both
