@@ -1,14 +1,17 @@
-"""Tkinter user interface.
+"""The launcher's user interface.
 
-The launcher shell lives in :mod:`n8n_launcher.gui.app`; creation dialogs,
-the close sequence, the update flow and the workspace display helpers live
-in dedicated sibling modules. The *decisions* those dialogs collect, and the
-sizing rules the tables obey, are toolkit-free and live outside this package
-(:mod:`n8n_launcher.workspaces.dialogs`, :mod:`n8n_launcher.gui_utils.text`).
+Tkinter is gone. Everything under the old ``gui/`` package has either been
+extracted to the package that owns the subject — the sizing rules to
+:mod:`n8n_launcher.gui_utils.text`, the creation/Git plans to
+:mod:`n8n_launcher.workspaces.dialogs`, the update flow to
+:mod:`n8n_launcher.platform.update_flow`, the close order to
+:mod:`n8n_launcher.workspaces.close` — or deleted with the widgets it drew.
+
+Nothing is wired yet: :func:`run_gui` is the entry point the application will
+call once a real shell exists, and it refuses rather than pretending. See
+``MIGRATION.md`` for what phase 2 has to rebuild.
 """
 
-from ..workspaces.dialogs import CreatePlan
-from ..workspaces.display import GitRowStatus
-from .app import LauncherApp
+from .app import LauncherApp, run_gui
 
-__all__ = ["CreatePlan", "GitRowStatus", "LauncherApp"]
+__all__ = ["LauncherApp", "run_gui"]

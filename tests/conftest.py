@@ -1,26 +1,9 @@
-import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    """Expose the snapshot directory shared by the structure/parity tests.
-
-    ``test_structure.py`` writes ``structure-<os>.json`` there and
-    ``test_parity.py`` reads the three OS files back from the same place. CI
-    overrides it via ``--structure-dir`` (the parity job points at the merged
-    artifact folder); local runs default to ``artifacts/``.
-    """
-    parser.addoption(
-        "--structure-dir",
-        action="store",
-        default=os.environ.get("STRUCTURE_DIR", "artifacts"),
-        help="Directory holding/receiving the structure-<os>.json snapshots",
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -48,12 +31,6 @@ def sandbox_platform_dirs(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
             lambda name, *args, **kwargs: str(base / "log"),
         )
         yield
-
-
-@pytest.fixture
-def structure_dir(request: pytest.FixtureRequest) -> Path:
-    """Resolve the configured snapshot directory as an absolute path."""
-    return Path(request.config.getoption("--structure-dir"))
 
 
 @pytest.fixture
