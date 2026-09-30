@@ -18,9 +18,6 @@ src/n8n_launcher/
 │   ├── models.py          # DbMode, GitConfig, DbConfig, Workspace, AppConfig (dataclasses)
 │   ├── config.py          # ConfigStore: SQLite (WAL), load/mutate, multi-process safe
 │   ├── filelock.py        # Cross-platform FileLock, single-instance lock, per-workspace git lock
-│   ├── throttle.py        # Per-process concurrency limiter for background actions
-│   ├── subjects.py        # PageSubject: the journal filter a focused view installs
-│   ├── first_launch.py    # First-launch validation (password policy, config building)
 │   └── paths.py           # platformdirs-based paths (config, logs, workspace runtime)
 ├── docker/                # Compose rendering + Docker subprocess wrapper
 │   ├── compose.py         # write_compose(workspace, path) — per-workspace YAML
@@ -41,9 +38,6 @@ src/n8n_launcher/
 │   └── credentials.py     # Auto-create n8n DB credentials; data_db_target()
 ├── platform/              # OS-specific helpers
 │   ├── ports.py           # Port availability check + suggestion
-│   ├── browser.py         # Browser app mode (--app flag for Chrome/Edge/Brave/Chromium)
-│   ├── files.py           # Reveal a written file in the OS file manager
-│   ├── shortcuts.py       # Desktop shortcuts: .desktop / .url / .command
 │   ├── update_flow.py     # UpdateController: release check → download → install (injected questions)
 │   └── updater.py         # GitHub release comparison + download (all network/filesystem work)
 ├── gui/                   # The seam, not the interface: run_gui() refuses
@@ -62,10 +56,7 @@ src/n8n_launcher/
     ├── manager.py         # WorkspaceManager: CRUD, start/stop, git sync, CI, install_server/publish
     ├── close.py           # CloseSequence: export → git sync → stop (ordered, headless)
     ├── dialogs.py         # Creation/Git plans (CreatePlan, GitClonePlan…) + form helpers
-    ├── display.py         # Row formatting, git status, DB label, pipeline count
-    ├── server_snapshot.py # ServerSnapshot: the read-only supervision model
-    ├── ci.py              # CI harness: render_harness(), eligibility, tests.json selection
-    └── ci_runs.py         # Runs model: RunSummary, JobSummary, RunsSnapshot, parsers
+    └── ci.py              # CI harness: render_harness(), eligibility, tests.json selection
 ```
 
 ---
@@ -110,25 +101,17 @@ src/n8n_launcher/
 - **Eligibility**: pipeline is testable iff manual/schedule/pinned trigger + all non-pinned nodes' credential types are covered by `ci_credentials` metadata.
 - **Selection**: machine-managed `tests.json` (`{"selected": [...]}`), written by `save_ci_selection()`; only eligible pipelines can be ticked, and every ineligibility carries a reason.
 - **Credentials**: `ci_credentials_payload(id)` reads the values live from the n8n public API (`api.get_credential(id).data`) and hands back the JSON for the `N8N_CI_CREDENTIALS` secret; only `(name, type)` metadata is persisted in config.
-- **Runs**: `workspaces/ci_runs.py` models a run → jobs → pipelines snapshot parsed from the REST payloads and the runner's log lines; `dispatch_workflow()` fires `workflow_dispatch` on a chosen ref (prefilled with the latest run's branch).
+- **Runs**: read through `github/api.py` (`list_workflow_runs`, `list_run_jobs`, `fetch_job_logs`); `dispatch_workflow()` fires `workflow_dispatch` on a chosen ref, and the generated workflow's `concurrency: cancel-in-progress` cancels a run already in flight.
 - Runner auth: internal `/rest/*` calls use `n8n-auth` session cookie from `POST /rest/login` (not Bearer JWT). Container starts with `N8N_SECURE_COOKIE=false` for cookie replay over HTTP.
 
 ### First launch
 
-There is no wizard yet: it was a view, so it went with the rest of the interface. What it collected and checked is headless and tested — `core/first_launch.py` validates the password against n8n's own policy (8-64 chars, one digit, one uppercase) and builds the initial config, `platform/shortcuts.py` installs the desktop shortcut, `docker.manager` checks availability. A launcher with no config logs that it is unconfigured and exits (`main()` does not fabricate an empty workspace list).
+There is no wizard and no first-launch helper: both were views, and nothing else called them. A launcher with no config logs that it is unconfigured and exits — `main()` does not fabricate an empty workspace list. Creating the first config is phase 2 work.
 
 ### Monitoring
 
 - Every run is bracketed in the journal: `Surveillance active` at start, `Surveillance terminée — session de h:mm:ss, N workspace(s)` at close.
 - Events are structured, redacted before they are written, kept 30 days, searchable, and exportable as JSON from the hidden log directory.
-
-### Browser App Mode
-
-- Opens n8n in Chrome/Edge/Brave/Chromium with `--app` flag (isolated window). Falls back to `webbrowser.open`. Uses isolated browser profile per workspace (`config_dir/browser/<id>/`).
-
-### Desktop Shortcuts
-
-- Linux: `.desktop` file · Windows: `.url` file · macOS: `.command` script.
 
 ### Updater
 

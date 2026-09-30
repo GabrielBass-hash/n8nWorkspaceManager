@@ -68,11 +68,6 @@ def checkout_dir(cfg: ServerConfig, workspace_id: str | None = None) -> str:
     return f"{resolve_base(cfg, workspace_id)}/workflow"
 
 
-def secrets_path(cfg: ServerConfig, workspace_id: str | None = None) -> str:
-    """Server path of the credentials document (0600, never committed)."""
-    return f"{resolve_base(cfg, workspace_id)}/secrets.json"
-
-
 def log_path(cfg: ServerConfig, workspace_id: str | None = None) -> str:
     """Server path of the deployment log."""
     return f"{resolve_base(cfg, workspace_id)}/server.log"

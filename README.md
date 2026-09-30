@@ -10,7 +10,7 @@ Cross-platform launcher for isolated n8n workspaces.
 
 ## Status
 
-The launcher provides domain models, platform-specific paths, persistent configuration, Compose rendering, Docker lifecycle commands, database migration/validation helpers, port allocation, browser app mode, workspace CRUD/lifecycle orchestration, Git synchronization, GitHub repo creation, GitHub Actions CI harness generation and live runs, remote server deployment, an event journal, desktop shortcuts, and PyInstaller packaging.
+The launcher provides domain models, platform-specific paths, persistent configuration, Compose rendering, Docker lifecycle commands, database migration/validation helpers, port allocation, workspace CRUD/lifecycle orchestration, Git synchronization, GitHub repo creation, GitHub Actions CI harness generation and live runs, remote server deployment, an event journal, and PyInstaller packaging.
 
 Everything that used to be reachable from a window is a **callable** now. Creation collects a `CreatePlan` (`workspaces/dialogs.py`), the update flow is `UpdateController` with injected questions (`platform/update_flow.py`), shutdown is `CloseSequence` (`workspaces/close.py`), and the sizing rules the tables obeyed are pure functions of their content (`gui_utils/text.py`). Unit and integration test suites are green; there is no GUI suite, because there is no GUI.
 
@@ -53,8 +53,8 @@ Each workspace with Git enabled and a **GitHub** remote can run its exported pip
 
 - **Enabling** (`enable_ci()`) generates three files in the workspace repo — `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed selection `.n8n-tests/tests.json`. Every generated file carries the marker *« n8n-launcher : généré — ne pas modifier à la main »*. Changes are committed and pushed on enable.
 - **Pipeline eligibility** (`workflow_eligibility`): a pipeline is testable iff it has a manual trigger, a schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every non-pinned node's credential types are covered by the recorded CI credentials. Each ineligibility carries a human-readable reason.
-- **Credentials**: values are read once from the running workspace's n8n instance and copied to the clipboard as a JSON document for the `N8N_CI_CREDENTIALS` secret. The launcher keeps only `(name, type)` metadata, never the values.
-- **Runs** (`workspaces/ci_runs.py`): a runs → jobs → pipelines model parsed from the GitHub REST payloads and the runner's log lines, refreshed on demand. Dispatching is `dispatch_workflow()` (`workflow_dispatch` on a chosen ref, prefilled with the latest run's branch); the generated workflow's `concurrency: cancel-in-progress` cancels a run already in flight.
+- **Credentials**: `ci_credentials_payload(id)` reads the values once from the running workspace's n8n instance and returns the JSON document for the `N8N_CI_CREDENTIALS` secret. The launcher keeps only `(name, type)` metadata, never the values.
+- **Runs**: read through `github/api.py` (`list_workflow_runs`, `list_run_jobs`, `fetch_job_logs`). Dispatching is `dispatch_workflow()` (`workflow_dispatch` on a chosen ref); the generated workflow's `concurrency: cancel-in-progress` cancels a run already in flight.
 - **Disabling** removes only the generated harness files and keeps `tests.json`.
 
 ### GitHub token management
@@ -71,7 +71,6 @@ Findings from the integration spikes, baked into the code:
 - Because of these constraints the launcher keeps the REST bootstrap instead of `N8N_INSTANCE_OWNER_*` env vars. `hash_owner_password` (bcrypt) stays available for a future hashed-env evaluation.
 - Named Compose volumes must be declared: each workspace declares both `n8ndata-<id>` and (managed mode) `pgdata-<id>`.
 - `docker compose ps --format json` is validated by the integration suite to derive per-service state.
-- Browser app mode uses the `--app` flag of Chrome/Edge/Brave/Chromium when one is installed, and falls back to `webbrowser.open`. Flag construction is unit-tested; real flags are exercised on the three-OS e2e pass.
 
 ### macOS PATH in bundle-launched apps
 
@@ -186,6 +185,8 @@ bash scripts/dequarantine.sh /path/to/n8n-launcher.app
 
 - **Windows**: run or pin `n8n-launcher.exe` from the taskbar / Start menu.
 - **Linux**: make the AppImage executable and launch it — it integrates with your desktop environment's app menu.
+
+The bundle is the same headless launcher: it logs that no interface is available and exits.
 
 ## Releases
 

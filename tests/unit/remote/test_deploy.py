@@ -70,7 +70,6 @@ def test_resolve_base_normalizes_tilde_and_trailing_slash() -> None:
 
 def test_path_helpers_build_server_layout() -> None:
     assert deploy.checkout_dir(CFG) == "n8n-launcher/abc123/workflow"
-    assert deploy.secrets_path(CFG) == "n8n-launcher/abc123/secrets.json"
     assert deploy.log_path(CFG) == "n8n-launcher/abc123/server.log"
     assert deploy.marker_path(CFG) == "n8n-launcher/abc123/last-deploy.json"
 

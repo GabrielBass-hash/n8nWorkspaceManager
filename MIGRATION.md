@@ -24,23 +24,33 @@ enforced did not have to die with them.
 
 ## What was kept, and where it went
 
-Every one of these is a plain function or dataclass with a plain test. No
-toolkit, no event loop, no display.
+Extraction was not the same as keeping everything, and a second pass (see
+**What was then deleted as dead**) removed what had no caller left. What
+survives is a plain function or dataclass with a plain test. No toolkit, no
+event loop, no display.
+
+The test for a survivor is not "it has no widgets" but **it answers a question
+the domain still asks**: which DB a new workspace gets, what order a shutdown
+happens in, how wide a column is, whether a pipeline is testable. A row
+formatter, a status badge and a snapshot dataclass answer none of those, so
+they went.
 
 | Concern | Now lives in | Entry points |
 |---|---|---|
 | What a creation form collects | `workspaces/dialogs.py` | `CreatePlan`, `GitClonePlan`, `GitConfigChoice`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan` |
 | Which DB a new workspace gets | `workspaces/dialogs.py` | `default_creation_db`, `fresh_managed_db_config` |
-| First-launch validation | `core/first_launch.py` | `validate_password`, `build_initial_config` |
 | Shutdown order | `workspaces/close.py` | `CloseSequence`, `CloseHooks` |
-| Row formatting / status probes | `workspaces/display.py` | `format_row`, `git_repo_status`, `row_tooltip`, `db_label` |
 | Update: check → download → install | `platform/update_flow.py` | `UpdateController` (all questions injected) |
 | Update: network + filesystem | `platform/updater.py` | unchanged — it was already separate |
 | Column and room sizing | `gui_utils/text.py` | `column_widths`, `fit_budget`, `ellipsize`, `ELLIPSIS` |
-| Journal filtering / formatting | `monitoring/present.py` | `filter_events`, `event_row`, `CriticalGate`, `matches_tokens` |
-| What a focused view filters on | `core/subjects.py` | `PageSubject`, `PageKind`, `log_page_event` |
-| Runs rendering | `workspaces/ci_runs.py` | `compose_snapshot`, `run_summary`, `job_summary` |
-| Server supervision rendering | `workspaces/server_snapshot.py` | `ServerSnapshot`, `server_snapshot_text` |
+| Is this pipeline testable? | `workspaces/ci.py` | `workflow_eligibility`, `missing_credentials`, `load_export` |
+
+`workflow_eligibility` is the borderline case, and it is deliberate: it is the
+rule that decides whether the `N8N_CI_CREDENTIALS` secret and the tests
+selection are even *meaningful*, so it stays even though the view that used to
+show the verdict is gone. It takes the persisted `(name, type)` metadata
+directly — a caller that can tick a pipeline has to ask it, because
+`save_ci_selection()` writes whatever it is handed.
 
 ## The three designs worth not breaking
 
@@ -158,9 +168,10 @@ The deleted pages were good for reasons that survive them:
    toolkit to fake. A `FakeTtk` that is not asserted on is dead weight, and the
    fakes it held encoded the bugs above.
 4. **Wire the first launch.** `main()` currently stops when there is no config,
-   and `core/first_launch.py::run_first_launch` is there to be driven by a view.
-   Until then the launcher cannot create its own config, so it cannot be used
-   for a first run.
+   and the first-launch validation went with the dead-code pass (nothing else
+   called it). Until it is written the launcher cannot create its own config,
+   so it cannot be used for a first run. Reuse `validate_password()` in
+   `n8n/api.py`, which is where n8n's own policy lives and is still tested.
 5. **The `_start_monitoring` → `run_gui` → `_close_session` bracket is the
    contract.** Every run, including the failure paths, must end with
    `Surveillance terminée` in the journal and the workspaces stopped. There is a
@@ -183,3 +194,25 @@ The deleted pages were good for reasons that survive them:
 Kept: 9 lines in `gui/app.py` and 17 in `gui/__init__.py`, plus 523 lines of
 newly headless logic in `gui_utils/text.py`, `workspaces/dialogs.py` and
 `platform/update_flow.py`.
+
+## What was then deleted as dead
+
+The extraction left a second problem: some of what it kept was kept *wrong*. A
+module with no caller does not become valid by being toolkit-free, and the
+entries below had no production caller once the views were gone. Deleting them
+was the point of a follow-up pass, not an afterthought of it.
+
+| Removed | Was |
+|---|---|
+| `core/throttle.py`, `core/state_labels.py` | helpers the views used to rate-limit and label; nothing else did |
+| `core/first_launch.py`, `core/subjects.py` | first-launch validation and the journal's per-view filter tokens |
+| `monitoring/present.py` | the in-memory `filter_events` — `EventStore.search_events` filters in SQL, so this was a second implementation to disagree with |
+| `platform/browser.py`, `platform/files.py`, `platform/shortcuts.py` | app-mode launch, "reveal in file manager", desktop shortcut files |
+| `workspaces/display.py`, `workspaces/server_snapshot.py`, `workspaces/ci_runs.py` | row formatting, and the two snapshot models a view rendered |
+| presentation helpers in `workspaces/ci.py` | `actions_url`, `node_detail`, `start_description`, `ci_counts`, `NO_REMOTE_NOTE`, `provided_credentials` |
+| four leaves in live modules | `ensure_directories`, `browser_app_dir`, `_tokenized_remote`, `secrets_path` |
+
+`core/subjects.py` went as a consequence, not a choice: `CI_SUBJECT` was the
+last construction site, and `PageSubject` itself existed to be handed to
+`filter_events`. `EventStore.search_events` keeps the search, the redaction and
+the retention; only the duplicate in-memory filter and the row formatters went.

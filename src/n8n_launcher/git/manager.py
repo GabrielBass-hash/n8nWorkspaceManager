@@ -410,10 +410,6 @@ def tokenize_remote_url(remote_url: str, token: str) -> str:
     return remote_url.replace("https://", f"https://{quote(token, safe='')}@", 1)
 
 
-# Backwards-compatible alias for the historical private name.
-_tokenized_remote = tokenize_remote_url
-
-
 def git_pull(path: Path) -> None:
     """Pull changes from the upstream remote, autostashing local edits.
 

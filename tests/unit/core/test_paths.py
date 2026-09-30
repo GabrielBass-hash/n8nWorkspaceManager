@@ -47,12 +47,6 @@ def test_compose_file_appends_compose_yml(tmp_path: Path, monkeypatch: pytest.Mo
     assert paths.compose_file("w1") == tmp_path / "workspaces" / "w1" / "compose.yml"
 
 
-def test_browser_app_dir_appends_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(paths, "config_dir", lambda: tmp_path)
-
-    assert paths.browser_app_dir("w1") == tmp_path / "browser" / "w1"
-
-
 def test_updates_dir_appends_updates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paths, "config_dir", lambda: tmp_path)
 
@@ -69,7 +63,6 @@ def test_path_helpers_do_not_create_directories(
 
     paths.workspace_runtime_dir("w1")
     paths.compose_file("w1")
-    paths.browser_app_dir("w1")
     paths.updates_dir()
     paths.logs_dir()
 
