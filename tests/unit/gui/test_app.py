@@ -52,7 +52,7 @@ from n8n_launcher.gui.app import (
 )
 from n8n_launcher.gui.ci_runs import RunsPanel
 from n8n_launcher.gui.dialogs import GitHubTokenPlan
-from n8n_launcher.gui.layout import ELLIPSIS
+from n8n_launcher.gui_utils.text import ELLIPSIS
 from n8n_launcher.monitoring.events import Event
 from n8n_launcher.monitoring.store import EventStore
 from n8n_launcher.remote import RemoteExecution, RemoteExecutionStatus, RemoteHealth

@@ -30,11 +30,12 @@ from typing import Any
 
 from ..core.models import Workspace
 from ..core.subjects import log_page_event
+from ..gui_utils.text import ellipsize
 from ..workspaces import ci, ci_runs
 from ..workspaces.ci import CI_SUBJECT, NO_REMOTE_NOTE
 from .board import Card
 from .ci_runs import RunsPanel
-from .layout import ColumnFitter, bind_wraplength, ellipsize, wrap_at
+from .layout import ColumnFitter, bind_wraplength, wrap_at
 from .theme import (
     APP_BACKGROUND,
     FONT_META,

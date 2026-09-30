@@ -33,6 +33,7 @@ from typing import ClassVar
 
 from ..core.models import Workspace
 from ..core.subjects import PageSubject
+from ..gui_utils.text import ellipsize
 from ..monitoring.events import Event
 from ..monitoring.present import (
     CriticalGate,
@@ -49,7 +50,6 @@ from .layout import (
     ColumnFitter,
     bind_ellipsize,
     bind_wraplength,
-    ellipsize,
     wrap_at,
 )
 from .theme import (

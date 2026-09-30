@@ -25,10 +25,11 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ..core.models import Workspace
+from ..gui_utils.text import ellipsize
 from ..workspaces import ci
 from ..workspaces.manager import WorkspaceManager
 from .dialog import Dialog
-from .layout import ColumnFitter, bind_wraplength, ellipsize
+from .layout import ColumnFitter, bind_wraplength
 from .theme import (
     APP_BACKGROUND,
     FONT_META,

@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import contextlib
-import re
 import secrets
 import tkinter as tk
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from .. import git
 from ..core.models import DbConfig, DbMode, ServerConfig
-from ..database import has_db_layout
 from ..github import auth
+from ..workspaces.dialogs import (
+    CreatePlan,
+    GitClonePlan,
+    GitConfigChoice,
+    GitHubCreatePlan,
+    GitHubRepoPick,
+    GitHubTokenPlan,
+    fresh_managed_db_config,
+    int_or,
+    repo_name_from,
+)
 from .dialog import Dialog
 from .layout import ColumnFitter, WindowFitter, bind_wraplength, wrap_at
 from .theme import (
@@ -58,42 +66,6 @@ _REPO_MINIMUMS = {"#0": 200, "visibility": 80, "branch": 90, "updated": 90}
 _REPO_MAXIMUMS = {"#0": 520, "visibility": 130, "branch": 180, "updated": 150}
 
 
-@dataclass
-class CreatePlan:
-    """Chosen options for creating a new workspace (single-dialog workflow)."""
-
-    name: str
-    db: DbConfig
-    git_enabled: bool = False
-    git_url: str | None = None
-    github_create: bool = False
-
-
-@dataclass(frozen=True)
-class GitConfigChoice:
-    """Outcome of the git configuration dialog."""
-
-    create_github: bool = False
-    remote_url: str | None = None
-
-
-@dataclass(frozen=True)
-class GitHubTokenPlan:
-    """Token entered for the GitHub API, plus whether to persist it once."""
-
-    token: str
-    remember: bool = False
-
-
-@dataclass(frozen=True)
-class GitHubCreatePlan:
-    """Choices for creating a new repository on GitHub."""
-
-    name: str
-    private: bool = True
-    token: str = ""
-
-
 def prompt_create_dir(root: tk.Tk) -> Path | None:
     """Let the user pick a workspace folder; create it when it does not exist."""
     directory = filedialog.askdirectory(
@@ -105,23 +77,6 @@ def prompt_create_dir(root: tk.Tk) -> Path | None:
     workflows_dir = Path(directory)
     workflows_dir.mkdir(parents=True, exist_ok=True)
     return workflows_dir
-
-
-def fresh_managed_db_config() -> DbConfig:
-    """Return a MANAGED DB config with a freshly generated password."""
-    return DbConfig(
-        mode=DbMode.MANAGED,
-        database_name="data",
-        username="n8ndata",
-        password=secrets.token_hex(16),
-    )
-
-
-def default_creation_db(workflows_dir: Path) -> DbConfig:
-    """Pick the creation-dialog DB default: managed when a DB layout exists."""
-    if has_db_layout(workflows_dir):
-        return fresh_managed_db_config()
-    return DbConfig(DbMode.NONE)
 
 
 def prompt_create_plan(root: tk.Tk, workflows_dir: Path, default_db: DbConfig) -> CreatePlan | None:
@@ -398,25 +353,17 @@ def prompt_server_config(
             ServerConfig(
                 enabled=True,
                 host=host,
-                ssh_port=_int_or(ssh_var.get(), 22),
+                ssh_port=int_or(ssh_var.get(), 22),
                 user=user,
                 key_path=key_var.get().strip() or None,
                 base_dir=base_var.get().strip(),
-                n8n_port=_int_or(port_var.get(), 5678),
+                n8n_port=int_or(port_var.get(), 5678),
             )
         )
 
     dialog.on_submit = submit
     key_entry.bind("<Return>", submit)
     return dialog.wait(focus=key_entry)
-
-
-def _int_or(value: str, fallback: int) -> int:
-    """Parse a config port from a dialog field, falling back for junk input."""
-    try:
-        return int(value.strip())
-    except ValueError:
-        return fallback
 
 
 def prompt_db_config(root: tk.Tk, current: DbConfig) -> DbConfig | None:
@@ -619,7 +566,7 @@ def prompt_github_create(
         font=FONT_META,
         anchor="w",
     ).pack(fill="x", padx=GUTTER, pady=(SPACE_3XL, SPACE_HAIRLINE))
-    name_var = tk.StringVar(value=_repo_name_from(workspace_name))
+    name_var = tk.StringVar(value=repo_name_from(workspace_name))
     name_entry = tk.Entry(
         dialog,
         textvariable=name_var,
@@ -708,13 +655,6 @@ def prompt_github_create(
     dialog.on_submit = submit
     name_entry.bind("<Return>", submit)
     return dialog.wait(focus=name_entry)
-
-
-def _repo_name_from(workspace_name: str) -> str:
-    """Derive a GitHub-usable repository name from a workspace name."""
-    lowered = workspace_name.lower().strip()
-    cleaned = re.sub(r"[^a-z0-9_.-]+", "-", lowered)
-    return cleaned.strip(".-_ ") or "workspace"
 
 
 def prompt_github_token(root: tk.Tk) -> GitHubTokenPlan | None:
@@ -810,14 +750,6 @@ def _clipboard_text(widget: tk.Misc) -> str:
         return widget.clipboard_get()
     except Exception:
         return ""
-
-
-@dataclass(frozen=True)
-class GitClonePlan:
-    """URL et branche optionnelle pour un clonage."""
-
-    url: str
-    branch: str | None = None
 
 
 def prompt_create_source(root: tk.Tk) -> str | None:
@@ -970,19 +902,11 @@ def prompt_clone_plan(root: tk.Tk) -> GitClonePlan | None:
     return dialog.wait(focus=url_entry)
 
 
-@dataclass(frozen=True)
-class GitHubRepoPick:
-    """Repository selected from the linked account, plus optional branch."""
-
-    clone_url: str
-    branch: str | None = None
-
-
 def prompt_clone_dest(root: tk.Tk, repo_name: str) -> Path | None:
     """Ask for a parent folder; the repo is cloned into ``<parent>/<name>``.
 
     The folder name is sanitized the same way a created workspace's name would
-    be (``_repo_name_from``), so "Mon Repo!*" clones into ``mon-repo``.
+    be (``repo_name_from``), so "Mon Repo!*" clones into ``mon-repo``.
     """
     parent = filedialog.askdirectory(
         title=f"Dossier parent où cloner « {repo_name} »",
@@ -990,7 +914,7 @@ def prompt_clone_dest(root: tk.Tk, repo_name: str) -> Path | None:
     )
     if not parent:
         return None
-    return Path(parent) / _repo_name_from(repo_name)
+    return Path(parent) / repo_name_from(repo_name)
 
 
 def _dialog_room(dialog: tk.Toplevel, padding: int = 2 * GUTTER) -> int:

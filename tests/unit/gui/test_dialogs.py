@@ -16,17 +16,8 @@ from n8n_launcher.core.config import ConfigStore
 from n8n_launcher.core.models import AppConfig, DbConfig, DbMode, ServerConfig
 from n8n_launcher.git import workspace_branch
 from n8n_launcher.github.api import GitHubError
-from n8n_launcher.gui import CreatePlan, LauncherApp, dialogs
+from n8n_launcher.gui import LauncherApp, dialogs
 from n8n_launcher.gui.dialogs import (
-    GitClonePlan,
-    GitConfigChoice,
-    GitHubCreatePlan,
-    GitHubRepoPick,
-    GitHubTokenPlan,
-    _int_or,
-    _repo_name_from,
-    default_creation_db,
-    fresh_managed_db_config,
     prompt_ask_string,
     prompt_clone_dest,
     prompt_clone_plan,
@@ -39,6 +30,14 @@ from n8n_launcher.gui.dialogs import (
     prompt_github_repo_picker,
     prompt_github_token,
     prompt_server_config,
+)
+from n8n_launcher.workspaces.dialogs import (
+    CreatePlan,
+    GitClonePlan,
+    GitConfigChoice,
+    GitHubCreatePlan,
+    GitHubRepoPick,
+    GitHubTokenPlan,
 )
 from n8n_launcher.workspaces.manager import WorkspaceManager
 
@@ -63,18 +62,6 @@ def test_prompt_create_dir_returns_none_when_cancelled() -> None:
 
     with patch("n8n_launcher.gui.dialogs.filedialog.askdirectory", return_value=""):
         assert prompt_create_dir(root) is None
-
-
-def test_fresh_managed_db_config_uses_generated_password() -> None:
-    with patch("n8n_launcher.gui.dialogs.secrets.token_hex", return_value="a" * 32):
-        db = fresh_managed_db_config()
-
-    assert db == DbConfig(
-        DbMode.MANAGED,
-        database_name="data",
-        username="n8ndata",
-        password="a" * 32,
-    )
 
 
 def test_prompt_git_remote_forwards_current_remote() -> None:
@@ -274,24 +261,6 @@ def test_prompt_create_skips_when_user_cancels_directory(app) -> None:
         app.app.prompt_create_workflow()
 
     app.manager.create.assert_not_called()
-
-
-def test_default_creation_db_uses_managed_when_migrations_exist(tmp_path) -> None:
-    folder = tmp_path / "wf"
-    (folder / "db" / "migrations").mkdir(parents=True)
-    (folder / "db" / "migrations" / "001.sql").write_text("select 1;")
-
-    db = default_creation_db(folder)
-    assert db.mode is DbMode.MANAGED
-    assert db.password
-
-
-def test_default_creation_db_uses_none_when_no_migrations(tmp_path) -> None:
-    folder = tmp_path / "wf-nomig"
-    folder.mkdir()
-
-    db = default_creation_db(folder)
-    assert db.mode is DbMode.NONE
 
 
 def test_empty_space_click_creates_when_rows_exist(gui_mocks, tmp_path) -> None:
@@ -677,19 +646,7 @@ def test_prompt_server_config_escape_returns_none(gui_mocks) -> None:
     assert result is None
 
 
-def test_int_or_parses_with_fallback() -> None:
-    assert _int_or("2222", 22) == 2222
-    assert _int_or("junk", 22) == 22
-    assert _int_or(" 5678 ", 22) == 5678
-
-
 # --- GitHub repo creation helpers -------------------------------------------
-
-
-def test_repo_name_from_sanitizes_workspace_name() -> None:
-    assert _repo_name_from("Mon Workspace!") == "mon-workspace"
-    assert _repo_name_from("  BAZ_2.0  ") == "baz_2.0"
-    assert _repo_name_from("!!!") == "workspace"
 
 
 def test_prompt_github_create_requires_name_and_token(gui_mocks) -> None:

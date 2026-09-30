@@ -30,8 +30,9 @@ from datetime import datetime
 from tkinter import ttk
 from typing import ClassVar
 
+from ..gui_utils.text import ellipsize
 from ..workspaces import ci_runs
-from .layout import ColumnFitter, bind_ellipsize, bind_wraplength, ellipsize, wrap_at
+from .layout import ColumnFitter, bind_ellipsize, bind_wraplength, wrap_at
 from .theme import (
     APP_BACKGROUND,
     FONT_META,

@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -30,22 +31,26 @@ from ..docker.manager import DockerManager
 from ..git.manager import git_seed_remote, workspace_branch
 from ..github import auth
 from ..github.api import GitHubClient, GitHubError
+from ..gui_utils.text import ellipsize
 from ..monitoring.events import Event
 from ..monitoring.store import EventStore
 from ..platform.browser import open_app, open_url
 from ..platform.files import open_folder
+from ..platform.update_flow import UpdateController
 from ..workspaces import ci, ci_runs, display
 from ..workspaces.ci_runs import RunsSnapshot
+from ..workspaces.dialogs import (
+    CreatePlan,
+    GitHubCreatePlan,
+    GitHubRepoPick,
+    default_creation_db,
+    repo_name_from,
+)
 from ..workspaces.manager import WorkspaceError, WorkspaceManager
 from . import board, ci_edit, ci_page, monitoring, pages, server_page
 from .ci_runs import RunsPanel
 from .close import CloseController
 from .dialogs import (
-    CreatePlan,
-    GitHubCreatePlan,
-    GitHubRepoPick,
-    _repo_name_from,
-    default_creation_db,
     prompt_clone_dest,
     prompt_clone_plan,
     prompt_create_dir,
@@ -59,7 +64,7 @@ from .dialogs import (
     prompt_github_token,
     prompt_server_config,
 )
-from .layout import ellipsize, screen_fraction_size, screen_size
+from .layout import screen_fraction_size, screen_size
 from .theme import (
     ACCENT,
     ACCENT_ACTIVE,
@@ -98,7 +103,6 @@ from .tokens import (
     SPACE_SM,
     SPACE_TIGHT,
 )
-from .update_flow import UpdateController
 
 logger = logging.getLogger(__name__)
 
@@ -531,10 +535,12 @@ class LauncherApp:
             finish_close=self._finish_close,
         )
         self.update_flow = UpdateController(
-            root=self.root,
             events=self.events,
             set_status=self.set_status,
-            status_label=self._status_label,
+            on_offer=self._ask_update,
+            on_error=self._report_update_error,
+            on_status_link=self._offer_update_link,
+            schedule=self._schedule,
             is_closed=lambda: self._closed,
             finish_close=self._finish_close,
         )
@@ -1612,6 +1618,29 @@ class LauncherApp:
             with contextlib.suppress(Exception):
                 self._status_label.unbind("<Button-1>")
 
+    # --------------------------------------------------------- update flow
+    def _schedule(self, delay_ms: int, action: Callable[[], None]) -> None:
+        """Run *action* on the Tk event loop after *delay_ms* milliseconds."""
+        self.root.after(delay_ms, action)
+
+    def _ask_update(self, title: str, body: str) -> bool:
+        """Ask a yes/no update question on the Tk thread."""
+        return bool(messagebox.askyesno(title, body, parent=self.root))
+
+    def _report_update_error(self, title: str, body: str) -> None:
+        """Show an update failure; the flow itself never raises into the UI."""
+        messagebox.showerror(title, body, parent=self.root)
+
+    def _offer_update_link(self, message: str, url: str) -> None:
+        """Point the status bar at the release page when the app is not writable."""
+        self.set_status(message)
+        label = self._status_label
+        if label is None:
+            return
+        with contextlib.suppress(Exception):
+            label.config(cursor="hand2", fg=ACCENT)
+            label.bind("<Button-1>", lambda _event: webbrowser.open(url))
+
     # ------------------------------------------------------- monitoring
     def _monitor_events(self) -> list[Event]:
         """Read the newest journal events (bounded) for the panel."""
@@ -1906,7 +1935,7 @@ class LauncherApp:
             clone_url, branch = plan.url, plan.branch
 
         repo_name = clone_url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
-        dest = prompt_clone_dest(self.root, _repo_name_from(repo_name))
+        dest = prompt_clone_dest(self.root, repo_name_from(repo_name))
         if dest is None:
             return
 
