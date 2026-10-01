@@ -50,6 +50,7 @@ uv sync --group packaging      # build tooling
 uv run pytest                  # unit tests (integration excluded by addopts)
 uv run pytest -m integration   # integration tests (Docker daemon required)
 uv run pytest tests/unit/docker/test_compose.py::test_render_compose_managed
+uv run pytest tests/unit/gui/test_responsive.py -m responsive
 
 uv run ruff check .
 uv run ruff format --check .
@@ -141,6 +142,14 @@ coverage.
 - **Unit test coverage is mandatory and maximal**: every public function ships
   with its test in `tests/unit/<subpackage>/test_<module>.py`. A new function
   without a test is rejected.
+- **GUI adaptability is a blocking architectural invariant**: every GUI view
+  must remain usable at the supported minimum window size (`1024x640`), normal
+  and large viewports, unusual ratios, changed DPI/scaling and realistic
+  content volumes. Responsive violations are test failures, never warnings.
+  Use layouts, size hints, size policies, controlled scrolling and shared
+  metrics; do not add resolution-specific branches or arbitrary dimensions to
+  silence a test. A GUI change is not done until the `responsive` tests cover
+  its resize and long-content behavior.
 - Generic writing conventions: clarity, small functions, no dead code, no
   reinvented stdlib helper, explicit typing (`from __future__ import annotations`
   repo-wide).

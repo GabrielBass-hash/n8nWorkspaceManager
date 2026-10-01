@@ -96,6 +96,7 @@ testpaths = ["tests"]
 markers = [
     "unit: tests that do not require external services",
     "integration: tests requiring Docker or PostgreSQL",
+    "responsive: blocking GUI layout and rendering contract tests",
 ]
 addopts = "-m 'not integration' --cov=src/n8n_launcher --cov-report=term-missing"
 

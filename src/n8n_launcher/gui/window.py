@@ -14,6 +14,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.models import Workspace
+from ..gui_utils.responsive import (
+    MIN_WINDOW_HEIGHT,
+    MIN_WINDOW_WIDTH,
+    PREFERRED_WINDOW_HEIGHT,
+    PREFERRED_WINDOW_WIDTH,
+    Viewport,
+    initial_window_size,
+)
 from ..workspaces.manager import WorkspaceManager
 from ..workspaces.status import status_for
 from . import theme
@@ -48,7 +57,16 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._manager = manager
         self.setWindowTitle("n8n Launcher")
-        self.resize(1000, 680)
+        self.setMinimumSize(QSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT))
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        initial = initial_window_size(
+            Viewport(
+                available.width() if available is not None else PREFERRED_WINDOW_WIDTH,
+                available.height() if available is not None else PREFERRED_WINDOW_HEIGHT,
+            )
+        )
+        self.resize(QSize(*initial))
 
         self._model = WorkspaceListModel(manager, self)
         self._actions = WorkspaceActions(manager, self)

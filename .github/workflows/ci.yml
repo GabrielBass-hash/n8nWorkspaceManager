@@ -90,11 +90,23 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: uv run pytest --cov-fail-under=80 --junitxml=pytest-report-${{ matrix.os_name }}.xml
 
+      - name: Run blocking responsive GUI tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run pytest tests/unit/gui/test_responsive.py -m responsive --junitxml=responsive-report-${{ matrix.os_name }}.xml
+
       - name: Upload pytest report
         uses: actions/upload-artifact@v4
         with:
           name: pytest-report-${{ matrix.os_name }}
           path: pytest-report-${{ matrix.os_name }}.xml
+          if-no-files-found: error
+
+      - name: Upload responsive report
+        uses: actions/upload-artifact@v4
+        with:
+          name: responsive-report-${{ matrix.os_name }}
+          path: responsive-report-${{ matrix.os_name }}.xml
           if-no-files-found: error
 
   integration:
