@@ -92,6 +92,10 @@ if [[ -z "$file_arg" ]]; then
 else
     dmg="$file_arg"
     [[ -f "$dmg" ]] || { echo "DMG not found: $dmg" >&2; exit 1; }
+    # An unreadable image would fail later at hdiutil with a message that does
+    # not name the real problem; check it while the path is still in hand.
+    hdiutil imageinfo "$dmg" >/dev/null 2>&1 \
+        || { echo "Not a readable disk image: $dmg" >&2; exit 1; }
 fi
 
 echo "Mounting $dmg ..."

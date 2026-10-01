@@ -1,11 +1,14 @@
 """Build a platform-specific desktop distribution with PyInstaller.
 
-macOS: windowed .app bundle with a real icon and a polished Info.plist,
-ad-hoc signed, then packaged into a styled drag-and-drop .dmg rendered with
-``dmgbuild`` (pure Python — writes the ``.DS_Store`` directly and works on
-headless CI runners, no Finder required).
+macOS: windowed ``.app`` bundle with a real icon and a polished Info.plist,
+ad-hoc signed deepest-first, then packaged into a styled drag-and-drop ``.dmg``
+rendered with ``dmgbuild`` (pure Python — writes the ``.DS_Store`` directly and
+works on headless CI runners, no Finder required).
 
-Linux / Windows: single-file windowed executable.
+Linux / Windows: a windowed **onedir** directory. A single-file build would
+have to unpack Qt and its platform plugin into a temporary directory on every
+launch — which is slow, breaks relative plugin paths and is what AppImage is
+for anyway — so the shipped layout is a directory the packager wraps.
 """
 
 from __future__ import annotations
@@ -33,6 +36,10 @@ ICON_SOURCE = PROJECT_ROOT / "assets" / "icon.png"
 DMG_WINDOW_RECT = ((60, 80), (720, 490))  # 660 x 410
 DMG_BACKGROUND_SIZE = (660, 410)
 DMG_ICON_POSITIONS = {"n8n-launcher.app": (450, 170), "Applications": (165, 170)}
+
+# macOS 12 is the floor: it is the oldest release where the Qt 6 Cocoa build
+# still loads, and advertising a higher floor only refuses working machines.
+MACOS_MIN_VERSION = "12.0"
 
 
 def _run(command: list[str]) -> None:
@@ -122,6 +129,7 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.core",
     "n8n_launcher.core.config",
     "n8n_launcher.core.filelock",
+    "n8n_launcher.core.first_launch",
     "n8n_launcher.core.models",
     "n8n_launcher.core.paths",
     "n8n_launcher.database",
@@ -137,7 +145,15 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.github.api",
     "n8n_launcher.github.auth",
     "n8n_launcher.gui",
+    "n8n_launcher.gui.actions",
     "n8n_launcher.gui.app",
+    "n8n_launcher.gui.card_delegate",
+    "n8n_launcher.gui.create_panel",
+    "n8n_launcher.gui.first_launch",
+    "n8n_launcher.gui.notifier",
+    "n8n_launcher.gui.theme",
+    "n8n_launcher.gui.window",
+    "n8n_launcher.gui.workspace_model",
     "n8n_launcher.gui_utils.text",
     "n8n_launcher.monitoring.bootstrap",
     "n8n_launcher.monitoring.redaction",
@@ -157,6 +173,7 @@ HIDDEN_IMPORTS = [
     "n8n_launcher.workspaces.close",
     "n8n_launcher.workspaces.dialogs",
     "n8n_launcher.workspaces.manager",
+    "n8n_launcher.workspaces.status",
     "requests",
     "bcrypt",
     "platformdirs",
@@ -171,46 +188,42 @@ def _hidden_import_args() -> list[str]:
 
 
 def build_onedir() -> Path:
-    app = PROJECT_ROOT / "dist" / f"{APP_NAME}.app"
-    if app.exists():
-        shutil.rmtree(app)
-    _run(
-        [
-            sys.executable,
-            "-m",
-            "PyInstaller",
-            "--windowed",
-            "--name",
-            APP_NAME,
-            "--icon",
-            str(build_icns()),
-            "--osx-bundle-identifier",
-            BUNDLE_ID,
-            "--paths",
-            str(PROJECT_ROOT / "src"),
-            *_hidden_import_args(),
-            str(ENTRY_POINT),
-        ]
-    )
-    return app
+    """Build a windowed onedir distribution and return its root directory.
 
+    PyInstaller's onedir layout does not require unpacking the Qt platform
+    plugin on every launch (a single-file archive does, which is slow, brittle
+    under AppImage and read-only mounts — and what AppImage is for anyway).
 
-def build_onefile() -> None:
-    _run(
-        [
-            sys.executable,
-            "-m",
-            "PyInstaller",
-            "--onefile",
-            "--windowed",
-            "--name",
-            APP_NAME,
-            "--paths",
-            str(PROJECT_ROOT / "src"),
-            *_hidden_import_args(),
-            str(ENTRY_POINT),
-        ]
-    )
+    PyInstaller lays it out as ``dist/<name>.app`` on macOS and ``dist/<name>``
+    elsewhere, and the returned root is exactly that directory: the AppImage
+    step wraps it, and ``--verify`` is pointed at the same path in CI.
+    """
+    system = platform.system()
+    dist = PROJECT_ROOT / "dist"
+    target = dist / f"{APP_NAME}.app" if system == "Darwin" else dist / APP_NAME
+    if target.exists():
+        shutil.rmtree(target)
+
+    command = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--windowed",
+        "--onedir",
+        "--name",
+        APP_NAME,
+        "--paths",
+        str(PROJECT_ROOT / "src"),
+        *_hidden_import_args(),
+    ]
+    if system == "Darwin":
+        command += ["--icon", str(build_icns()), "--osx-bundle-identifier", BUNDLE_ID]
+    command.append(str(ENTRY_POINT))
+    _run(command)
+
+    if not target.exists():
+        raise FileNotFoundError(f"PyInstaller did not produce {target}")
+    return target
 
 
 def patch_info_plist(app: Path) -> None:
@@ -228,7 +241,7 @@ def patch_info_plist(app: Path) -> None:
             "CFBundlePackageType": "APPL",
             "NSPrincipalClass": "NSApplication",
             "NSHighResolutionCapable": True,
-            "CFBundleMinimumSystemVersion": "15.0",
+            "CFBundleMinimumSystemVersion": MACOS_MIN_VERSION,
             "LSApplicationCategoryType": "public.app-category.productivity",
         }
     )
@@ -277,19 +290,91 @@ def build_dmg(app: Path) -> None:
     )
 
 
+def find_platform_plugin(root: Path) -> Path | None:
+    """Locate the Qt platform-plugin directory inside a built distribution.
+
+    PyInstaller names it ``platforms`` under the PySide6 Qt directory; its
+    exact depth moved between hooks, so it is searched for rather than
+    hard-coded. ``None`` means the distribution cannot open a window at all.
+    """
+    for candidate in sorted(root.rglob("platforms")):
+        if candidate.is_dir() and any(candidate.iterdir()):
+            return candidate
+    return None
+
+
+def verify_qt_bundle(root: Path) -> list[str]:
+    """Return the reasons ``root`` would fail to start, empty when it is sound.
+
+    A bundle missing its Qt platform plugin launches and dies silently: no
+    window, no dialog, and nothing useful in a log — the first-run experience
+    becomes "the app does nothing". Checking here turns that into a build
+    failure that names the missing piece.
+    """
+    problems: list[str] = []
+    if find_platform_plugin(root) is None:
+        problems.append("Qt platform plugin (a non-empty 'platforms' directory)")
+    return problems
+
+
+def sign_macos_bundle(app: Path) -> None:
+    """Ad-hoc sign the bundle, deepest nested code first.
+
+    Apple's ``--deep`` is documented as unreliable for *signing* (it is fine
+    for verifying): the recommended order is nested frameworks, then their
+    dylibs, then the outer bundle. Qt alone ships a dozen dylibs and plugin
+    bundles under ``Contents/Frameworks``, so signing them in one pass with
+    ``--deep`` produced bundles that macOS refused to launch.
+    """
+    contents = app / "Contents"
+    # dylibs and Qt plugin bundles live under Contents/Frameworks; sort by depth
+    # descending so a bundle is signed after everything it contains.
+    targets = sorted(
+        (path for path in contents.rglob("*") if path.suffix in {".dylib", ".so"}),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    frameworks = contents / "Frameworks"
+    if frameworks.is_dir():
+        targets += sorted(frameworks.iterdir(), key=lambda path: len(path.parts), reverse=True)
+    for path in targets:
+        _run(["codesign", "--force", "--sign", "-", str(path)])
+    _run(["codesign", "--force", "--sign", "-", str(app)])
+
+
+def verify_or_fail(root: Path) -> None:
+    """Raise with every reason ``root`` would fail to start, or confirm it is sound."""
+    problems = verify_qt_bundle(root)
+    if problems:
+        raise RuntimeError(f"incomplete distribution {root}: " + ", ".join(problems))
+    print(f"Qt bundle verified: {root}")
+
+
 def build_macos_dmg() -> None:
     app = build_onedir()
     patch_info_plist(app)
-    _run(["codesign", "--force", "--deep", "--sign", "-", str(app)])
+    sign_macos_bundle(app)
     _run(["codesign", "--verify", "--deep", "--strict", str(app)])
+    verify_or_fail(app)
     build_dmg(app)
 
 
 def main() -> None:
+    """Build the artifact for this platform, or verify one that already exists.
+
+    ``--verify <dist-root>`` only runs the Qt completeness check, which is how
+    CI asserts on a freshly built artifact (and on the AppDir copy of it)
+    without rebuilding.
+    """
+    if len(sys.argv) == 3 and sys.argv[1] == "--verify":
+        verify_or_fail(Path(sys.argv[2]))
+        return
     if platform.system() == "Darwin":
         build_macos_dmg()
     else:
-        build_onefile()
+        root = build_onedir()
+        verify_or_fail(root)
+        print(f"built {root}")
 
 
 if __name__ == "__main__":

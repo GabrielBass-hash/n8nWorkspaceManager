@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from ..core.config import ConfigStore
@@ -130,6 +130,25 @@ class WorkspaceError(RuntimeError):
     """Raised when a workspace operation cannot be completed."""
 
 
+class WorkspaceObserver(Protocol):
+    """Receives change notifications from the manager.
+
+    A view implements this to refresh without polling. Kept toolkit-free (a
+    :class:`~typing.Protocol`, no imports beyond typing) so the manager never
+    depends on a GUI library, and a test can pass a bare recorder. Every method
+    is called *after* the change is committed, and a notification that raises is
+    logged and ignored — a broken view must never fail an operation.
+    """
+
+    def workspaces_changed(self) -> None:
+        """The set of workspaces changed (created, deleted, reconciled)."""
+        ...
+
+    def workspace_changed(self, workspace: Workspace) -> None:
+        """One workspace's fields or lifecycle state changed."""
+        ...
+
+
 class WorkspaceManager:
     """Central controller for workspace CRUD and the start/stop lifecycle.
 
@@ -150,6 +169,33 @@ class WorkspaceManager:
         self.owner_booter = owner_booter or self._default_owner_booter
         self.api_factory = api_factory or self._default_api_factory
         self.migrations = MigrationRunner(docker)
+        self._observers: list[WorkspaceObserver] = []
+
+    def add_observer(self, observer: WorkspaceObserver) -> None:
+        """Register *observer* for change notifications."""
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(self, observer: WorkspaceObserver) -> None:
+        """Stop notifying *observer*; a no-op if it was never registered."""
+        if observer in self._observers:
+            self._observers.remove(observer)
+
+    def _notify_workspaces_changed(self) -> None:
+        """Tell every observer the workspace list changed, isolating failures."""
+        for observer in list(self._observers):
+            try:
+                observer.workspaces_changed()
+            except Exception:
+                logger.warning("Observer failed on workspaces_changed", exc_info=True)
+
+    def _notify_workspace_changed(self, workspace: Workspace) -> None:
+        """Tell every observer one workspace changed, isolating failures."""
+        for observer in list(self._observers):
+            try:
+                observer.workspace_changed(workspace)
+            except Exception:
+                logger.warning("Observer failed on workspace_changed", exc_info=True)
 
     @staticmethod
     def _default_owner_booter(base_url: str, email: str, password: str) -> str:
@@ -221,6 +267,7 @@ class WorkspaceManager:
             self.store.mutate(apply)
         except Exception:
             return 0
+        self._notify_workspaces_changed()
         return len(updates)
 
     def create(
@@ -272,7 +319,9 @@ class WorkspaceManager:
             config.workspaces.append(workspace)
             return workspace
 
-        return self.store.mutate(append)
+        created = self.store.mutate(append)
+        self._notify_workspaces_changed()
+        return created
 
     def clone_from_git(
         self,
@@ -359,6 +408,7 @@ class WorkspaceManager:
 
         result = self.store.mutate(append)
         self._ensure_workspace_branch(result)
+        self._notify_workspaces_changed()
         return result
 
     def update(self, workspace_id: str, **changes: object) -> Workspace:
@@ -391,7 +441,9 @@ class WorkspaceManager:
             config.workspaces[config.workspaces.index(current)] = updated
             return updated
 
-        return self.store.mutate(apply)
+        updated = self.store.mutate(apply)
+        self._notify_workspace_changed(updated)
+        return updated
 
     def delete(self, workspace_id: str) -> None:
         """Remove a stopped workspace from the configuration."""
@@ -403,6 +455,7 @@ class WorkspaceManager:
             config.workspaces.remove(workspace)
 
         self.store.mutate(remove)
+        self._notify_workspaces_changed()
 
     def ensure_running(
         self,
@@ -1190,6 +1243,7 @@ class WorkspaceManager:
         write_compose(workspace, compose)
         workspace.state = WorkspaceState.STARTING
         self.store.save(config)
+        self._notify_workspace_changed(workspace)
         logger.info("Starting %s on port %d", workspace.name, workspace.port)
         try:
             self.docker.up(workspace, compose)
@@ -1215,6 +1269,7 @@ class WorkspaceManager:
                 self._find(config, workspace_id).state = WorkspaceState.ERROR
 
             self.store.mutate(mark_error)
+            self._notify_workspace_changed(self._find(self.store.load(), workspace_id))
             raise
 
         def mark_running(config: AppConfig) -> None:
@@ -1223,8 +1278,10 @@ class WorkspaceManager:
             current.restart_required = False
 
         self.store.mutate(mark_running)
+        running = self._find(self.store.load(), workspace_id)
+        self._notify_workspace_changed(running)
         logger.info("Started %s on port %d", workspace.name, workspace.port)
-        return self._find(self.store.load(), workspace_id)
+        return running
 
     def _workspace_db_mode(self, workspace_id: str) -> DbMode:
         """Return the persisted DB mode of a workspace (for pre-start checks)."""
@@ -1272,7 +1329,7 @@ class WorkspaceManager:
                 current.state = WorkspaceState.STOPPING
                 return current
 
-            self.store.mutate(mark_stopping)
+            self._notify_workspace_changed(self.store.mutate(mark_stopping))
         compose = compose_file(workspace.id)
         # Skip `docker down` when already stopped: makes the call idempotent so
         # the atexit stop_all() pass after a GUI close does not tear containers
@@ -1286,7 +1343,9 @@ class WorkspaceManager:
             current.state = WorkspaceState.STOPPED
             return current
 
-        return self.store.mutate(mark_stopped)
+        stopped = self.store.mutate(mark_stopped)
+        self._notify_workspace_changed(stopped)
+        return stopped
 
     def _ensure_db_credentials(self, workspace: Workspace) -> None:
         if workspace.db.mode is DbMode.NONE:

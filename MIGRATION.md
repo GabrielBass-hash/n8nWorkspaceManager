@@ -1,11 +1,11 @@
 # MIGRATION.md — the interface is gone; the logic is not
 
-**Status: the launcher has no interface.** `src/n8n_launcher/gui/` is a two-file
-seam. `run_gui(store, manager, monitor)` and
-`LauncherApp(store, manager, monitor).run()` raise
-`NotImplementedError("new GUI not yet implemented (phase 2)")` on purpose, and
-`main()` catches that refusal so the journal session still closes and every
-workspace is still stopped.
+**Historical: this describes phase 1 (6.0.0 rebuilds the shell on PySide6).**
+During phase 1 `src/n8n_launcher/gui/` was a two-file seam whose `run_gui()` and
+`LauncherApp.run()` raised `NotImplementedError("new GUI not yet implemented
+(phase 2)")` on purpose, and `main()` caught that refusal so the journal session
+still closed and every workspace was still stopped. None of that is true any
+more; the rules below are.
 
 This file is the record of that deletion and of what survived it. It is kept
 because the deleted code cost real debugging time and its rules still describe

@@ -5,13 +5,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 APP_NAME="n8n-launcher"
-ONE_FILE="dist/${APP_NAME}"
+ONE_DIR="dist/${APP_NAME}"
 APPIMAGE="appimagetool-x86_64.AppImage"
 APPIMAGE_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/${APPIMAGE}"
 OUT="dist/${APP_NAME}-linux-x86_64.AppImage"
 
-if [[ ! -x "$ONE_FILE" ]]; then
-  echo "error: $ONE_FILE not found - run 'python scripts/build.py' first" >&2
+if [[ ! -x "$ONE_DIR/${APP_NAME}" ]]; then
+  echo "error: $ONE_DIR not built - run 'python scripts/build.py' first" >&2
+  exit 1
+fi
+
+# The onedir layout carries the Qt platform plugin next to the executable; a
+# build without it opens no window, so the AppImage must never be assembled
+# from a partial tree.
+if ! find "$ONE_DIR" -type d -name platforms -print -quit | grep -q .; then
+  echo "error: no Qt platform plugin under $ONE_DIR - refusing to package" >&2
   exit 1
 fi
 
@@ -23,7 +31,7 @@ fi
 APPDIR="n8n-launcher.AppDir"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"
-cp "$ONE_FILE" "$APPDIR/usr/bin/"
+cp -R "$ONE_DIR/." "$APPDIR/usr/bin/"
 
 cp assets/icon.png "$APPDIR/${APP_NAME}.png"
 

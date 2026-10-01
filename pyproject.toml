@@ -9,12 +9,13 @@ dynamic = ["version"]
 
 description = "Cross-platform launcher for isolated n8n workspaces"
 requires-python = ">=3.12"
-# No GUI toolkit. The launcher is headless: it manages workspaces, Git, CI and
-# remote deployments, and has no interface to draw. Adding one means choosing a
-# toolkit then, not shipping a 90 MB wheel nobody imports.
+# The desktop interface is PySide6. It is a runtime dependency on purpose: the
+# GUI is the product, and confining the import to ``n8n_launcher/gui/`` keeps the
+# headless managers (docker, git, github, remote) importable without Qt.
 dependencies = [
     "bcrypt>=4.0",
     "platformdirs>=4.0",
+    "PySide6>=6.6,<7",
     "PyYAML>=6.0",
     "requests>=2.31",
 ]
@@ -36,6 +37,7 @@ dev = [
     "basedpyright",
     "pytest",
     "pytest-cov",
+    "pytest-qt",
     "pytest-timeout",
     "pre-commit",
 ]
@@ -76,22 +78,10 @@ ignore = []
 "src/n8n_launcher/workspaces/ci.py" = ["E501", "S105"]
 # __main__.py: fail-graceful import probing
 "src/n8n_launcher/__main__.py" = ["S110"]
-# gui/app.py: subprocess for browser launch + Tk callbacks with fail-graceful try/except/pass
-"src/n8n_launcher/gui/app.py" = ["S603", "S606", "S607", "S110"]
-# gui/ci_edit.py: fail-graceful JSON parsing in dialogs
-"src/n8n_launcher/gui/ci_edit.py" = ["S110"]
-# gui/ci_runs.py: fail-graceful JSON parsing
-"src/n8n_launcher/gui/ci_runs.py" = ["S110", "RUF001"]
-# RUF001 justification: _MARK_SKIPPED = "–" (EN DASH) is an intentional status
-# glyph in the runs tree, not a typo for a hyphen.
-# gui/close.py: fail-graceful cleanup on close
-"src/n8n_launcher/gui/close.py" = ["S110"]
-# gui/dialogs.py: fail-graceful clipboard access
-"src/n8n_launcher/gui/dialogs.py" = ["S110"]
-# gui/monitoring.py: fail-graceful clipboard access (Ctrl+C copies one event)
-"src/n8n_launcher/gui/monitoring.py" = ["S110"]
-# gui/update_flow.py: fail-graceful update checks
-"src/n8n_launcher/gui/update_flow.py" = ["S110"]
+# gui: a view shells out only to open a URL or reveal a file. No ``S110`` here on
+# purpose: a swallowed exception has to be a visible ``except`` that logs, never
+# a bare ``pass``, and ruff enforces that.
+"src/n8n_launcher/gui/**" = ["S603", "S604", "S606", "S607"]
 # tests: fake passwords, deliberate try/except/pass, subprocess, exec (meta-tests
 # of generated scripts), long fixture strings
 "tests/**" = ["S101", "ANN", "S102", "S603", "S604", "S605", "S607", "S105", "S106", "S110", "S108", "S104", "F841", "E501"]

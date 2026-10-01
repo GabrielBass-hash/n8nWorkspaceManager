@@ -3,11 +3,13 @@
 ## What this is
 
 Cross-platform app (Python 3.12+; Windows, macOS, Linux/Ubuntu) for managing
-isolated Docker-based n8n workspaces. **There is no GUI.** No toolkit is a
-dependency, and `src/n8n_launcher/gui/` is a two-file seam whose `run_gui()` and
-`LauncherApp.run()` raise `NotImplementedError("new GUI not yet implemented
-(phase 2)")` on purpose. `MIGRATION.md` is the record of that deletion and of
-the rules that survived it.
+isolated Docker-based n8n workspaces. The interface is **PySide6**, confined to
+`src/n8n_launcher/gui/` — no other module imports a toolkit, and
+`tests/unit/gui/test_toolkit_isolation.py` asserts it from a subprocess. The
+launcher still runs headless: without a display it logs *Interface
+indisponible* and exits through the ordered shutdown. `MIGRATION.md` is the
+record of what phase 1 deleted and of the rules that survived it; they still
+govern the shell.
 
 Single package `n8n_launcher` under `src/`, split by concern, one file per
 concern: `core/` (models, config, paths, filelock), `database/`, `docker/`,
@@ -23,14 +25,16 @@ view is a function with no widget in it, and its test is a plain assertion.** Do
 not reintroduce a toolkit to make something easier to draw — extract the
 decision instead.
 
-Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed, styled via
-`dmgbuild`, app icon + full `Info.plist`), a one-file `.exe` (Windows), and a
-one-file executable plus the `.AppImage` from `scripts/build_appimage.sh` on
-Linux. `build.py` targets the thin root `run.py` with `--paths src` so the
-package keeps its relative imports.
+Releases ship natively per platform: `.dmg` (macOS, ad-hoc signed **deepest-first**,
+styled via `dmgbuild`, app icon + full `Info.plist`), a `dist/n8n-launcher/`
+onedir directory (Windows), and that same directory wrapped into the `.AppImage`
+from `scripts/build_appimage.sh` on Linux. **Never `--onefile`**: Qt resolves
+its platform plugin at runtime, and a single-file archive unpacks the whole
+bundle into a temporary directory on every launch. `build.py` targets the thin
+root `run.py` with `--paths src` so the package keeps its relative imports.
 
 The version is a single-source SemVer declared in
-`src/n8n_launcher/__init__.py` (`__version__`, currently **5.0.3**);
+`src/n8n_launcher/__init__.py` (`__version__`, currently **6.0.0**);
 `pyproject.toml` inherits it via `dynamic = ["version"]`, `scripts/build.py`
 embeds it, `platform/updater.py` compares it. Bump it by hand before a
 release. Releases publish from `main` only, and only when the source version
@@ -65,8 +69,8 @@ Stack: **uv** (dependencies + virtualenv), **Ruff** (lint + format),
 whole stack.
 
 Current state of the gates: `ruff check` clean, `ruff format --check` clean
-(88 files), `basedpyright` **0 errors**, `pytest` **686 passed / 7 deselected**
-(7 = integration), coverage ~90 % with a CI floor of `--cov-fail-under=80`.
+(110 files), `basedpyright` **0 errors**, `pytest` **778 passed / 7 deselected**
+(7 = integration), coverage ~91 % with a CI floor of `--cov-fail-under=80`.
 
 `basedpyright` excludes `tests/**` and `scripts/**` **only**: every module under
 `src/n8n_launcher/` must typecheck, because it is shipped. The test fixtures and
@@ -86,9 +90,14 @@ coverage.
 
 - `tests/unit/` — self-contained, no external services, run by default. Mirrors
   `src/n8n_launcher/`: `tests/unit/<subpackage>/test_<module>.py`.
-  `tests/unit/gui/` holds exactly one file, `test_stub.py`, which pins the
-  package's only remaining contract: both entry points refuse, and importing a
-  shipped module pulls in no toolkit.
+  `tests/unit/gui/` mirrors the shell: `test_theme`, `test_notifier`,
+  `test_workspace_model`, `test_app`, `test_window`, `test_card_delegate`,
+  `test_actions`, `test_create_panel`, `test_first_launch_wizard` (the `gui`
+  copy — `core` already owns a `test_first_launch.py`) and
+  `test_toolkit_isolation`, which imports every shipped business module in a
+  fresh subprocess and asserts no `PySide6`/`shiboken6` reached `sys.modules`.
+  `conftest.py` holds the `qt_app` fixture; `tests/conftest.py` forces
+  `QT_QPA_PLATFORM=offscreen`, so no test needs an X server.
 - **Filename collisions are a real trap.** `tests/unit/<subpackage>/test_manager.py`
   must not be used: the base name collides across `docker/`, `git/` and
   `workspaces/`, and pytest has no `__init__.py` to disambiguate. The files are
@@ -149,10 +158,19 @@ coverage.
 
 | Module | Role |
 |---|---|
-| `__main__.py` | Entry point. Single-instance lock → `resolve_docker_command()` → journal → `run_gui()` (refuses) → ordered shutdown. A config that exists but cannot be read is backed up to `launcher.db.corrupt-<ts>` and named in the journal, then the run stops; a config that does not exist also stops, because the first-launch wizard was a view. Registers `atexit` (fallback), handles SIGTERM/SIGINT, and brackets every run: `_start_monitoring()` logs `Surveillance active`, `_close_session()` logs `Surveillance terminée` (session duration + how many workspaces were still up) **before** `monitor.close()`. |
-| `gui/app.py` | The seam, not the interface. `NOT_IMPLEMENTED = "new GUI not yet implemented (phase 2)"`; `run_gui(store, manager, monitor)` and `LauncherApp(store, manager, monitor)` + `.run()` raise it. `main()` catches the refusal so its `finally` still closes the session and stops the workspaces. **Do not make it a no-op** — see the seam contract in `MIGRATION.md`. |
+| `__main__.py` | Entry point. `main(argv=None)` short-circuits on `--self-test` before touching the config, the lock or Docker. Single-instance lock → `resolve_docker_command()` → journal → wizard (no config) or `run_gui()` → ordered shutdown. `_signal_shutdown` calls `stop_all` then `request_shutdown()` and only `sys.exit(0)` when there is no `QApplication` — raising `SystemExit` inside a Qt slot would be swallowed by the monitoring excepthook. A config that exists but cannot be read is backed up to `launcher.db.corrupt-<ts>` and named in the journal, then the run stops; a config that does not exist opens the wizard. Registers `atexit` (fallback), handles SIGTERM/SIGINT, and brackets every run: `_start_monitoring()` logs `Surveillance active`, `_close_session()` logs `Surveillance terminée` (session duration + how many workspaces were still up) **before** `monitor.close()`. |
+| `gui/app.py` | The shell: `ensure_application`, `display_available`, `GuiUnavailable`, `request_shutdown`/`shutdown_requested`/`clear_shutdown`, `LauncherApp.run()`, `run_gui()`, `SELF_TEST_FLAG` + `self_test()`. `run()` skips `exec()` when a shutdown was already requested; the `QTimer` (`SIGNAL_TICK_MS = 200`) is what lets a Python signal handler run at all while the loop is parked in C++. `self_test()` builds the real window over a throwaway config in a temp dir and returns an exit code — it is what CI runs on a finished artifact. |
+| `gui/window.py` | `MainWindow(manager)`: header (*Nouveau* / *Démarrer* / *Arrêter*, objectNames `new`/`start`/`stop`), `QStackedWidget` board + empty state, `QListView` in IconMode painted by `CardDelegate`, selection sync, `workspace_actions` (not `actions`: `QWidget.actions` already exists). |
+| `gui/card_delegate.py` | `CARD_WIDTH` / `CARD_HEIGHT`, `tone_color`, `CardDelegate` — paints one workspace card (status pill, port, folder). No widget state, only geometry and colours. |
+| `gui/workspace_model.py` | `WorkspaceListModel` (roles `WorkspaceRole` / `StatusRole`, `refresh`, `apply_workspace`, `workspace_at`, `status_at`, `index_of`). Qt annotates `rowCount`/`data` with `QModelIndex \| QPersistentModelIndex`; the overrides must be widened to match or basedpyright fails. |
+| `gui/actions.py` | `WorkspaceActions(manager, executor=...)`: signals `busyChanged`/`failed`/`created`, one `_Task(QRunnable)` per call on a `QThreadPool`. The executor is injected, so every test runs synchronously. |
+| `gui/create_panel.py` | `plan_from_fields(...) -> CreatePlan` and `CreateWorkspaceDialog` (objectNames `name`/`directory`/`managed`). It collects; it does not create — the plan goes to the action layer. |
+| `gui/notifier.py` | `WorkspaceNotifier`: turns manager callbacks into Qt signals. |
+| `gui/theme.py` | Palette, metrics and `STYLESHEET`; `dark_palette()`, `apply_theme(app)`. |
+| `gui/first_launch.py` | `FirstLaunchWizard` (objectNames `email`/`password`/`work_dir`/`hint`) and `prompt_first_launch(store, docker, parent=None) -> bool`, which raises `GuiUnavailable` when there is no display. The rules it enforces live in `core/first_launch.py`. |
+| `core/first_launch.py` | Toolkit-free wizard contract: `SetupWizardError`, `validate_password`, `build_initial_config`. `run_first_launch(store, docker, *, email, password, work_dir) -> AppConfig` refuses unless Docker is available, then writes the config. |
 | `gui_utils/text.py` | The sizing rules, toolkit-free: `ELLIPSIS`, `ellipsize`, `column_widths` (the pure rule — a column's content, nothing else) and `fit_budget` (the same rule with a room). `measure` is a **parameter**: a `Callable[[str], int]`, not a widget call. See **The sizing rules**. |
-| `workspaces/manager.py` | Central controller — CRUD + start/stop lifecycle. Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, workflow import and **Git synchronization** (auto-pull on start, auto-push on close). States run RUNNING → **STOPPING** → STOPPED, with `docker down` between the two writes. `workspace_branch()` gives every repo `dev`. `install_server()` / `publish()` implement the remote deployment; `server_health` / `server_logs` / `server_deploy_status` / `server_execution_status` are the read-only supervision reads. |
+| `workspaces/manager.py` | Central controller — CRUD + start/stop lifecycle, and the only `WorkspaceObserver` publisher (`add_observer` / `remove_observer`, emitting *after* each commit). Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, workflow import and **Git synchronization** (auto-pull on start, auto-push on close). States run RUNNING → **STOPPING** → STOPPED, with `docker down` between the two writes. `workspace_branch()` gives every repo `dev`. `install_server()` / `publish()` implement the remote deployment; `server_health` / `server_logs` / `server_deploy_status` / `server_execution_status` are the read-only supervision reads. |
 | `workspaces/close.py` | `CloseSequence`: the ordered shutdown (reconcile → export → git sync → stop, per workspace), with every decision injected as a `CloseHooks` callback (`on_progress`, `on_sync_failed`, `on_stop_failed`, `on_push_failed`) so it runs headless and is testable without a window. |
 | `workspaces/dialogs.py` | What the creation and Git forms *collect*, not how they looked: `CreatePlan`, `GitConfigChoice`, `GitClonePlan`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan`, plus `fresh_managed_db_config`, `default_creation_db` (managed when `has_db_layout()` — a `db/schema.sql` or a `db/migrations/*.sql`), `int_or` and `repo_name_from`. |
 | `workspaces/ci.py` | The CI harness for a workspace's *own* repo: remote-URL → `owner/repo` parsing, workflow discovery (mirrors import — `n8nPipelines/*.json` + root `*.json` minus a blocklist, **deduped by basename in favour of `n8nPipelines/`**), the machine-managed `.n8n-tests/tests.json` selection, and `render_harness()`, which emits the workflow YAML plus a stdlib-only `validate.py` / `runner.py` (marker-commented, image pinned via token substitution). It also holds the two rules with no caller left: `workflow_eligibility(export, credentials)` and `load_export`. `save_ci_selection()` does **not** enforce the rule — it writes whatever the caller ticked, which is why a caller that can tick has to ask. |
@@ -457,14 +475,20 @@ are read through `github/api.py`.
   `additionalProperties: false`; sending read-only/server export fields in the
   body returns HTTP 400 "must NOT have additional properties". Only the
   whitelisted create fields survive (`_create_payload`).
-- **Password policy is not enforced by the launcher.** `validate_password()`
-  (which mirrored n8n 2.33.x — 8 to 64 chars, at least one digit and one
-  uppercase letter) lived in `gui/first_launch.py` and went with the interface.
-  Nothing in `src/` validates an owner password today; the policy has to be
-  re-derived wherever one is actually set.
-- **First launch is not wired**: `main()` stops when there is no config, and the
-  wizard that would create one was a view. The launcher cannot bootstrap itself
-  on a fresh machine.
+- **Password policy is a mirror, not the source of truth.**
+  `core/first_launch.py::validate_password` enforces n8n 2.40's rule (8 to 64
+  chars, at least one digit and one uppercase letter) so the wizard can refuse
+  early. If n8n ever changes it, both change together: the launcher's copy only
+  saves the user a round trip, n8n still has the last word.
+- **First launch and the unreadable config are two different branches.**
+  `store.load()` raising `ConfigError` means either « absent » (wizard) or
+  « present and broken » (back up and stop). The discriminator is
+  `store.path.exists()`: a wizard may never run on top of a config it could not
+  read, and the test pins that ordering.
+- **A missing Qt platform plugin fails silently.** The one packaging failure a
+  user sees as « the app does nothing ». `verify_qt_bundle()` runs at the end of
+  every build (and as `scripts/build.py --verify <root>` in CI), and
+  `n8n-launcher --self-test` is run on the finished artifact on all three OS.
 - **Managed DB**: uses the local `postgres` service in Compose. `DbMode.NONE`
   omits the Postgres service entirely; legacy `"external"` configs fall back to
   `NONE` on load.

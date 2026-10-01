@@ -14,7 +14,8 @@ from .core.filelock import LockError, acquire_single_instance_lock
 from .core.models import WorkspaceState
 from .core.paths import logs_dir
 from .docker.manager import DockerManager, resolve_docker_command
-from .gui import run_gui
+from .gui import prompt_first_launch, run_gui
+from .gui.app import SELF_TEST_FLAG, GuiUnavailable, request_shutdown, self_test
 from .monitoring.bootstrap import bootstrap_logging
 from .monitoring.store import EventStore
 from .workspaces.manager import WorkspaceManager
@@ -45,6 +46,21 @@ def _backup_unreadable_config(store: ConfigStore) -> None:
     )
 
 
+def _prompt_first_launch(store: ConfigStore, docker: DockerManager) -> bool:
+    """Run the first-launch wizard; never let a missing display crash the run.
+
+    Returns True once the wizard wrote a config, False when it was cancelled or
+    when there is no display to show it on. The latter is not a failure to
+    report to a window that does not exist: it is logged, and the caller's
+    ``finally`` still brackets the session.
+    """
+    try:
+        return prompt_first_launch(store, docker)
+    except GuiUnavailable as exc:
+        logger.error("Interface indisponible : %s", exc)
+        return False
+
+
 def stop_all(store: ConfigStore, docker: DockerManager) -> None:
     """Best-effort shutdown of every launched workspace (n8n + local DBs)."""
     manager = WorkspaceManager(store, docker)
@@ -58,9 +74,16 @@ def stop_all(store: ConfigStore, docker: DockerManager) -> None:
 
 
 def _signal_shutdown(store: ConfigStore, docker: DockerManager, *_args: object) -> None:
-    """Stop every workspace on SIGTERM / SIGINT, then exit."""
+    """Stop every workspace on SIGTERM / SIGINT, then exit — or ask Qt to.
+
+    Under the GUI the event loop is in C++, where raising ``SystemExit`` from a
+    Qt slot is swallowed by the exception hook installed for monitoring. When a
+    :class:`QApplication` exists, ``request_shutdown()`` asks it to quit instead
+    and this returns; the loop unwinds and ``main``'s ``finally`` tears down.
+    """
     stop_all(store, docker)
-    sys.exit(0)
+    if not request_shutdown():
+        sys.exit(0)
 
 
 def _start_monitoring() -> EventStore | None:
@@ -119,14 +142,17 @@ def _close_session(store: ConfigStore, docker: DockerManager, started: float) ->
     )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Application entry point: open the journal, hand off to the interface, close cleanly.
 
-    There is no interface yet, so this bracketed run is what the launcher
-    currently does end to end: it takes the single-instance lock, opens the
-    journal, and shuts every workspace down properly on the way out. A shell
-    that cannot be built is not a reason to leave containers running.
+    ``--self-test`` short-circuits everything (no config, no lock, no Docker) and
+    exits with the shell's own smoke-test code, so a packager can prove a
+    finished artifact opens a window.
     """
+    arguments = sys.argv[1:] if argv is None else argv
+    if SELF_TEST_FLAG in arguments:
+        raise SystemExit(self_test())
+
     started = time.monotonic()
     store = ConfigStore()
     # Exactly one launcher process may hold the config + compose files at a
@@ -158,19 +184,16 @@ def main() -> None:
         except ConfigError as exc:
             # A config that exists but cannot be read is the user's workspace
             # list and credentials: preserve it and stop. One that is absent is
-            # a true first launch, and the wizard that would create it is part
-            # of the interface that does not exist yet — either way there is
-            # nothing to show, and an empty workspace list would be a lie.
+            # a true first launch, and the wizard collects the owner identity and
+            # the work directory, checks Docker and writes the config before the
+            # manager below reads it.
             if store.path.exists():
                 logger.warning("Configuration illisible, arrêt du lanceur (%s)", exc, exc_info=True)
                 _backup_unreadable_config(store)
-            else:
-                logger.error(
-                    "Aucune configuration : le lanceur n'est pas encore configuré "
-                    "(l'assistant de premier lancement fait partie de l'interface, phase 2)",
-                    exc_info=True,
-                )
-            return
+                return
+            logger.info("Aucune configuration : premier lancement")
+            if not _prompt_first_launch(store, docker):
+                return
         manager = WorkspaceManager(store, docker)
         logger.info(
             "Ouverture de l'interface",
@@ -178,10 +201,10 @@ def main() -> None:
         )
         try:
             run_gui(store, manager, monitor)
-        except NotImplementedError as exc:
-            # The shell is not written yet. Say so and exit through the normal
-            # path, so the session is still bracketed and the workspaces are
-            # still stopped by `finally`.
+        except GuiUnavailable as exc:
+            # No display (a service, an ssh command): say so and exit through
+            # the normal path, so the session is still bracketed and the
+            # workspaces are still stopped by `finally`.
             logger.error("Interface indisponible : %s", exc)
             return
     finally:

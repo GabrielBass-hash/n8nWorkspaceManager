@@ -69,13 +69,16 @@ jobs:
         include:
           - os: macos-latest
             artifact: dist/n8n-launcher-macos.dmg
+            dist_root: dist/n8n-launcher.app
             name: n8n-launcher-macos.dmg
           - os: ubuntu-latest
             artifact: dist/n8n-launcher
+            dist_root: dist/n8n-launcher
             name: n8n-launcher-linux
           - os: windows-latest
-            artifact: dist/n8n-launcher.exe
-            name: n8n-launcher-windows.exe
+            artifact: dist/n8n-launcher
+            dist_root: dist/n8n-launcher
+            name: n8n-launcher-windows
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -91,9 +94,44 @@ jobs:
       - name: Build executable
         run: uv run python scripts/build.py
 
+      # Ship nothing that cannot open a window: the Qt platform plugin is the
+      # one piece a packaging step can silently drop.
+      - name: Verify the Qt bundle
+        run: uv run python scripts/build.py --verify "${{ matrix.dist_root }}"
+
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: bash scripts/build_appimage.sh
+
+      - name: Smoke test the built application (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/n8n-launcher/n8n-launcher --self-test
+
+      - name: Smoke test the AppImage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/n8n-launcher-linux-x86_64.AppImage --self-test
+
+      - name: Smoke test the built application (macOS)
+        if: matrix.os == 'macos-latest'
+        run: dist/n8n-launcher.app/Contents/MacOS/n8n-launcher --self-test
+
+      # A --windowed build on Windows is a GUI-subsystem binary: PowerShell does
+      # not wait for it and never sees its exit code, hence Start-Process -Wait.
+      - name: Smoke test the built application (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $exe = "dist\n8n-launcher\n8n-launcher.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "self-test exited with $($proc.ExitCode)" }
+
+      - name: Dry-run the macOS installer
+        if: matrix.os == 'macos-latest'
+        run: bash scripts/install_macos.sh -n -f dist/n8n-launcher-macos.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

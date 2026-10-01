@@ -3,34 +3,36 @@
 Cross-platform launcher for isolated n8n workspaces. Python 3.12+, Windows /
 macOS / Linux.
 
-**This project has no interface.** There is no GUI toolkit in the dependencies,
-and `src/n8n_launcher/gui/` is a seam that refuses: `run_gui()` and
-`LauncherApp.run()` raise
-`NotImplementedError("new GUI not yet implemented (phase 2)")`. Everything else
-is a library, and it is complete: a run today is *journal → "Interface
-indisponible" → ordered shutdown*.
+**The interface is PySide6.** It is confined to `src/n8n_launcher/gui/` —
+every other module imports no toolkit at all, and a unit test enforces that. The
+launcher still runs headless: without a display it logs *Interface
+indisponible* and exits through the same ordered shutdown as a GUI session.
 
 ## Current behaviour
 
 - A run takes the single-instance lock, resolves the Docker CLI, opens the
-  event journal, loads the config, calls `run_gui()`, logs the refusal and
-  returns through a `finally` that stops every workspace and writes the closing
-  journal event.
-- A config that exists but cannot be read is backed up to
-  `launcher.db.corrupt-<timestamp>` and named in the journal, then the run
-  stops.
-- A config that does not exist also stops the run, with
-  « Aucune configuration : le lanceur n'est pas encore configuré ». Nothing
-  creates a first config automatically, so the launcher cannot bootstrap itself
-  on a fresh machine.
-- The journal session is always bracketed, including on every failure path:
-  `Surveillance active` at the start, `Surveillance terminée — session de
-  h:mm:ss, N workspace(s) en cours à la fermeture` at the end.
+  event journal, loads the config and opens the window.
+- **First launch** (no config) opens the wizard: it checks Docker, collects the
+  owner e-mail, an owner password and the work directory, then writes
+  `launcher.db`. Cancelling the wizard ends the run cleanly.
+- A config that exists but cannot be read is **never** treated as a first
+  launch: it is backed up to `launcher.db.corrupt-<timestamp>`, named in the
+  journal, and the run stops.
+- Closing the window stops every workspace and writes the closing journal
+  event, through the same `finally` as every other exit path.
+- `n8n-launcher --self-test` builds the window once over a throwaway config and
+  exits 0. It is what the release pipeline runs on the finished artifact.
 
-Everything that used to be driven by a window is a plain callable now:
-`CreatePlan` (`workspaces/dialogs.py`), `UpdateController` with injected
-questions (`platform/update_flow.py`), `CloseSequence` (`workspaces/close.py`),
-and the table sizing rules (`gui_utils/text.py`). Each one is unit-tested.
+The window shows one card per workspace (status, port, folder) with *Nouveau* /
+*Démarrer* / *Arrêter*. Long operations (Docker, git) run on
+`QThreadPool` workers, and the manager is observed through a plain
+`WorkspaceObserver` protocol — a view renders what it is fed and calls back, it
+never does its own I/O in a paint handler.
+
+The decisions those pages used to make are plain callables, still unit-tested
+without a window: `CreatePlan` (`workspaces/dialogs.py`), `UpdateController`
+with injected questions (`platform/update_flow.py`), `CloseSequence`
+(`workspaces/close.py`) and the table sizing rules (`gui_utils/text.py`).
 
 ## Key concepts
 
@@ -196,11 +198,11 @@ Facts baked into the code:
 
 ### Password policy
 
-Nothing in `src/` validates a password. The launcher used to mirror n8n's rule
-(8 to 64 characters, at least one digit and one uppercase letter) in
-`gui/first_launch.py`; that validation went with the interface, and with the
-wizard that was its only caller. n8n still enforces its own policy when the
-owner account is set.
+`core/first_launch.py::validate_password` mirrors n8n's rule — 8 to 64
+characters, at least one digit and at least one uppercase letter — and the
+wizard refuses to continue until it passes. It is a launcher-side mirror, not a
+source of truth: n8n still enforces its own policy when the owner account is
+set, so the two must be re-derived together when either moves.
 
 ### macOS PATH in bundle-launched apps
 
@@ -238,12 +240,24 @@ typecheck. The coverage floor is `--cov-fail-under=80`, the same one CI uses.
 | Platform | Artifact | How |
 |---|---|---|
 | macOS | `dist/n8n-launcher-macos.dmg` | `scripts/build.py`: PyInstaller onedir `.app` (icon via `sips`/`iconutil`, full `Info.plist`) → ad-hoc signature → `dmgbuild` styled DMG |
-| Linux | `dist/n8n-launcher` (one file) and `dist/n8n-launcher-linux-x86_64.AppImage` | `scripts/build.py` then `bash scripts/build_appimage.sh` |
-| Windows | `dist/n8n-launcher.exe` | `scripts/build.py`: PyInstaller one file |
+| Linux | `dist/n8n-launcher/` and `dist/n8n-launcher-linux-x86_64.AppImage` | `scripts/build.py` then `bash scripts/build_appimage.sh` |
+| Windows | `dist/n8n-launcher/` | `scripts/build.py`: PyInstaller onedir |
+
+Every platform ships an **onedir** directory, never a single file: Qt has to
+find its platform plugin at runtime, and a one-file archive would unpack the
+whole bundle into a temporary directory on every launch. The AppImage *is* the
+single-file Linux artifact — it is the packager, not PyInstaller.
+
+`scripts/build.py` refuses to finish a build whose Qt platform plugin is
+missing (`verify_qt_bundle`, also reachable as
+`python scripts/build.py --verify <dist-root>`): a bundle without it starts,
+prints nothing and dies with no window, which is the one packaging failure a
+packager cannot see. The macOS signature is applied deepest-first (nested
+dylibs, then Qt bundles, then the app) instead of with the deprecated
+`codesign --deep`.
 
 PyInstaller targets the thin root `run.py` with `--paths src`, so the package
-keeps its relative imports. The bundle ships the same headless launcher: it logs
-that no interface is available and exits.
+keeps its relative imports.
 
 The macOS build is ad-hoc signed and **not notarized**, so Gatekeeper blocks it
 when it carries the quarantine attribute a browser or Finder adds on download.
@@ -288,16 +302,21 @@ coverage. The integrations need a Docker daemon:
    `basedpyright`. Échoue si le code est sale ; bloque `test` et `integration`.
 2. **`test`** — matrix `ubuntu-latest` / `macos-latest` / `windows-latest`,
    `fail-fast: false` : `uv sync --frozen`, `pytest --cov-fail-under=80
-   --junitxml=pytest-report-<os>.xml`, upload du rapport par OS. Aucun toolkit
-   graphique n'est installé ni invoqué, donc ni `python3-tk` ni `xvfb` : la
-   suite tourne telle quelle sur un runner sans écran.
+   --junitxml=pytest-report-<os>.xml`, upload du rapport par OS. Qt tourne avec
+   `QT_QPA_PLATFORM=offscreen`, donc ni `python3-tk` ni `xvfb` : la suite
+   s'exécute telle quelle sur un runner sans écran. La jambe ubuntu installe
+   les librairies systèmes dont Qt a besoin (`libgl1`, `libegl1`,
+   `libxkbcommon0`, …).
 3. **`integration`** — `ubuntu-latest`, en parallèle de `test` : `pytest
    tests/integration -m integration`, `timeout-minutes: 60`. Linux seulement,
    parce que le sandbox sshd est un conteneur Linux et que le harness atteint le
    n8n déployé par un tunnel SSH inverse. Le runner ubuntu a déjà le socket
    Docker par défaut, donc aucun `N8N_LAUNCHER_TEST_DOCKER_SOCKET` n'est requis.
 4. **`build`** — après `test` : `scripts/build.py` sur les trois OS,
-   `scripts/build_appimage.sh` sur la jambe ubuntu, puis upload de chaque
+   `scripts/build.py --verify <dist-root>` (plugin Qt présent),
+   `scripts/build_appimage.sh` sur la jambe ubuntu, `--self-test` sur chaque
+   artefact construit *et* sur l'AppImage, `install_macos.sh -n` sur la jambe
+   macOS, puis upload de chaque
    artifact.
 
 Les jobs **`parity`** et les suites `tests/test_structure.py` /
@@ -312,7 +331,7 @@ artifacts à la GitHub Release.
 ## Releases
 
 The version is a strict SemVer (`MAJOR.MINOR.PATCH`) declared in exactly one
-place — `__version__` in `src/n8n_launcher/__init__.py` (currently **5.0.3**).
+place — `__version__` in `src/n8n_launcher/__init__.py` (currently **6.0.0**).
 `pyproject.toml` inherits it through `dynamic = ["version"]`, `scripts/build.py`
 embeds it in the bundle, and `platform/updater.py` compares it against the
 GitHub releases. Bump it by hand, in a PR, before releasing.
