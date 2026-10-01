@@ -19,7 +19,9 @@ which asks the running application to ``quit()``; the loop returns normally and
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -115,6 +117,20 @@ def run_gui(
     LauncherApp(store, manager, monitor).run()
 
 
+def _report(message: str) -> None:
+    """Write *message* to stderr, tolerating a process that has no console.
+
+    A ``--windowed`` build on Windows is a GUI-subsystem binary: the standard
+    streams are not attached, so a plain ``print`` would raise and bury the one
+    line the packager needs to read.
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        print(message, file=stream)
+
+
 def self_test() -> int:
     """Build the real window once and report whether this binary can show it.
 
@@ -128,25 +144,36 @@ def self_test() -> int:
     because a packager's only question is "did it start?".
     """
     if not display_available():
-        print("self-test: no display available", file=sys.stderr)
+        _report("self-test: no display available")
         return 1
+    scratch = Path(tempfile.mkdtemp(prefix="n8n-launcher-self-test-"))
     try:
-        with tempfile.TemporaryDirectory(prefix="n8n-launcher-self-test-") as scratch:
-            store = ConfigStore(Path(scratch) / "launcher.db")
-            store.save(AppConfig("self-test@example.invalid", "SelfTest1", Path(scratch)))
+        store = ConfigStore(scratch / "launcher.db")
+        try:
+            store.save(AppConfig("self-test@example.invalid", "SelfTest1", scratch))
             app = ensure_application()
             apply_theme(app)
             window = MainWindow(WorkspaceManager(store, DockerManager()))
             window.show()
             app.processEvents()
             window.close()
+        finally:
+            # The store holds its SQLite connection open for the process
+            # lifetime, and an open handle makes the database undeletable on
+            # Windows: close it before the directory has to go.
+            store.close()
     except Exception as exc:
-        # Deliberately broad: anything that goes wrong while building the window
-        # (a missing plugin, an unloadable dylib, a theme typo) is the same
-        # answer for a packager, so it becomes one line and one exit code
+        # Deliberately broad: anything that goes wrong while building the
+        # window (a missing plugin, an unloadable dylib, a theme typo) is the
+        # same answer for a packager, so it becomes one line and one exit code
         # instead of a traceback nobody reads on a machine with no display.
-        print(f"self-test failed: {exc}", file=sys.stderr)
+        _report(f"self-test failed: {exc}")
         return 1
+    finally:
+        # Cleanup must never decide the verdict: this code exists to answer one
+        # question — can this bundle open a window? — so a scratch directory
+        # that outlives the process is a lesser problem than a false failure.
+        shutil.rmtree(scratch, ignore_errors=True)
     return 0
 
 

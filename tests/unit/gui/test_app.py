@@ -119,6 +119,10 @@ def test_self_test_builds_the_window_and_reports_success(qt_app, monkeypatch) ->
     # The user's real configuration is never the one the smoke check touches.
     assert opened, "the self-test must build a store to open the board over"
     assert all("n8n-launcher-self-test-" in str(path) for path in opened)
+    # The store holds its SQLite handle for the process lifetime: an open handle
+    # makes the file undeletable on Windows, so the scratch directory has to be
+    # gone or the check leaks a locked database on every run.
+    assert not any(path.parent.exists() for path in opened)
 
 
 def test_self_test_refuses_without_a_display(monkeypatch, capsys) -> None:
@@ -131,6 +135,14 @@ def test_self_test_refuses_without_a_display(monkeypatch, capsys) -> None:
 
 def test_self_test_reports_a_shell_that_cannot_be_built(monkeypatch, capsys) -> None:
     """A bundle that lost its Qt plugin has to fail loudly, not hang or pass."""
+    real_store = app_module.ConfigStore
+
+    def spy(path=None):
+        # Still a real store: the report must name the window failure, never be
+        # masked by whatever goes wrong while cleaning up after it.
+        return real_store(path)
+
+    monkeypatch.setattr(app_module, "ConfigStore", spy)
     monkeypatch.setattr(
         app_module.MainWindow,
         "__init__",
@@ -140,3 +152,26 @@ def test_self_test_reports_a_shell_that_cannot_be_built(monkeypatch, capsys) -> 
     assert self_test() == 1
 
     assert "boom" in capsys.readouterr().err
+
+
+def test_self_test_reports_even_without_a_console(monkeypatch) -> None:
+    """A --windowed Windows build has no stderr: the verdict must still land."""
+    monkeypatch.setattr(app_module.sys, "stderr", None)
+    monkeypatch.setattr(app_module, "display_available", lambda: False)
+
+    assert self_test() == 1
+
+
+def test_self_test_never_fails_on_its_own_cleanup(qt_app, monkeypatch) -> None:
+    """A scratch directory that cannot be removed must not decide the verdict."""
+    seen: list[bool] = []
+    real = app_module.shutil.rmtree
+
+    def spy(path, ignore_errors: bool = False, **kwargs):
+        seen.append(ignore_errors)
+        return real(path, ignore_errors=ignore_errors, **kwargs)
+
+    monkeypatch.setattr(app_module.shutil, "rmtree", spy)
+
+    assert self_test() == 0
+    assert seen == [True]

@@ -218,6 +218,11 @@ def main(argv: list[str] | None = None) -> None:
         if monitor is not None:
             with contextlib.suppress(Exception):
                 monitor.close()
+        # Same reasoning for the config store: the ordered shutdown above is
+        # the last reader, and an open SQLite handle keeps the database (and
+        # its -wal / -shm sidecars) locked until the process exits.
+        with contextlib.suppress(Exception):
+            store.close()
 
 
 if __name__ == "__main__":
