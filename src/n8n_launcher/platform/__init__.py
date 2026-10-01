@@ -1,2 +1,1 @@
-"""OS and browser integration: desktop shortcuts, port probing, browser
-app-mode opening and the self-update engine."""
+"""OS integration: port probing for n8n instances and the self-update engine."""

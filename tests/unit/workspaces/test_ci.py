@@ -65,10 +65,6 @@ def test_github_repo_path_rejects_non_github_targets() -> None:
     assert ci.github_repo_path("https://github.example.com/owner/repo.git") is None
 
 
-def test_actions_url_builds_github_page() -> None:
-    assert ci.actions_url("owner/repo") == "https://github.com/owner/repo/actions"
-
-
 # --- Collection / selection --------------------------------------------
 
 
@@ -132,16 +128,6 @@ def test_read_selection_defaults_to_empty_on_garbage(tmp_path: Path) -> None:
     ci.selection_path(root).parent.mkdir(parents=True)
     ci.selection_path(root).write_text("nope", encoding="utf-8")
     assert ci.read_selection(root) == set()
-
-
-def test_provided_credentials_keys_by_type_name() -> None:
-    provided = ci.provided_credentials([{"name": "API", "type": "httpRequest"}])
-    assert provided == {"httpRequest/API"}
-
-
-def test_provided_credentials_skips_empty_parts() -> None:
-    provided = ci.provided_credentials([{"name": "  ", "type": "httpRequest"}])
-    assert provided == set()
 
 
 # --- Credentials --------------------------------------------------------
@@ -212,14 +198,14 @@ def test_default_start_trigger_none_without_startable_trigger(tmp_path: Path) ->
 
 def test_workflow_eligibility_requires_a_trigger(tmp_path: Path) -> None:
     export = write_export(tmp_path, "n8nPipelines/p.json", [http_node()])
-    ok, reason = ci.workflow_eligibility(export, set())
+    ok, reason = ci.workflow_eligibility(export, [])
     assert ok is False
     assert reason == "aucun déclencheur"
 
 
 def test_workflow_eligibility_rejects_unpinned_webhook(tmp_path: Path) -> None:
     export = write_export(tmp_path, "n8nPipelines/p.json", [webhook_trigger("Hook")])
-    ok, reason = ci.workflow_eligibility(export, set())
+    ok, reason = ci.workflow_eligibility(export, [])
     assert ok is False
     assert "non épinglé" in reason
 
@@ -228,7 +214,7 @@ def test_workflow_eligibility_accepts_pinned_webhook(tmp_path: Path) -> None:
     export = write_export(
         tmp_path, "n8nPipelines/p.json", [webhook_trigger("Hook")], pinData={"Hook": {}}
     )
-    assert ci.workflow_eligibility(export, set()) == (True, "")
+    assert ci.workflow_eligibility(export, []) == (True, "")
 
 
 def test_workflow_eligibility_blocked_by_missing_credentials(tmp_path: Path) -> None:
@@ -240,7 +226,7 @@ def test_workflow_eligibility_blocked_by_missing_credentials(tmp_path: Path) -> 
             http_node("API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}}),
         ],
     )
-    ok, reason = ci.workflow_eligibility(export, set())
+    ok, reason = ci.workflow_eligibility(export, [])
     assert ok is False
     assert reason == "credentials manquantes : API (httpRequest)"
 
@@ -254,51 +240,13 @@ def test_workflow_eligibility_ok_with_schedule_and_covered_credentials(tmp_path:
             http_node("API", {"httpHeaderAuth": {"name": "API", "type": "httpRequest"}}),
         ],
     )
-    assert ci.workflow_eligibility(export, {"httpRequest/API"}) == (True, "")
+    assert ci.workflow_eligibility(export, [{"name": "API", "type": "httpRequest"}]) == (True, "")
 
 
 # --- Descriptions --------------------------------------------------------
 
 
-def test_start_description_reports_manual_then_schedule_then_pinned(tmp_path: Path) -> None:
-    assert (
-        ci.start_description(write_export(tmp_path, "a.json", [manual_trigger("Bouton")]))
-        == "déclencheur manuel « Bouton »"
-    )
-    assert ci.start_description(write_export(tmp_path, "b.json", [schedule_trigger()])) == (
-        "déclencheur programmé"
-    )
-    assert (
-        ci.start_description(
-            write_export(tmp_path, "c.json", [webhook_trigger("Hook")], pinData={"Hook": {}})
-        )
-        == "déclencheur épinglé « Hook »"
-    )
-    assert ci.start_description(write_export(tmp_path, "d.json", [webhook_trigger()])) == (
-        "aucun déclencheur testable"
-    )
-
-
-def test_node_detail_reports_pinned_and_credential_style(tmp_path: Path) -> None:
-    export = write_export(tmp_path, "p.json", [manual_trigger("Bouton")])
-    node = {"name": "Bouton", "type": "n8n-nodes-base.manualTrigger"}
-    assert ci.node_detail(export, node) == ("n8n-nodes-base.manualTrigger", "warn")
-    export["pinData"] = {"Bouton": {}}
-    assert ci.node_detail(export, node) == ("n8n-nodes-base.manualTrigger, épinglé", "muted")
-
-
 # --- Counters ------------------------------------------------------------
-
-
-def test_ci_counts_covers_selection(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    write_export(root, "n8nPipelines/ok.json", [manual_trigger()])
-    write_export(root, "n8nPipelines/hook.json", [webhook_trigger()])
-    ci.write_selection(root, {"n8nPipelines/ok.json", "n8nPipelines/hook.json"})
-
-    counts = ci.ci_counts(root, set())
-
-    assert counts == {"eligible": 1, "selected": 2, "selected_eligible": 1}
 
 
 # --- Rendering ------------------------------------------------------------
