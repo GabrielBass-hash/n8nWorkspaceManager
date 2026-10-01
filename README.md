@@ -1,195 +1,318 @@
 # n8n-launcher
 
-Cross-platform launcher for isolated n8n workspaces.
+Cross-platform launcher for isolated n8n workspaces. Python 3.12+, Windows /
+macOS / Linux.
 
-> **The interface is gone.** Tkinter has been removed and the launcher is
-> headless: it manages workspaces, Git, remote deployments and CI, but it has
-> nothing to draw. `run_gui()` raises `NotImplementedError` on purpose. The
-> logic the windows used to drive is all still here and tested — see
-> [`MIGRATION.md`](MIGRATION.md) for what phase 2 rebuilds over it.
+**This project has no interface.** There is no GUI toolkit in the dependencies,
+and `src/n8n_launcher/gui/` is a seam that refuses: `run_gui()` and
+`LauncherApp.run()` raise
+`NotImplementedError("new GUI not yet implemented (phase 2)")`. Everything else
+is a library, and it is complete: a run today is *journal → "Interface
+indisponible" → ordered shutdown*.
 
-## Status
+## Current behaviour
 
-The launcher provides domain models, platform-specific paths, persistent configuration, Compose rendering, Docker lifecycle commands, database migration/validation helpers, port allocation, workspace CRUD/lifecycle orchestration, Git synchronization, GitHub repo creation, GitHub Actions CI harness generation and live runs, remote server deployment, an event journal, and PyInstaller packaging.
+- A run takes the single-instance lock, resolves the Docker CLI, opens the
+  event journal, loads the config, calls `run_gui()`, logs the refusal and
+  returns through a `finally` that stops every workspace and writes the closing
+  journal event.
+- A config that exists but cannot be read is backed up to
+  `launcher.db.corrupt-<timestamp>` and named in the journal, then the run
+  stops.
+- A config that does not exist also stops the run, with
+  « Aucune configuration : le lanceur n'est pas encore configuré ». Nothing
+  creates a first config automatically, so the launcher cannot bootstrap itself
+  on a fresh machine.
+- The journal session is always bracketed, including on every failure path:
+  `Surveillance active` at the start, `Surveillance terminée — session de
+  h:mm:ss, N workspace(s) en cours à la fermeture` at the end.
 
-Everything that used to be reachable from a window is a **callable** now. Creation collects a `CreatePlan` (`workspaces/dialogs.py`), the update flow is `UpdateController` with injected questions (`platform/update_flow.py`), shutdown is `CloseSequence` (`workspaces/close.py`), and the sizing rules the tables obeyed are pure functions of their content (`gui_utils/text.py`). Unit and integration test suites are green; there is no GUI suite, because there is no GUI.
-
-What runs today: `main()` opens the journal, finds no interface to show, logs that, and shuts every workspace down cleanly on the way out.
+Everything that used to be driven by a window is a plain callable now:
+`CreatePlan` (`workspaces/dialogs.py`), `UpdateController` with injected
+questions (`platform/update_flow.py`), `CloseSequence` (`workspaces/close.py`),
+and the table sizing rules (`gui_utils/text.py`). Each one is unit-tested.
 
 ## Key concepts
 
 ### Workspace isolation
 
-Each workspace is a user-defined n8n instance bound to a folder of workflow exports. The launcher creates an isolated Docker Compose project named `n8n-ws-<id>`, writes the Compose YAML under `config_dir/workspaces/<id>/compose.yml`, and uses named volumes (`n8ndata-<id>`, and `pgdata-<id>` in managed mode).
+Each workspace is a user-defined n8n instance bound to a folder of workflow
+exports. The launcher creates an isolated Compose project `n8n-ws-<id>`, writes
+the Compose YAML to `<config_dir>/workspaces/<id>/compose.yml`, and declares the
+named volumes `n8ndata-<id>` and — in managed mode — `pgdata-<id>`.
 
 ### Database modes
 
-- **`MANAGED`** — a local Postgres service runs inside the Compose project. When DB parameters are missing, the launcher fills them in: `data` / `n8ndata` for database/user (fixed defaults), a random password; Migrations in `db/migrations/` are detected and applied on startup.
-- **`NONE`** — n8n runs without any database service.
+- **`MANAGED`** — a Postgres service runs inside the Compose project. Missing
+  DB parameters are filled in: database `data`, user `n8ndata`, a random
+  password. The SQL files in `db/migrations/` are detected and applied by
+  `start()`.
+- **`NONE`** — n8n runs with no database service in the Compose project.
+
+A legacy `"external"` DB mode falls back to `NONE` on load.
 
 ### Git synchronization
 
-Git is optional per-workspace and configured at creation or later through `prompt_git_config` / `workspaces/dialogs.py`. Every launcher-created repo works on its own branch **`dev`** (legacy `main`/`n8n/*` branches are renamed once on first start); git lifecycle calls are serialized per-workspace. When enabled with a remote:
+Optional per workspace, as `Workspace.git` (`GitConfig(enabled, remote_url,
+branch)`). Every launcher-created repository works on its own branch **`dev`**
+(`git -c init.defaultBranch=dev init`); a legacy `main`/`n8n/*` branch is
+renamed to `dev` once on the first `ensure_running()` and `GitConfig.branch` is
+persisted. Git lifecycle calls run under a reentrant per-workspace lock
+(`.n8n-launcher.git.lock`, gitignored), so the automatic pull on start and the
+automatic push on close can never interleave.
 
-- **Auto-pull on start** — `git pull --rebase` brings remote JSON changes into the workspace folder before workflow import.
-- **Auto-push on close** — n8n workflows are exported to JSON, staged, committed with a timestamped message, and pushed. Push is skipped when there is nothing to commit *and* no unpushed commits. Server-side push rejections are retried once.
-- **Push failures never block**: a `git_push_failed` flag is persisted and surfaced as a warning chip and dialog; failures are logged, never raised.
+- **Auto-pull on start** — `git pull --rebase` runs before the workflow import,
+  and only when `git.enabled` is set and the folder is a real repository.
+  Failures are warnings; they never block the start.
+- **Auto-push on close** — the close sequence exports the workflows, then
+  `git add -A`, a timestamped commit and a push. The push is skipped when there
+  is nothing to commit *and* no unpushed commit. `git_push` uses `-u origin
+  <branch>` so the first push seeds an empty remote, and retries once on a
+  server-side rejection (`! [rejected]`, stale info). Push failures are logged,
+  never raised.
+- **`dev` is the work branch and the CI branch. `main` exists only as the
+  production reference on the server's bare repository** — `publish` maps
+  `dev → main`.
 
-### GitHub repo creation
+### GitHub
 
-When no remote is set, the "Créer sur GitHub…" flow creates the repository via the GitHub REST API, stores the clean `https://github.com/<owner>/<name>.git` URL, and seeds the remote with a one-shot tokenized URL (`https://<token>@github.com/...`) so the token never lands in `.git/config`. CI eligibility (`github_repo_path`) stays intact because the stored URL is unencoded.
+**Repository creation** goes through `create_repo()` on the GitHub REST API. The
+clean URL `https://github.com/<owner>/<name>.git` is what gets persisted, so CI
+eligibility (`github_repo_path`) keeps working; the remote is then seeded with a
+one-shot tokenized URL (`https://<token>@github.com/…`, no `-u`) so the token
+never reaches `.git/config`.
+
+**Token resolution** is automatic: `resolve_github_token()` tries the optional
+persisted override (`AppConfig.github_token`), then `gh auth token`, then
+`git credential fill` for `github.com` — the same credential `git push` uses —
+with a 10 s timeout and prompts disabled. It returns `None` when nothing is
+available. Nothing has to be configured, and the token is never logged.
+
+### Workflow import and export
+
+`import_all()` (on start) scans `n8nPipelines/` **and** the workspace root for
+`*.json`, and creates each workflow through the public API. Files without a
+`nodes` key, unreadable files, and workflows already present (by id **or** name)
+are skipped. `_create_payload()` is a whitelist of the fields the create schema
+accepts (`name`, `nodes`, `connections`, `settings`, `staticData`, `pinData`,
+`nodeGroups`, `projectId`, `parentFolderId`, `settings` defaulting to `{}`);
+everything else (`active`, `triggerCount`, `shared`, …) is dropped.
+
+`export_all(mirror=…)` (on close, stop-with-sync and publish) refreshes
+`n8nPipelines/<name>-<id>.json` for every workflow, and, when *mirror* is given,
+writes the **same bodies as identical copies at the workspace root** — because
+import and the CI harness both read the two locations. Cleanup in the mirror is
+restricted to launcher-named files (`EXPORT_NAME_RE = .+-\d+\.json$`), so
+`package.json` and hand-written exports are never touched.
+
+Consequently every consumer of both locations dedups by basename in favour of
+`n8nPipelines/`: `collect_workflows()` in `workspaces/ci.py` and
+`collect_workflow_files()` in the generated remote `deploy.py`. Without that
+dedup the same workflow would be imported or uploaded twice.
 
 ### Remote server deployment
 
-Deployment to a production server is optional per-workspace (persisted as `ServerConfig`) and driven from the same git repo: `publish()` pushes the workspace **`dev`** branch to the server's bare repo as its `main` (the production reference), then waits for the server's `post-receive` hook to redeploy the stack and confirm through a marker file (`last-deploy.json`).
+Optional per workspace, persisted as `Workspace.server` (`ServerConfig`).
+`publish()` pushes `dev:main` to the server's bare repository and waits for the
+`post-receive` hook to confirm through a marker file.
 
-- `install_server` creates the bare repo (`git init --bare`), ships a generated `post-receive` hook and `deploy.py` (marker-commented, template strings), all transferred atomically (`write_remote_file`: `cat > path.tmp && mv`).
-- The server Compose file adds a top-level `name: n8n-ws-<id>` so the project is stable regardless of the checkout directory; the hook runs `docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d` and every remote import uses that pinned project.
-- `deploy.py` recreates credentials and imports the pipelines — deduplicating by basename so root mirror copies never upload a workflow twice — but **never runs `db/migrations/*.sql`**: SQL migrations stay on the launcher-managed local stack. Secrets travel as a `secrets.json` scp'd at publish; nothing is committed to git.
+- `install_server()` probes the remote tools, initializes the bare repository
+  (`git init --bare`) *before* writing the hook — the hook has to exist at push
+  time — and ships the generated `post-receive` hook and `deploy.py` through
+  `write_remote_file`, which writes to `<path>.tmp` and `mv -f`s it into place.
+- The remote Compose file carries a top-level `name: n8n-ws-<id>` so the project
+  is stable regardless of the checkout directory, and the hook runs
+  `docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d` before
+  executing `deploy.py`. Both the hook and the script write `last-deploy.json`
+  (`{sha,status,error,at}`) atomically.
+- `deploy.py` recreates the credentials and imports the pipelines with the same
+  basename dedup, and deliberately **never runs `db/migrations/*.sql`**: SQL
+  migrations stay on the launcher-managed local stack. Secrets travel as a
+  `secrets.json` scp'd at publish and are never committed.
+- Workflow activation is best effort and goes through the deploy's owner
+  session (`/rest/workflows/{id}` then `/rest/workflows/{id}/activate`), because
+  the public activate endpoint is refused by n8n 2.x for a workflow the key's
+  user cannot activate. A refusal is logged, never raised.
+- The publish push uses a 300 s timeout instead of the 30 s every other git
+  call gets, because the hook runs Compose up and the import synchronously.
 
 ### GitHub Actions CI
 
-Each workspace with Git enabled and a **GitHub** remote can run its exported pipelines as GitHub Actions tests. Runs are triggered manually or by pushes on the per-workspace `dev` branch (the repo default branch is set to `dev` on enable):
+Optional per workspace; it requires `git.enabled` with a GitHub remote and is
+persisted as `GitConfig.ci_enabled` / `GitConfig.ci_credentials`.
 
-- **Enabling** (`enable_ci()`) generates three files in the workspace repo — `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and `.n8n-tests/runner.py` — plus the machine-managed selection `.n8n-tests/tests.json`. Every generated file carries the marker *« n8n-launcher : généré — ne pas modifier à la main »*. Changes are committed and pushed on enable.
-- **Pipeline eligibility** (`workflow_eligibility`): a pipeline is testable iff it has a manual trigger, a schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every non-pinned node's credential types are covered by the recorded CI credentials. Each ineligibility carries a human-readable reason.
-- **Credentials**: `ci_credentials_payload(id)` reads the values once from the running workspace's n8n instance and returns the JSON document for the `N8N_CI_CREDENTIALS` secret. The launcher keeps only `(name, type)` metadata, never the values.
-- **Runs**: read through `github/api.py` (`list_workflow_runs`, `list_run_jobs`, `fetch_job_logs`). Dispatching is `dispatch_workflow()` (`workflow_dispatch` on a chosen ref); the generated workflow's `concurrency: cancel-in-progress` cancels a run already in flight.
-- **Disabling** removes only the generated harness files and keeps `tests.json`.
+- **Enable** writes `.github/workflows/n8n-ci.yml`, `.n8n-tests/validate.py` and
+  `.n8n-tests/runner.py` (all marker-commented as generated, the n8n image
+  pinned through the `__N8N_IMAGE__` token), commits, pushes, and sets the
+  repository default branch to `dev`. **Disable** removes those three files and
+  keeps `.n8n-tests/tests.json`, so the selection survives a disable/enable
+  cycle.
+- The workflow has two jobs — `validate` (JSON shape, duplicate names, selection
+  consistency) and `test` (the runner) — triggered by `workflow_dispatch` and by
+  pushes on `dev`.
+- **Eligibility**: a pipeline is testable iff it has a manual trigger, a
+  schedule trigger, or a *pinned* webhook/chat trigger (`pinData`), and every
+  non-pinned node's credential types are covered by the recorded CI credentials.
+  Each verdict carries a human-readable French reason.
+- **Selection** is machine-managed: `tests.json` is `{"selected": [...]}`, never
+  hand-edited.
+- **Credentials**: only `(name, type)` metadata is persisted. `ci_credentials_payload(id)`
+  requires a started workspace with an `api_key` and reads the values once to
+  build the `N8N_CI_CREDENTIALS` secret.
+- **Runs** are read through `github/api.py` (`list_workflow_runs`,
+  `list_run_jobs`, `fetch_job_logs`); `dispatch_workflow()` fires a
+  `workflow_dispatch` on a chosen ref. GitHub matches the dispatch on the bare
+  file name, so the `.github/workflows/` prefix is stripped first.
 
-### GitHub token management
+### n8n integration notes
 
-Tokens are resolved automatically from the OS Git credential helper (the same credential `git push` uses) or `gh auth token`, with a 10 s timeout, and never logged or persisted on its own. An override can be persisted once as `AppConfig.github_token`; otherwise the resolved token lives in memory only. Nothing has to be typed into a dialog, and nothing has to be configured.
+Facts baked into the code:
 
-### n8n 2.33.x integration notes
-
-Findings from the integration spikes, baked into the code:
-
-- The owner bootstrap uses internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`) because n8n 2.33.x requires a `firstName`/`lastName` for the owner, an 8-64 character password, and returns the session as an HttpOnly `n8n-auth` cookie rather than a body token.
-- API keys require a `scopes` array and a numeric `expiresAt` (`0` = no expiry); the launcher requests the six workflow scopes it needs and reads the key from `rawApiKey`.
-- During startup n8n answers with transient HTML pages (`n8n is starting up`, `Cannot POST ...`); `OwnerSetup.bootstrap` retries until the API responds with JSON or reports an already-configured owner.
-- Because of these constraints the launcher keeps the REST bootstrap instead of `N8N_INSTANCE_OWNER_*` env vars. `hash_owner_password` (bcrypt) stays available for a future hashed-env evaluation.
-- Named Compose volumes must be declared: each workspace declares both `n8ndata-<id>` and (managed mode) `pgdata-<id>`.
-- `docker compose ps --format json` is validated by the integration suite to derive per-service state.
-
-### macOS PATH in bundle-launched apps
-
-Finder/Dock/Launchpad start apps with a minimal `PATH`, so `docker` is resolved via `resolve_docker_command()` — probing `/opt/homebrew/bin`, `/opt/homebrew/sbin`, `/usr/local/bin`, `/usr/local/sbin`, and `/Applications/Docker.app/Contents/Resources/bin` before falling back to `PATH` lookup — instead of relying on the environment `PATH`.
+- Owner bootstrap uses the internal REST endpoints (`/rest/owner/setup`,
+  `/rest/login`, `/rest/api-keys`) rather than `N8N_INSTANCE_OWNER_*` env vars.
+  n8n returns the session as an HttpOnly `n8n-auth` cookie, never as a body
+  token, and `Authorization: Bearer <JWT>` on `/rest/*` is rejected.
+- API keys require a `scopes` array and a numeric `expiresAt` (`0` = no expiry).
+  `n8n/scopes.py` is the single list used both by the local bootstrap and by the
+  generated remote `deploy.py`.
+- During startup n8n answers with transient HTML (`n8n is starting up`,
+  `Cannot POST …`), so the bootstrap retries until it gets JSON or learns the
+  owner already exists.
+- `POST /api/v1/workflows` validates with `additionalProperties: false`; sending
+  a server-only field returns HTTP 400.
+- The generated CI runner starts its disposable container with
+  `N8N_SECURE_COOKIE=false`, because urllib refuses to replay a cookie flagged
+  `Secure` over plain HTTP, and without it `POST /rest/api-keys` 401s on every
+  version. Listing credentials through the public API additionally needs the
+  `credential:list` scope, or `GET /api/v1/credentials` answers 403.
+- `GET /rest/executions` returns no `finished` flag, so it is derived from n8n's
+  own vocabulary (`TERMINAL_EXECUTION_STATUSES` ⇒ `True`,
+  `PENDING_EXECUTION_STATUSES` ⇒ `False`, anything else ⇒ `None`, an explicit
+  boolean always winning). A meta-test asserts the generated server parser and
+  the launcher parser agree for every status.
+- `docker ps` labels are not always a map: `parse_container_labels()` accepts an
+  object, a JSON string, and the flat `k=v,k=v` string Compose 2.35 emits on
+  Docker Desktop.
 
 ### Password policy
 
-`validate_password()` mirrors n8n 2.33.x — 8 to 64 chars, at least one digit and one uppercase letter. `test1234` is rejected.
+Nothing in `src/` validates a password. The launcher used to mirror n8n's rule
+(8 to 64 characters, at least one digit and one uppercase letter) in
+`gui/first_launch.py`; that validation went with the interface, and with the
+wizard that was its only caller. n8n still enforces its own policy when the
+owner account is set.
 
-### Public API is schema-strict
+### macOS PATH in bundle-launched apps
 
-`POST /workflows` validates with `additionalProperties: false`; sending read-only/server export fields returns HTTP 400. The launcher uses a whitelist (`_create_payload`) — only `name`, `nodes`, `connections`, `settings`, `staticData`, `pinData`, `nodeGroups`, `projectId`, `parentFolderId` survive.
+Finder, Dock and Launchpad start an app with a minimal `PATH`, so `docker` is
+located by `resolve_docker_command()` — probing `/opt/homebrew/bin`,
+`/opt/homebrew/sbin`, `/usr/local/bin`, `/usr/local/sbin` and
+`/Applications/Docker.app/Contents/Resources/bin` before falling back to a
+`PATH` lookup — rather than read from the environment.
 
 ## Development
 
-Requires Python 3.12 or newer. The project uses **uv** as the single package manager; every command below runs inside the uv-managed virtualenv.
+Python 3.12+. **uv** is the single package manager; every command below runs
+inside the uv-managed virtualenv.
 
 ```bash
-uv sync                        # runtime + dev tooling
-uv run pytest                  # unit tests (excludes integration)
-```
+uv sync                        # runtime + dev tooling (dev group by default)
+uv sync --group packaging      # build tooling
 
-Lint, format, and typecheck (Ruff + basedpyright + pre-commit). The single pre-commit command runs exactly what CI runs for static checks:
+uv run pytest                  # unit tests (integration excluded by default)
+uv run pytest -m integration   # integration tests (Docker daemon required)
+uv run pytest tests/unit/docker/test_compose.py::test_render_compose_managed
 
-```bash
-uv run pre-commit run --all-files
-```
-
-The underlying tools are also available directly:
-
-```bash
+uv run pre-commit run --all-files   # ruff check + ruff format + basedpyright
 uv run ruff check .
 uv run ruff format --check .
 uv run basedpyright
 ```
 
-Integration tests are opt-in (require Docker):
+`basedpyright` runs in `typeCheckingMode = "standard"` and excludes
+`tests/**` and `scripts/**` only: every module under `src/n8n_launcher/` must
+typecheck. The coverage floor is `--cov-fail-under=80`, the same one CI uses.
 
-```bash
-uv run pytest -m integration
-```
+## Distribution
 
-Build the distribution locally:
+| Platform | Artifact | How |
+|---|---|---|
+| macOS | `dist/n8n-launcher-macos.dmg` | `scripts/build.py`: PyInstaller onedir `.app` (icon via `sips`/`iconutil`, full `Info.plist`) → ad-hoc signature → `dmgbuild` styled DMG |
+| Linux | `dist/n8n-launcher` (one file) and `dist/n8n-launcher-linux-x86_64.AppImage` | `scripts/build.py` then `bash scripts/build_appimage.sh` |
+| Windows | `dist/n8n-launcher.exe` | `scripts/build.py`: PyInstaller one file |
 
-```bash
-uv sync --group packaging
-uv run python scripts/build.py
-```
+PyInstaller targets the thin root `run.py` with `--paths src`, so the package
+keeps its relative imports. The bundle ships the same headless launcher: it logs
+that no interface is available and exits.
 
-On macOS the onedir `.app` bundle embeds the app icon and a full `Info.plist` (display name, version, retina support), is ad-hoc signed, and is packaged into a styled drag-and-drop `.dmg` rendered by `dmgbuild`. The bundle ships a headless launcher: it will log that no interface is available and exit, which is why the CLI form is the useful one today.
+The macOS build is ad-hoc signed and **not notarized**, so Gatekeeper blocks it
+when it carries the quarantine attribute a browser or Finder adds on download.
+The release publishes `n8n-launcher-macos.dmg`; three ways to install it:
 
-On Linux, additionally build the AppImage:
+1. **curl, which never quarantines.** Fetch the DMG from the release and run the
+   repo's installer against it:
 
-```bash
-bash scripts/build_appimage.sh
-```
+   ```bash
+   curl -fLO https://github.com/GabrielBass-hash/n8nWorkspaceManager/releases/latest/download/n8n-launcher-macos.dmg
+   bash scripts/install_macos.sh -f n8n-launcher-macos.dmg
+   ```
 
-| Platform | Output |
-|---|---|
-| macOS | `dist/n8n-launcher-macos.dmg` |
-| Linux | `dist/n8n-launcher` or `dist/n8n-launcher-linux-x86_64.AppImage` |
-| Windows | `dist/n8n-launcher.exe` |
+   The same script installs a local build:
+   `bash scripts/install_macos.sh -f dist/n8n-launcher-macos.dmg`.
+2. **De-quarantine an app you already downloaded:**
+   `bash scripts/dequarantine.sh` (optionally with a path). macOS 15+ re-applies
+   the attribute after a relaunch, so prefer 1.
+3. **Manual bypass, no terminal.** Right-click `n8n-launcher.app` → *Open* →
+   *Open*.
 
 ## Tests et CI
 
-### Lancer les tests en local
+### En local
 
 ```bash
-uv sync            # installe les deps runtime + dev
-uv run pytest      # tests unitaires (exclut les tests integration)
+uv sync            # deps runtime + dev
+uv run pytest      # unitaires (les intégrations sont exclues par addopts)
 ```
 
-Les intégrations, opt-in et nécessitant Docker, se lancent avec `uv run pytest -m integration`.
+`addopts` is `-m 'not integration' --cov=src/n8n_launcher
+--cov-report=term-missing`, so a plain `pytest` runs the unit suite with
+coverage. The integrations need a Docker daemon:
+`uv run pytest tests/integration -m integration`.
 
 ### Ce que fait la CI
 
-Le fichier `.github/workflows/ci.yml` enchaîne 4 jobs sur chaque PR (branches `dev`/`main`) :
+`.github/workflows/ci.yml` déclenche 4 jobs sur chaque PR visant `dev` ou
+`main` :
 
-1. **`lint`** — `ubuntu-latest`. `ruff check .`, `ruff format --check .` et `basedpyright`. Échoue si le code est sale ; bloque tous les jobs suivants.
-2. **`test`** — matrix `ubuntu` / `windows` / `macos` (Python 3.12, `fail-fast: false`). Installe les deps via `uv sync --frozen`, lance `pytest` et vérifie la couverture `--cov-fail-under=80`. Chaque OS upload son rapport JUnit (`pytest-report-<os>.xml`). Aucun toolkit graphique n'est installé ni invoqué : la suite tourne telle quelle sur un runner sans écran, `xvfb-run` n'a plus lieu d'être.
-3. **`integration`** — `ubuntu-latest`, en parallèle de `test`. Lance `tests/integration` (Docker requis) : déploiement distant (`install_server`, `publish`, hook `post-receive`) et statut d'exécution distant.
-4. **`build`** — après `test`, produit le `.dmg`/`.exe`/binaire et les upload.
+1. **`lint`** — `ubuntu-latest` : `ruff check .`, `ruff format --check .` puis
+   `basedpyright`. Échoue si le code est sale ; bloque `test` et `integration`.
+2. **`test`** — matrix `ubuntu-latest` / `macos-latest` / `windows-latest`,
+   `fail-fast: false` : `uv sync --frozen`, `pytest --cov-fail-under=80
+   --junitxml=pytest-report-<os>.xml`, upload du rapport par OS. Aucun toolkit
+   graphique n'est installé ni invoqué, donc ni `python3-tk` ni `xvfb` : la
+   suite tourne telle quelle sur un runner sans écran.
+3. **`integration`** — `ubuntu-latest`, en parallèle de `test` : `pytest
+   tests/integration -m integration`, `timeout-minutes: 60`. Linux seulement,
+   parce que le sandbox sshd est un conteneur Linux et que le harness atteint le
+   n8n déployé par un tunnel SSH inverse. Le runner ubuntu a déjà le socket
+   Docker par défaut, donc aucun `N8N_LAUNCHER_TEST_DOCKER_SOCKET` n'est requis.
+4. **`build`** — après `test` : `scripts/build.py` sur les trois OS,
+   `scripts/build_appimage.sh` sur la jambe ubuntu, puis upload de chaque
+   artifact.
 
-Les jobs **`parity`** et les suites `tests/test_structure.py` / `tests/test_parity.py` ont été supprimés avec l'interface : ils capturaient l'arbre des widgets sous un Xvfb et comparaient les trois OS entre eux, ce qui n'avait de sens que tant que ces arbres existaient.
+Les jobs **`parity`** et les suites `tests/test_structure.py` /
+`tests/test_parity.py` ont été supprimés avec l'interface : ils capturaient
+l'arbre des widgets sous un Xvfb et comparaient les trois OS entre eux.
 
-## Installation
-
-### macOS — no paid Apple Developer account needed
-
-The macOS build is ad-hoc signed but **not notarized**. Three free routes avoid the Gatekeeper block:
-
-**1. Terminal installer (recommended, reliable on macOS 15+).** Downloading with `curl` never adds the quarantine attribute:
-
-```bash
-curl -fsSL https://github.com/GabrielBass-hash/n8nWorkspaceManager/releases/latest/download/install_macos.sh | bash
-```
-
-Or install a local build:
-
-```bash
-bash scripts/install_macos.sh -f dist/n8n-launcher-macos.dmg
-```
-
-**2. De-quarantine an app you already downloaded:**
-
-```bash
-bash scripts/dequarantine.sh
-bash scripts/dequarantine.sh /path/to/n8n-launcher.app
-```
-
-**3. Manual bypass (no terminal).** Right-click `n8n-launcher.app` → *Open* → *Open*. macOS 15+ re-applies the quarantine after a relaunch, so prefer option 1.
-
-- **Windows**: run or pin `n8n-launcher.exe` from the taskbar / Start menu.
-- **Linux**: make the AppImage executable and launch it — it integrates with your desktop environment's app menu.
-
-The bundle is the same headless launcher: it logs that no interface is available and exits.
+`.github/workflows/release.yml` ne se déclenche que sur un push vers `main` :
+il lit `__version__`, la compare au dernier tag, et ne tag/build/publie que si
+la version a bougé. Il construit la même matrix que `build` et joint tous les
+artifacts à la GitHub Release.
 
 ## Releases
 
-The launcher version is a strict SemVer (`MAJOR.MINOR.PATCH`), defined in a single place — `__version__` in `src/n8n_launcher/__init__.py` (currently **5.0.3**). `pyproject.toml` inherits it (`dynamic = ["version"]`), `scripts/build.py` embeds it into the bundle and `platform/updater.py` compares it against GitHub releases. Bump it by hand in `__init__.py` before a release.
-
-Releases are published **only from `main`**. When a push to `main` carries a new source version, the release workflow tags it (`v<version>`), runs the tests, builds the per-OS distribution, and attaches all three artifacts to a GitHub Release. Pushes that do not change the version are skipped.
+The version is a strict SemVer (`MAJOR.MINOR.PATCH`) declared in exactly one
+place — `__version__` in `src/n8n_launcher/__init__.py` (currently **5.0.3**).
+`pyproject.toml` inherits it through `dynamic = ["version"]`, `scripts/build.py`
+embeds it in the bundle, and `platform/updater.py` compares it against the
+GitHub releases. Bump it by hand, in a PR, before releasing.
