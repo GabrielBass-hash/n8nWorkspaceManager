@@ -87,6 +87,13 @@ Linux AppImage). `addopts` is `-m 'not integration' --cov=src/n8n_launcher
 --cov-report=term-missing`, so a plain `pytest` runs the unit suite with
 coverage.
 
+`test` is the only job that installs the Qt runtime libraries (`libegl1`, …)
+because it is the only one that runs a Qt test. `integration` therefore passes
+`-p no:pytest-qt`: the plugin imports `QtGui` from its own `pytest_configure`,
+before any test is collected, and on a runner without those libraries that is an
+`INTERNALERROR> ImportError: libEGL.so.1` — a dead job, not a failed test. Any
+new job that runs pytest has to pick one side of that trade-off explicitly.
+
 ## Test structure
 
 - `tests/unit/` — self-contained, no external services, run by default. Mirrors

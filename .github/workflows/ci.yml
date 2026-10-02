@@ -134,8 +134,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      # ``-p no:pytest-qt`` is not cosmetic: the plugin imports QtGui from its
+      # ``pytest_configure``, before any test runs, and PySide6.QtGui links
+      # against libEGL/libGL that this job deliberately does not install (it has
+      # no Qt test to run). Without the flag the whole session dies with an
+      # INTERNALERROR ``ImportError: libEGL.so.1`` instead of a test result.
       - name: Run integration tests
-        run: uv run pytest tests/integration -m integration --junitxml=pytest-report-integration.xml
+        run: uv run pytest tests/integration -m integration -p no:pytest-qt --junitxml=pytest-report-integration.xml
         timeout-minutes: 60
 
       - name: Upload pytest report
