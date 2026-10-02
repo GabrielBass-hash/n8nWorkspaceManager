@@ -101,10 +101,16 @@ class WorkspaceActions(QObject):
         )
 
     def stop(self, workspace: Workspace) -> None:
-        """Stop *workspace* in the background."""
+        """Stop *workspace* in the background, exporting and pushing first.
+
+        ``stop_with_sync`` and not ``stop``: a user who stops one workspace by
+        hand expects the workflows they just built in n8n to reach the
+        repository, exactly as they would by closing the app. It is the call
+        whose docstring has promised this since it was written.
+        """
         self._dispatch(
             "Arrêt impossible",
-            lambda: self._manager.stop(workspace.id),
+            lambda: self._manager.stop_with_sync(workspace.id),
         )
 
     def delete(self, workspace: Workspace) -> None:

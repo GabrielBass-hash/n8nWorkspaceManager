@@ -32,6 +32,9 @@ class _Manager:
     def stop(self, workspace_id: str) -> Workspace:
         return self._record("stop", workspace_id)
 
+    def stop_with_sync(self, workspace_id: str) -> Workspace:
+        return self._record("stop_with_sync", workspace_id)
+
     def delete(self, workspace_id: str) -> Workspace:
         return self._record("delete", workspace_id)
 
@@ -71,9 +74,10 @@ def test_open_calls_the_manager(qt_app) -> None:
 
 
 def test_stop_calls_the_manager(qt_app) -> None:
+    """A manual stop exports and pushes: the work a close sequence would do."""
     manager = _Manager()
     _actions(manager).stop(_workspace())
-    assert manager.calls == [("stop", ("ws",), {})]
+    assert manager.calls == [("stop_with_sync", ("ws",), {})]
 
 
 def test_delete_calls_the_manager(qt_app) -> None:

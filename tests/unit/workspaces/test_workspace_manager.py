@@ -821,7 +821,7 @@ def test_stop_with_sync_export_failure_does_not_block_stop(tmp_path: Path) -> No
     assert store.load().workspaces[0].state is WorkspaceState.STOPPED
 
 
-def test_stop_with_sync_skips_export_when_not_running(tmp_path: Path) -> None:
+def test_stop_with_sync_skips_export_when_already_stopped(tmp_path: Path) -> None:
     launcher, store, _, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
 
@@ -834,6 +834,81 @@ def test_stop_with_sync_skips_export_when_not_running(tmp_path: Path) -> None:
     run.assert_not_called()
     sync.assert_not_called()
     assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
+def test_stop_with_sync_exports_a_broken_workspace_before_stopping_it(tmp_path: Path) -> None:
+    """An errored workspace can still hold workflows worth keeping."""
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = _running_git_workspace(launcher, store, tmp_path)
+    config = store.load()
+    config.workspaces[0].state = WorkspaceState.ERROR
+    store.save(config)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    with (
+        patch("n8n_launcher.workspaces.manager.SyncRunner") as run,
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch.object(launcher, "sync_git") as sync,
+    ):
+        launcher.stop_with_sync(workspace.id)
+
+    run.return_value.export_all.assert_called_once()
+    sync.assert_called_once()
+
+
+@pytest.mark.parametrize("state", [WorkspaceState.ERROR, WorkspaceState.STARTING])
+def test_stop_brings_down_a_stack_that_is_not_reported_running(
+    tmp_path: Path, state: WorkspaceState
+) -> None:
+    """The dead end: containers up, state not RUNNING, and nobody could stop it."""
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].state = state
+    store.save(config)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.stop(workspace.id)
+
+    docker.down.assert_called_once()
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
+@pytest.mark.parametrize("state", [WorkspaceState.ERROR, WorkspaceState.STARTING])
+def test_a_stop_of_a_live_but_unreported_stack_passes_through_stopping(
+    tmp_path: Path, state: WorkspaceState
+) -> None:
+    """The card has to say « Arrêt… » while the teardown runs, whatever the state."""
+    launcher, store, _, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].state = state
+    store.save(config)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    seen: list[WorkspaceState] = []
+    launcher.add_observer(_StateWatcher(seen))
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.stop(workspace.id)
+
+    assert WorkspaceState.STOPPING in seen
+
+
+class _StateWatcher:
+    """Record every state the manager publishes, in order."""
+
+    def __init__(self, seen: list[WorkspaceState]) -> None:
+        self._seen = seen
+
+    def workspaces_changed(self) -> None:
+        return None
+
+    def workspace_changed(self, workspace: Workspace) -> None:
+        self._seen.append(workspace.state)
 
 
 def test_git_init_workspace_initializes_and_persists_remote(tmp_path: Path) -> None:

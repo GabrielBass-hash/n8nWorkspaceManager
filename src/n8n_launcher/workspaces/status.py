@@ -23,6 +23,29 @@ class StatusTone(StrEnum):
     ERROR = "error"
 
 
+class WorkspaceAction(StrEnum):
+    """What a card can be asked to do; the view binds it to a gesture."""
+
+    OPEN = "open"
+    STOP = "stop"
+    DELETE = "delete"
+
+
+@dataclass(frozen=True)
+class CardAction:
+    """One offered action: its label, and whether it currently applies.
+
+    The label lives here rather than in a menu builder so that what the user
+    reads and what the tests assert are the same string. ``destructive`` marks
+    the action a view must confirm before running.
+    """
+
+    action: WorkspaceAction
+    label: str
+    enabled: bool
+    destructive: bool = False
+
+
 #: French label for each persisted state.
 _LABELS: dict[WorkspaceState, str] = {
     WorkspaceState.STOPPED: "Arrêté",
@@ -69,12 +92,19 @@ def can_start(state: WorkspaceState) -> bool:
 
 
 def can_stop(state: WorkspaceState) -> bool:
-    """Return True only for a fully running workspace.
+    """Return True whenever something is still up that a teardown can remove.
 
-    A workspace mid-start is not offered a stop button: the start is already
-    holding the git/DB work and a concurrent teardown would fight it.
+    Deliberately wider than ``state is RUNNING``: a failed start leaves the
+    stack running (the error lands *after* ``docker up``) and a crash-looping
+    container is reported as ``STARTING``, so both are states where the user is
+    looking at a live workspace with no way to bring it down. What is left out
+    is only what cannot be running: ``STOPPED`` and the transient ``STOPPING``.
+
+    The guard against stopping a start *this launcher* is in flight is not here
+    — it has no state to look at — it is the actions layer's busy lock, which
+    blocks the gesture for the whole duration of the task.
     """
-    return state is WorkspaceState.RUNNING
+    return state not in (WorkspaceState.STOPPED, WorkspaceState.STOPPING)
 
 
 def can_delete(state: WorkspaceState) -> bool:
@@ -112,6 +142,61 @@ def status_for(state: WorkspaceState) -> WorkspaceStatus:
     )
 
 
+#: The action a card's status pill performs, per state. ``None`` means the pill
+#: is a label only: a start or a stop already in flight owns the outcome, and a
+#: second gesture would only race it.
+_PRIMARY_ACTIONS: dict[WorkspaceState, WorkspaceAction | None] = {
+    WorkspaceState.STOPPED: WorkspaceAction.OPEN,
+    WorkspaceState.STARTING: None,
+    WorkspaceState.RUNNING: WorkspaceAction.STOP,
+    WorkspaceState.STOPPING: None,
+    # An errored workspace is offered *open* to stay consistent with what a
+    # double-click already does on it; ``Arrêter`` stays one gesture away in the
+    # card menu, where :func:`can_stop` enables it.
+    WorkspaceState.ERROR: WorkspaceAction.OPEN,
+}
+
+
+def primary_action(state: WorkspaceState) -> WorkspaceAction | None:
+    """Return what a click on *state*'s status pill should do, or ``None``.
+
+    The pill is the one control a card already wears, so it carries the action
+    that needs no second gesture to reach. It is **stop** for a live workspace —
+    the teardown a user cannot reach any other way — and **open** otherwise,
+    matching the double-click rather than inventing a third rule.
+    """
+    return _PRIMARY_ACTIONS[state]
+
+
+def card_actions(state: WorkspaceState) -> tuple[CardAction, ...]:
+    """Return the actions offered on *state*'s card, in display order.
+
+    Every entry is returned whether or not it applies: a disabled item tells the
+    user the action exists and why it is not available right now, which a
+    missing item cannot. There is no separate "Démarrer" entry because opening
+    already starts a workspace Docker is not holding.
+    """
+    status = status_for(state)
+    return (
+        CardAction(
+            action=WorkspaceAction.OPEN,
+            label="Ouvrir",
+            enabled=status.can_open,
+        ),
+        CardAction(
+            action=WorkspaceAction.STOP,
+            label="Arrêter",
+            enabled=status.can_stop,
+        ),
+        CardAction(
+            action=WorkspaceAction.DELETE,
+            label="Supprimer…",
+            enabled=status.can_delete,
+            destructive=True,
+        ),
+    )
+
+
 def summary_line(workspace: Workspace) -> str:
     """Return the one-line sub-title shown under a workspace's name."""
     database = "Postgres managé" if workspace.db.mode is DbMode.MANAGED else "sans base locale"
@@ -122,12 +207,16 @@ def summary_line(workspace: Workspace) -> str:
 
 
 __all__ = [
+    "CardAction",
     "StatusTone",
+    "WorkspaceAction",
     "WorkspaceStatus",
     "can_delete",
     "can_open",
     "can_start",
     "can_stop",
+    "card_actions",
+    "primary_action",
     "state_label",
     "status_for",
     "summary_line",

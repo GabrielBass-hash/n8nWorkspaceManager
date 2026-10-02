@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMessageBox, QPushButton
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.gui.browser import WebAppLaunchError
@@ -175,3 +177,201 @@ def test_busy_locks_the_actions_then_restores_them(qt_app) -> None:
 
     window.workspace_actions.busyChanged.emit(False)
     assert _button(window, "new").isEnabled() is True
+
+
+# --- the card's own gestures ------------------------------------------------
+
+
+def test_the_status_pill_stops_a_running_workspace(qt_app, monkeypatch) -> None:
+    """The gesture that answers « how do I stop this? » without a button."""
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    stop = MagicMock()
+    opened = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "stop", stop)
+    monkeypatch.setattr(window.workspace_actions, "open", opened)
+
+    window.board.pillActivated.emit(window.model.index(0, 0))
+
+    stop.assert_called_once()
+    opened.assert_not_called()
+
+
+def test_the_status_pill_opens_a_stopped_workspace(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
+    opened = MagicMock()
+    stopped = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "open", opened)
+    monkeypatch.setattr(window.workspace_actions, "stop", stopped)
+
+    window.board.pillActivated.emit(window.model.index(0, 0))
+
+    opened.assert_called_once()
+    stopped.assert_not_called()
+
+
+def test_a_pill_click_is_ignored_while_a_task_runs(qt_app, monkeypatch) -> None:
+    """A second lifecycle call would race the one already in flight."""
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    stop = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "stop", stop)
+    window.workspace_actions.busyChanged.emit(True)
+
+    window.board.pillActivated.emit(window.model.index(0, 0))
+
+    stop.assert_not_called()
+
+
+# --- the card menu ---------------------------------------------------------
+
+
+def _build_menu(monkeypatch, window: MainWindow, workspace: Workspace) -> list[QAction | None]:
+    """Run the window's menu builder against a stubbed, non-blocking ``QMenu``.
+
+    The real :class:`QMenu` is stubbed because ``exec`` blocks. The returned list
+    is the menu order, with ``None`` standing for a separator.
+    """
+    built: list[QAction | None] = []
+
+    class _Menu:
+        def __init__(self, *args, **kwargs) -> None:
+            built.clear()
+
+        def addAction(self, label: str) -> QAction:
+            action = QAction(label)
+            built.append(action)
+            return action
+
+        def addSeparator(self) -> None:
+            built.append(None)
+
+        def exec(self, position: QPoint) -> QAction | None:
+            return None  # the user dismissed it
+
+    monkeypatch.setattr("n8n_launcher.gui.window.QMenu", _Menu)
+    window._show_card_menu(workspace, QPoint(0, 0))
+    return built
+
+
+def _menu_entries(monkeypatch, window: MainWindow, workspace: Workspace) -> list[QAction]:
+    """The menu's actionable items, separators dropped."""
+    return [item for item in _build_menu(monkeypatch, window, workspace) if item is not None]
+
+
+def test_the_destructive_item_sits_below_a_separator(qt_app, monkeypatch) -> None:
+    """The divider is what keeps *Supprimer…* from reading as a peer of *Arrêter*."""
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
+    layout = _build_menu(monkeypatch, window, _workspace(WorkspaceState.STOPPED))
+    labels = [None if item is None else item.text() for item in layout]
+    assert labels == ["Ouvrir", "Arrêter", None, "Supprimer…"]
+
+
+def test_the_card_menu_offers_every_action_and_disables_what_cannot_run(
+    qt_app, monkeypatch
+) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    entries = _menu_entries(monkeypatch, window, _workspace(WorkspaceState.RUNNING))
+
+    assert [action.text() for action in entries] == ["Ouvrir", "Arrêter", "Supprimer…"]
+    assert [action.isEnabled() for action in entries] == [True, True, False]
+
+
+def test_a_running_card_menu_refuses_to_delete_it(qt_app, monkeypatch) -> None:
+    """``can_delete`` is the only thing standing between a menu and a lost stack."""
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    entries = _menu_entries(monkeypatch, window, _workspace(WorkspaceState.RUNNING))
+    delete = next(a for a in entries if a.text() == "Supprimer…")
+    assert delete.isEnabled() is False
+
+
+def test_a_stopped_card_menu_allows_delete(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
+    entries = _menu_entries(monkeypatch, window, _workspace(WorkspaceState.STOPPED))
+    delete = next(a for a in entries if a.text() == "Supprimer…")
+    assert delete.isEnabled() is True
+
+
+def test_choosing_delete_asks_first(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
+    deleted = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "delete", deleted)
+    asked = MagicMock(return_value=QMessageBox.StandardButton.Cancel)
+    monkeypatch.setattr("n8n_launcher.gui.window.QMessageBox.question", asked)
+
+    window._confirm_delete(_workspace(WorkspaceState.STOPPED))
+
+    asked.assert_called_once()
+    deleted.assert_not_called()
+
+
+def test_confirming_delete_removes_the_workspace(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
+    deleted = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "delete", deleted)
+    monkeypatch.setattr(
+        "n8n_launcher.gui.window.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.Yes,
+    )
+
+    window._confirm_delete(_workspace(WorkspaceState.STOPPED))
+
+    deleted.assert_called_once()
+
+
+def test_the_card_menu_is_not_offered_while_a_task_runs(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    menu = MagicMock()
+    monkeypatch.setattr(window, "_show_card_menu", menu)
+    window.workspace_actions.busyChanged.emit(True)
+
+    window._on_context_requested(window.model.index(0, 0))
+
+    menu.assert_not_called()
+
+
+# --- the header action must not go stale -----------------------------------
+
+
+def test_the_stop_button_follows_a_state_change_it_did_not_ask_for(qt_app, monkeypatch) -> None:
+    """A reconcile can flip the selected card with no gesture of the user's."""
+    manager = _Manager([_workspace(WorkspaceState.STOPPED)])
+    window = MainWindow(manager)
+    window.board.setCurrentIndex(window.model.index(0, 0))
+    assert _button(window, "stop").isEnabled() is False
+
+    manager._workspaces = [_workspace(WorkspaceState.RUNNING)]
+    window._on_workspace_changed(_workspace(WorkspaceState.RUNNING))
+
+    assert _button(window, "stop").isEnabled() is True
+
+
+def test_the_stop_button_is_re_derived_after_a_full_reload(qt_app) -> None:
+    manager = _Manager([_workspace(WorkspaceState.STOPPED)])
+    window = MainWindow(manager)
+    window.board.setCurrentIndex(window.model.index(0, 0))
+
+    manager._workspaces = [_workspace(WorkspaceState.RUNNING)]
+    window._on_workspaces_changed()
+
+    assert _button(window, "stop").isEnabled() is True
+
+
+def test_the_stop_button_names_the_workspace_it_will_stop(qt_app) -> None:
+    """A greyed button that does not say which card it means reads as broken."""
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    window.board.setCurrentIndex(window.model.index(0, 0))
+    assert _button(window, "stop").toolTip() == "Arrêter « Mon workspace »"
+
+
+def test_the_stop_button_has_no_target_tooltip_when_inapplicable(qt_app) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
+    window.board.setCurrentIndex(window.model.index(0, 0))
+    assert _button(window, "stop").toolTip() == ""
+
+
+def test_busy_disables_the_stop_button_even_on_a_running_card(qt_app) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
+    window.board.setCurrentIndex(window.model.index(0, 0))
+
+    window.workspace_actions.busyChanged.emit(True)
+
+    assert _button(window, "stop").isEnabled() is False

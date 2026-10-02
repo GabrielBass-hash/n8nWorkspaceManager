@@ -1365,14 +1365,19 @@ class WorkspaceManager:
         """Stop a workspace after exporting and Git-syncing its workflows.
 
         Mirrors the GUI close sequence (``CloseController._sync``) so that
-        stopping a single workspace from its row button also persists the
-        latest n8n state to the repository — without this, manual stops left
-        exported changes committed only when the whole app was closed. Exports
-        run best-effort: a failure is logged as a warning and never blocks the
-        stop itself.
+        stopping a single workspace from its card also persists the latest n8n
+        state to the repository — without this, manual stops left exported
+        changes committed only when the whole app was closed. Exports run
+        best-effort: a failure is logged as a warning and never blocks the stop
+        itself.
+
+        The export runs for any state that is not ``STOPPED``, not only for
+        ``RUNNING``: a failed start or a crash-looping container can hold
+        workflows worth keeping, and those are exactly the states a user is
+        driven to stop by hand.
         """
         workspace = self._find(self.store.load(), workspace_id)
-        if workspace.state is WorkspaceState.RUNNING and workspace.api_key:
+        if workspace.state is not WorkspaceState.STOPPED and workspace.api_key:
             try:
                 pipelines_dir = workspace.workflows_dir / "n8nPipelines"
                 SyncRunner(
@@ -1391,8 +1396,11 @@ class WorkspaceManager:
             return workspace
         # Surface a transient "stopping" state before the Docker teardown, so
         # the UI reflects that the workspace is not usable while ``docker down``
-        # runs (the same heavier teardown as a close/stop lifecycle).
-        if workspace.state is WorkspaceState.RUNNING:
+        # runs (the same heavier teardown as a close/stop lifecycle). It is
+        # written for every state that is still up, not only RUNNING: tearing
+        # down an errored or crash-looping workspace takes just as long and the
+        # card has to say so.
+        if workspace.state is not WorkspaceState.STOPPED:
 
             def mark_stopping(config: AppConfig) -> Workspace:
                 current = self._find(config, workspace_id)

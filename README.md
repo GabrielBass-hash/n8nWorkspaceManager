@@ -23,8 +23,11 @@ indisponible* and exits through the same ordered shutdown as a GUI session.
 - `n8n-launcher --self-test` builds the window once over a throwaway config and
   exits 0. It is what the release pipeline runs on the finished artifact.
 
-The window shows one card per workspace (status, port, folder) with *Nouveau* /
-*Démarrer* / *Arrêter*. Long operations (Docker, git) run on
+The window shows one card per workspace (status, port, folder). Double-click a
+card to open its n8n instance — opening a stopped workspace starts it — and
+click its **status pill** to stop a live one; a right-click offers *Ouvrir* /
+*Arrêter* / *Supprimer…*. The header keeps *Nouveau* and an *Arrêter* fallback
+for the selected card. Long operations (Docker, git) run on
 `QThreadPool` workers, and the manager is observed through a plain
 `WorkspaceObserver` protocol — a view renders what it is fed and calls back, it
 never does its own I/O in a paint handler.

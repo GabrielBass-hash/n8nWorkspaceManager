@@ -29,9 +29,9 @@ comment, so the reason is recorded here.
 
 `docs/architecture.md` holds the module map (which file owns a behaviour) and
 the gotchas measured against a real n8n / Docker / Chromium host. Read it when
-you touch `n8n/`, `remote/`, `docker/`, `git/`, `github/`, `gui/browser.py` or
-`gui/window.py`. Do not read it to answer "how do I run the tests" — that is
-§Commands below.
+you touch `n8n/`, `remote/`, `docker/`, `git/`, `github/`, `gui/browser.py`,
+`gui/window.py` or `gui/board.py`. Do not read it to answer "how do I run the
+tests" — that is §Commands below.
 
 Type errors are reported live by the `basedpyright` LSP, which reads
 `pyproject.toml` — the same config `uv run basedpyright` uses, so an editor
@@ -95,7 +95,7 @@ bash scripts/build_appimage.sh      # after build.py produced dist/n8n-launcher
 ```
 
 Gate state at the time of writing: `ruff check` clean, `ruff format --check`
-clean (117 files), `basedpyright` **0 errors**, `pytest` **818 passed / 7
+clean (119 files), `basedpyright` **0 errors**, `pytest` **887 passed / 7
 deselected** (7 = integration), coverage 91 % against a CI floor of
 `--cov-fail-under=80`.
 
@@ -186,12 +186,26 @@ gates `build` (three OS + the Linux AppImage).
   silence a test. The sizes live in `gui_utils/responsive.py`.
 - **GUI actions stay sparse and contextual.** Selection, a standard gesture or an
   existing lifecycle already express most actions; a new button has to justify
-  its discoverability, uniqueness and visual cost. Start belongs to double-clicking
-  a stopped card, stop belongs to the ordered close sequence — do not duplicate
-  either in the header, and do not hide a destructive stop behind an ambiguous
-  gesture. Double-click means **open**, not start: a card already `RUNNING`
-  opens its instance (`can_open`), because "Docker already holds this stack" and
-  "the launcher owns this window" are two different facts.
+  its discoverability, uniqueness and visual cost. Double-click means **open**,
+  not start: a card already `RUNNING` opens its instance (`can_open`), because
+  "Docker already holds this stack" and "the launcher owns this window" are two
+  different facts.
+- **A lifecycle action belongs to the card, not to a button beside it.** A
+  stopped card is started by double-clicking it; a live one is stopped by
+  clicking its **status pill** (`primary_action`), which is the one control the
+  card already wears — the hover ring is what makes it a control, so nothing has
+  to advertise it. The right-click menu (`card_actions`) is the complete,
+  explicitly labelled surface and is where `Supprimer…` lives. Never gate a
+  destructive action behind a gesture whose meaning is not written down, and
+  never add a per-card button: the header keeps only *Nouveau* plus the
+  keyboard-reachable *Arrêter* fallback for the selected card.
+- **A workspace that could still be running must always be stoppable.**
+  `can_stop` is `state not in {STOPPED, STOPPING}` and not `state is RUNNING`:
+  a failed start leaves containers up (the error lands *after* `docker up`) and
+  a crash-looping container is reported `STARTING`, so narrowing it produces a
+  live workspace the user cannot bring down. What blocks a *concurrent* stop is
+  the actions layer's busy lock, not `can_stop` — which is why every card
+  gesture and the menu check it too.
 - **A view never does its own I/O.** Git / GitHub / SSH / Docker work belongs on
   a `QRunnable` (`gui/actions.py`) or an injected callback, never in a paint
   handler or a slot that Qt calls synchronously.
@@ -235,6 +249,17 @@ table or a splitter.
 
 ## Rules that no other file states
 
+- **A stop a user asked for is a close for that workspace.** Every gesture that
+  stops one workspace goes through `manager.stop_with_sync`, never `stop`: it
+  exports the workflows and pushes them, which is exactly what closing the app
+  does. `stop` alone is the internal teardown, and using it from a card gesture
+  loses everything the user just built in n8n until they quit.
+- **A model's `refresh` is a reset, and a reset eats the selection.** The window
+  remembers the selected workspace id and re-selects it afterwards
+  (`MainWindow._on_workspaces_changed`); without that, every reconcile or
+  creation silently cleared the header's target. Re-derive the header actions on
+  *both* notifier signals — a state change with no user gesture behind it is
+  otherwise invisible to the control that acts on it.
 - **Git is serialized per workspace.** Every git lifecycle call runs inside
   `git/manager.py::workspace_git_lock(workflows_dir)`, a reentrant `FileLock` on
   `.n8n-launcher.git.lock` (re-entrant down the call stack of one thread,

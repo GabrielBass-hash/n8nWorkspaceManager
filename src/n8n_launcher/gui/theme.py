@@ -110,6 +110,27 @@ QScrollBar::handle:vertical {{
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0;
 }}
+QMenu {{
+    background-color: {SURFACE_ALT};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+    padding: 4px;
+}}
+QMenu::item {{
+    padding: 6px 24px 6px 12px;
+    border-radius: 6px;
+}}
+QMenu::item:selected {{
+    background-color: {ACCENT};
+}}
+QMenu::item:disabled {{
+    color: {TEXT_DISABLED};
+}}
+QMenu::separator {{
+    height: 1px;
+    margin: 4px 8px;
+    background-color: {BORDER};
+}}
 """
 
 
