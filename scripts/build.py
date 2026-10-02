@@ -317,6 +317,16 @@ def verify_qt_bundle(root: Path) -> list[str]:
     return problems
 
 
+def is_signable_bundle(path: Path) -> bool:
+    """Return True when *path* is a directory ``codesign`` accepts as a bundle.
+
+    A directory is only a bundle if it says so: an ``.app``/``.framework``
+    suffix, or an ``Info.plist`` under ``Contents/``. ``codesign`` refuses
+    anything else with "bundle format unrecognized, invalid, or unsuitable".
+    """
+    return path.suffix in {".app", ".framework"} or (path / "Contents" / "Info.plist").is_file()
+
+
 def sign_macos_bundle(app: Path) -> None:
     """Ad-hoc sign the bundle, deepest nested code first.
 
@@ -336,7 +346,20 @@ def sign_macos_bundle(app: Path) -> None:
     )
     frameworks = contents / "Frameworks"
     if frameworks.is_dir():
-        targets += sorted(frameworks.iterdir(), key=lambda path: len(path.parts), reverse=True)
+        # PyInstaller puts plain directories in there too — the interpreter's
+        # extension modules (``python3__dot__12``), the Qt plugin folders,
+        # ``bcrypt`` — and codesign rejects a directory that is not a bundle.
+        # Their Mach-O files are signed by the walk above and the outer seal
+        # covers the tree, so only real bundles are sealed here.
+        targets += sorted(
+            (
+                path
+                for path in frameworks.iterdir()
+                if not path.is_dir() or is_signable_bundle(path)
+            ),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        )
     for path in targets:
         _run(["codesign", "--force", "--sign", "-", str(path)])
     _run(["codesign", "--force", "--sign", "-", str(app)])
