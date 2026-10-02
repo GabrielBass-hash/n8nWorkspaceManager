@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import requests
 
+from n8n_launcher.gui import browser as browser_module
 from n8n_launcher.gui.browser import (
     WebAppLaunchError,
     WebAppOutcome,
+    _browser_candidates,
     open_web_app,
     workspace_url,
 )
@@ -24,7 +28,13 @@ def _page(target_id: str, url: str) -> dict[str, str]:
 
 
 def _chrome(candidate: str) -> str | None:
-    return "/usr/bin/google-chrome" if candidate == "google-chrome" else None
+    """Stand in for ``shutil.which`` on whatever browser list this host probes.
+
+    The candidates are per-OS (``chromium`` on Linux, an ``.app`` binary on macOS,
+    ``chrome.exe`` on Windows), so a fake pinned to one of the three reports "no
+    Chromium installed" on the other two instead of testing them.
+    """
+    return f"/opt/{candidate}" if candidate in _browser_candidates() else None
 
 
 def _session(pages: list[dict[str, str]] | None = None, *, activate_ok: bool = True) -> MagicMock:
@@ -51,8 +61,32 @@ def _profile(directory: Path, port: int | None = None) -> Path:
     return directory
 
 
+def _candidates(monkeypatch: pytest.MonkeyPatch, os_name: str, sysname: str) -> tuple[str, ...]:
+    """Return the browser names the launcher probes on *os_name*."""
+    monkeypatch.setattr(browser_module.os, "name", os_name)
+    # ``os.uname`` does not exist on Windows, so the Windows case must not need it.
+    monkeypatch.setattr(
+        browser_module.os, "uname", lambda: SimpleNamespace(sysname=sysname), raising=False
+    )
+    return _browser_candidates()
+
+
 def test_workspace_url_points_at_the_local_instance() -> None:
     assert workspace_url(5679) == "http://127.0.0.1:5679"
+
+
+def test_browser_candidates_are_executable_names_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each OS probes its own names, so each list must be usable on its OS."""
+    linux = _candidates(monkeypatch, "posix", "Linux")
+    assert linux and all("/" not in candidate for candidate in linux)
+
+    macos = _candidates(monkeypatch, "posix", "Darwin")
+    assert macos and all(candidate.startswith("/Applications/") for candidate in macos)
+
+    windows = _candidates(monkeypatch, "nt", "Windows")
+    assert windows and all(candidate.endswith(".exe") for candidate in windows)
 
 
 def test_open_web_app_launches_a_window_with_the_launcher_profile(tmp_path: Path) -> None:
@@ -70,14 +104,18 @@ def test_open_web_app_launches_a_window_with_the_launcher_profile(tmp_path: Path
     )
 
     command, kwargs = commands[0]
-    assert command[0] == "google-chrome"
+    # ``which`` only probes presence: the first candidate the host resolves is
+    # what is launched, so the order of the per-OS list is what is pinned here.
+    assert command[0] == _browser_candidates()[0]
     assert f"--app={_ORIGIN}" in command
     assert f"--user-data-dir={tmp_path}" in command
     # A fixed port would be fought over between two launchers and would have to
     # be firewall-friendly; 0 makes Chromium publish the one it chose.
     assert "--remote-debugging-port=0" in command
+    # The window must outlive the launcher: that is a POSIX session, which
+    # Windows has no equivalent for and is therefore left unset.
+    assert kwargs["start_new_session"] is (os.name != "nt")
     # Chromium's own start-up chatter must not land in the launcher's journal.
-    assert kwargs["start_new_session"] is True
     assert kwargs["stdout"] is subprocess.DEVNULL
     assert kwargs["stderr"] is subprocess.DEVNULL
     assert outcome is WebAppOutcome.OPENED
