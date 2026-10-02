@@ -7,6 +7,7 @@ from pathlib import Path
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.gui.actions import WorkspaceActions
 from n8n_launcher.workspaces.dialogs import CreatePlan
+from n8n_launcher.workspaces.manager import Reachable
 
 
 class _Manager:
@@ -22,8 +23,11 @@ class _Manager:
             raise RuntimeError(f"{name} a échoué")
         return _workspace()
 
-    def start(self, workspace_id: str) -> Workspace:
-        return self._record("start", workspace_id)
+    def ensure_serving(self, workspace_id: str) -> Reachable:
+        self.calls.append(("ensure_serving", (workspace_id,), {}))
+        if self._fail:
+            raise RuntimeError("ensure_serving a échoué")
+        return Reachable(workspace=_workspace(), started=True)
 
     def stop(self, workspace_id: str) -> Workspace:
         return self._record("stop", workspace_id)
@@ -60,10 +64,10 @@ def _actions(manager: _Manager) -> WorkspaceActions:
     return WorkspaceActions(manager, executor=_sync_executor)
 
 
-def test_start_calls_the_manager(qt_app) -> None:
+def test_open_calls_the_manager(qt_app) -> None:
     manager = _Manager()
-    _actions(manager).start(_workspace())
-    assert manager.calls == [("start", ("ws",), {})]
+    _actions(manager).open(_workspace())
+    assert manager.calls == [("ensure_serving", ("ws",), {})]
 
 
 def test_stop_calls_the_manager(qt_app) -> None:
@@ -91,16 +95,26 @@ def test_busy_is_announced_around_a_task(qt_app) -> None:
     actions = _actions(_Manager())
     states: list[bool] = []
     actions.busyChanged.connect(states.append)
-    actions.start(_workspace())
+    actions.open(_workspace())
     assert states == [True, False]
+
+
+def test_open_announces_the_reachable_workspace(qt_app) -> None:
+    actions = _actions(_Manager())
+    ready: list[object] = []
+    actions.ready.connect(ready.append)
+
+    actions.open(_workspace())
+
+    assert ready == [Reachable(workspace=_workspace(), started=True)]
 
 
 def test_a_failure_is_reported_with_a_title(qt_app) -> None:
     actions = _actions(_Manager(fail=True))
     failures: list[tuple[str, str]] = []
     actions.failed.connect(lambda title, message: failures.append((title, message)))
-    actions.start(_workspace())
-    assert failures == [("Démarrage impossible", "start a échoué")]
+    actions.open(_workspace())
+    assert failures == [("Ouverture impossible", "ensure_serving a échoué")]
 
 
 def test_creation_announces_the_new_workspace(qt_app) -> None:

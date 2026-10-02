@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from PySide6.QtWidgets import QPushButton
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
+from n8n_launcher.gui.browser import WebAppLaunchError
 from n8n_launcher.gui.card_delegate import CardDelegate
 from n8n_launcher.gui.window import MainWindow
+from n8n_launcher.workspaces.manager import Reachable
 
 
 class _Manager:
@@ -54,6 +57,15 @@ def test_a_populated_board_shows_the_cards(qt_app) -> None:
     assert isinstance(window.board.itemDelegate(), CardDelegate)
 
 
+def test_the_header_does_not_duplicate_contextual_workspace_actions(qt_app) -> None:
+    window = MainWindow(_Manager([_workspace()]))
+
+    assert window.findChild(QPushButton, "new") is not None
+    assert window.findChild(QPushButton, "start") is None
+    assert window.findChild(QPushButton, "stop") is not None
+    assert window.findChild(QPushButton, "stop").isEnabled() is False
+
+
 def test_the_board_selection_reports_the_workspace(qt_app) -> None:
     workspace = _workspace()
     window = MainWindow(_Manager([workspace]))
@@ -76,18 +88,82 @@ def _button(window: MainWindow, name: str) -> QPushButton:
     return button
 
 
-def test_a_stopped_workspace_can_only_be_started(qt_app) -> None:
+def test_double_click_opens_a_stopped_workspace(qt_app, monkeypatch) -> None:
     window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
-    window.board.setCurrentIndex(window.model.index(0, 0))
-    assert _button(window, "start").isEnabled() is True
-    assert _button(window, "stop").isEnabled() is False
+    open_workspace = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "open", open_workspace)
+
+    window.board.doubleClicked.emit(window.model.index(0, 0))
+
+    open_workspace.assert_called_once()
 
 
-def test_a_running_workspace_can_only_be_stopped(qt_app) -> None:
+def test_double_click_opens_a_running_workspace_without_starting_it(qt_app, monkeypatch) -> None:
+    """The gesture on a live card is *open*, never a second ``docker up``."""
     window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
-    window.board.setCurrentIndex(window.model.index(0, 0))
-    assert _button(window, "start").isEnabled() is False
-    assert _button(window, "stop").isEnabled() is True
+    open_workspace = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "open", open_workspace)
+
+    window.board.doubleClicked.emit(window.model.index(0, 0))
+
+    open_workspace.assert_called_once()
+
+
+def test_double_click_is_inert_while_a_start_owns_the_outcome(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace(WorkspaceState.STARTING)]))
+    open_workspace = MagicMock()
+    monkeypatch.setattr(window.workspace_actions, "open", open_workspace)
+
+    window.board.doubleClicked.emit(window.model.index(0, 0))
+
+    open_workspace.assert_not_called()
+
+
+def _record_open(monkeypatch) -> list[tuple[str, bool]]:
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        "n8n_launcher.gui.window.open_web_app",
+        lambda url, *, reuse: calls.append((url, reuse)),
+    )
+    return calls
+
+
+def test_a_ready_workspace_is_opened_as_a_web_app(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace()]))
+    calls = _record_open(monkeypatch)
+
+    window.workspace_actions.ready.emit(Reachable(workspace=_workspace(), started=True))
+
+    assert calls == [("http://127.0.0.1:5678", False)]
+
+
+def test_an_already_running_instance_may_reuse_its_window(qt_app, monkeypatch) -> None:
+    """Nothing was started, so the window already showing it can be raised."""
+    window = MainWindow(_Manager([_workspace()]))
+    calls = _record_open(monkeypatch)
+
+    window.workspace_actions.ready.emit(Reachable(workspace=_workspace(), started=False))
+
+    assert calls == [("http://127.0.0.1:5678", True)]
+
+
+def test_a_failed_open_is_surfaced(qt_app, monkeypatch) -> None:
+    window = MainWindow(_Manager([_workspace()]))
+
+    def refuse(_url: str, *, reuse: bool) -> None:
+        raise WebAppLaunchError("Aucun navigateur Chromium compatible")
+
+    monkeypatch.setattr("n8n_launcher.gui.window.open_web_app", refuse)
+    failures: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        window,
+        "_on_failed",
+        lambda title, message: failures.append((title, message)),
+    )
+
+    window.workspace_actions.ready.emit(Reachable(workspace=_workspace(), started=False))
+
+    assert failures == [("Ouverture de n8n impossible", "Aucun navigateur Chromium compatible")]
 
 
 def test_busy_locks_the_actions_then_restores_them(qt_app) -> None:
@@ -96,8 +172,6 @@ def test_busy_locks_the_actions_then_restores_them(qt_app) -> None:
 
     window.workspace_actions.busyChanged.emit(True)
     assert _button(window, "new").isEnabled() is False
-    assert _button(window, "start").isEnabled() is False
 
     window.workspace_actions.busyChanged.emit(False)
     assert _button(window, "new").isEnabled() is True
-    assert _button(window, "start").isEnabled() is True

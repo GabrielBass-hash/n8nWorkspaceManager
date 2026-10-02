@@ -25,7 +25,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from ..core.models import Workspace
 from ..workspaces.dialogs import CreatePlan
-from ..workspaces.manager import WorkspaceManager
+from ..workspaces.manager import Reachable, WorkspaceManager
 
 #: A blocking unit of work and the two ways it can end.
 Work = Callable[[], object]
@@ -69,6 +69,8 @@ class WorkspaceActions(QObject):
     busyChanged = Signal(bool)
     #: Emitted as ``(title, message)`` when a task raised.
     failed = Signal(str, str)
+    #: Emitted with the :class:`Reachable` whose n8n is ready to be shown.
+    ready = Signal(object)
     #: Emitted with the new :class:`Workspace` once a creation succeeds.
     created = Signal(object)
 
@@ -86,11 +88,16 @@ class WorkspaceActions(QObject):
         self._pending = 0
         self._lock = threading.Lock()
 
-    def start(self, workspace: Workspace) -> None:
-        """Start *workspace* in the background."""
+    def open(self, workspace: Workspace) -> None:
+        """Make *workspace*'s n8n reachable and openable, in the background.
+
+        The manager starts the workspace only when Docker says it is not up,
+        so this is the one action behind both a stopped card and a running one.
+        """
         self._dispatch(
-            "Démarrage impossible",
-            lambda: self._manager.start(workspace.id),
+            "Ouverture impossible",
+            lambda: self._manager.ensure_serving(workspace.id),
+            announce_ready=True,
         )
 
     def stop(self, workspace: Workspace) -> None:
@@ -121,6 +128,7 @@ class WorkspaceActions(QObject):
         work: Work,
         *,
         announce_created: bool = False,
+        announce_ready: bool = False,
     ) -> None:
         """Run *work*, emit ``created`` on success and ``failed`` otherwise."""
         self._begin_busy()
@@ -129,6 +137,8 @@ class WorkspaceActions(QObject):
             self._end_busy()
             if announce_created and isinstance(result, Workspace):
                 self.created.emit(result)
+            if announce_ready and isinstance(result, Reachable):
+                self.ready.emit(result)
 
         def fail(exc: Exception) -> None:
             self._end_busy()

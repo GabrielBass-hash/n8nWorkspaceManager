@@ -150,6 +150,17 @@ coverage.
   metrics; do not add resolution-specific branches or arbitrary dimensions to
   silence a test. A GUI change is not done until the `responsive` tests cover
   its resize and long-content behavior.
+- **GUI actions must be sparse and contextual**: do not add an action button
+  when selection, a standard gesture or an existing lifecycle already expresses
+  the action more naturally. Every new action button must justify its
+  discoverability, uniqueness and visual cost. In particular, workspace start
+  belongs to double-clicking a stopped card, while stopping belongs to the
+  ordered application-close sequence; do not duplicate either action in the
+  header or hide a destructive stop behind an ambiguous gesture. The double
+  click is **open**, not start: a card already in `RUNNING` opens its instance
+  (`can_open` in `workspaces/status.py`), because "Docker already holds this
+  stack" and "the launcher owns this window" are two different facts and only
+  the second one is the view's business.
 - Generic writing conventions: clarity, small functions, no dead code, no
   reinvented stdlib helper, explicit typing (`from __future__ import annotations`
   repo-wide).
@@ -174,12 +185,13 @@ coverage.
 | `gui/workspace_model.py` | `WorkspaceListModel` (roles `WorkspaceRole` / `StatusRole`, `refresh`, `apply_workspace`, `workspace_at`, `status_at`, `index_of`). Qt annotates `rowCount`/`data` with `QModelIndex \| QPersistentModelIndex`; the overrides must be widened to match or basedpyright fails. |
 | `gui/actions.py` | `WorkspaceActions(manager, executor=...)`: signals `busyChanged`/`failed`/`created`, one `_Task(QRunnable)` per call on a `QThreadPool`. The executor is injected, so every test runs synchronously. |
 | `gui/create_panel.py` | `plan_from_fields(...) -> CreatePlan` and `CreateWorkspaceDialog` (objectNames `name`/`directory`/`managed`). It collects; it does not create — the plan goes to the action layer. |
+| `gui/browser.py` | Opens a workspace's n8n as a standalone Chromium window, or **raises the window it already has**. It owns no memory: the decision belongs to the browser, so `open_web_app` returns a `WebAppOutcome` and the view only passes `reuse`. See the Chromium gotcha. |
 | `gui/notifier.py` | `WorkspaceNotifier`: turns manager callbacks into Qt signals. |
 | `gui/theme.py` | Palette, metrics and `STYLESHEET`; `dark_palette()`, `apply_theme(app)`. |
 | `gui/first_launch.py` | `FirstLaunchWizard` (objectNames `email`/`password`/`work_dir`/`hint`) and `prompt_first_launch(store, docker, parent=None) -> bool`, which raises `GuiUnavailable` when there is no display. The rules it enforces live in `core/first_launch.py`. |
 | `core/first_launch.py` | Toolkit-free wizard contract: `SetupWizardError`, `validate_password`, `build_initial_config`. `run_first_launch(store, docker, *, email, password, work_dir) -> AppConfig` refuses unless Docker is available, then writes the config. |
 | `gui_utils/text.py` | The sizing rules, toolkit-free: `ELLIPSIS`, `ellipsize`, `column_widths` (the pure rule — a column's content, nothing else) and `fit_budget` (the same rule with a room). `measure` is a **parameter**: a `Callable[[str], int]`, not a widget call. See **The sizing rules**. |
-| `workspaces/manager.py` | Central controller — CRUD + start/stop lifecycle, and the only `WorkspaceObserver` publisher (`add_observer` / `remove_observer`, emitting *after* each commit). Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, workflow import and **Git synchronization** (auto-pull on start, auto-push on close). States run RUNNING → **STOPPING** → STOPPED, with `docker down` between the two writes. `workspace_branch()` gives every repo `dev`. `install_server()` / `publish()` implement the remote deployment; `server_health` / `server_logs` / `server_deploy_status` / `server_execution_status` are the read-only supervision reads. |
+| `workspaces/manager.py` | Central controller — CRUD + start/stop lifecycle, and the only `WorkspaceObserver` publisher (`add_observer` / `remove_observer`, emitting *after* each commit). Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, workflow import and **Git synchronization** (auto-pull on start, auto-push on close). States run RUNNING → **STOPPING** → STOPPED, with `docker down` between the two writes. `workspace_branch()` gives every repo `dev`. `install_server()` / `publish()` implement the remote deployment; `server_health` / `server_logs` / `server_deploy_status` / `server_execution_status` are the read-only supervision reads. `ensure_serving()` is the "open this instance" path: it asks **Docker** (`live_state`), not the persisted state, whether a stack is up — so a workspace started outside the launcher, or before a crash that left `STOPPED` behind, is opened rather than started twice — and returns `Reachable(workspace, started)` so the caller knows whether the window on screen can still be alive. |
 | `workspaces/close.py` | `CloseSequence`: the ordered shutdown (reconcile → export → git sync → stop, per workspace), with every decision injected as a `CloseHooks` callback (`on_progress`, `on_sync_failed`, `on_stop_failed`, `on_push_failed`) so it runs headless and is testable without a window. |
 | `workspaces/dialogs.py` | What the creation and Git forms *collect*, not how they looked: `CreatePlan`, `GitConfigChoice`, `GitClonePlan`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan`, plus `fresh_managed_db_config`, `default_creation_db` (managed when `has_db_layout()` — a `db/schema.sql` or a `db/migrations/*.sql`), `int_or` and `repo_name_from`. |
 | `workspaces/ci.py` | The CI harness for a workspace's *own* repo: remote-URL → `owner/repo` parsing, workflow discovery (mirrors import — `n8nPipelines/*.json` + root `*.json` minus a blocklist, **deduped by basename in favour of `n8nPipelines/`**), the machine-managed `.n8n-tests/tests.json` selection, and `render_harness()`, which emits the workflow YAML plus a stdlib-only `validate.py` / `runner.py` (marker-commented, image pinned via token substitution). It also holds the two rules with no caller left: `workflow_eligibility(export, credentials)` and `load_export`. `save_ci_selection()` does **not** enforce the rule — it writes whatever the caller ticked, which is why a caller that can tick has to ask. |
@@ -480,6 +492,34 @@ are read through `github/api.py`.
   array and a numeric `expiresAt`. Startup returns transient HTML until n8n is
   ready — the bootstrap retries until it gets JSON. The scope list is shared with
   the generated deploy script through `n8n/scopes.py`, never duplicated.
+- **`/healthz` is liveness, not readiness.** Measured on n8n 2.40 after a
+  container start: `/healthz` answers 200 at ~2.8 s while `GET /` still returns
+  HTTP 404 `Cannot GET /`, and only at ~4.7 s does `/healthz/readiness` go 200 —
+  the exact moment the frontend handler is mounted and `/` serves the 52 KB
+  editor shell. Anything that opens the UI (or calls the API) must gate on
+  `/healthz/readiness`, which is what `n8n/owner.py::wait_for_n8n` polls;
+  gating on `/healthz` produces a browser window the user cannot use. An n8n
+  without that route answers 404, and the wait falls back to the UI root.
+- **Reopening a browser window is not a URL problem.** Measured on Chromium
+  154: `--app=<same URL>` twice leaves **two** windows, because n8n routes
+  client-side (a fresh window on `/` ends on `/signin?redirect=%252F` with no
+  HTTP redirect at all) and Chromium matches the URL it is given against the
+  window's *current* URL. So `gui/browser.py` does not track URLs: it opens
+  windows in a launcher-owned profile (`core/paths.py::browser_profile_dir`),
+  reads the port Chromium published in `DevToolsActivePort`
+  (`--remote-debugging-port=0`), and matches the instance's **origin** in
+  `/json/list` before calling `/json/activate/<id>` ("Target activated"), which
+  raises that window whatever page of the SPA it is showing. Two consequences
+  worth keeping: the n8n session cookie lives in that profile, so reopening no
+  longer asks for a sign-in every time; and `reuse=False` (a workspace that was
+  just started) closes the window from the instance's previous life, which can
+  only be showing the connection that died with it. The DevTools endpoint binds
+  loopback only and exposes a profile that already sits, in readable form, in the
+  user's own config directory — that is the whole security delta. Two races are
+  handled as "not ready": the port file appears slightly before the endpoint
+  accepts, and a crashed browser leaves the file behind; both fall back to
+  launching a window. Chromium's stderr is `DEVNULL` on purpose — its GTK and
+  GCM chatter would otherwise land in the launcher's journal.
 - **Public API is schema-strict**: `POST /workflows` validates with
   `additionalProperties: false`; sending read-only/server export fields in the
   body returns HTTP 400 "must NOT have additional properties". Only the

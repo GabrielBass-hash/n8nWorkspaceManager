@@ -155,6 +155,94 @@ def test_start_and_stop_update_state(tmp_path: Path) -> None:
     docker.down.assert_called_once()
 
 
+def test_start_waits_for_n8n_health_before_marking_running(tmp_path: Path) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    docker.status.return_value = ComposeStatus(
+        raw_output='{"Service":"n8n","State":"running"}\n',
+        returncode=0,
+    )
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
+        patch("n8n_launcher.workspaces.manager.wait_for_n8n") as wait,
+    ):
+        started = launcher.start(workspace.id)
+
+    wait.assert_called_once_with(f"http://127.0.0.1:{workspace.port}")
+    assert started.state is WorkspaceState.RUNNING
+    assert store.load().workspaces[0].state is WorkspaceState.RUNNING
+
+
+def test_ensure_serving_starts_a_stopped_workspace(tmp_path: Path) -> None:
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
+        patch("n8n_launcher.workspaces.manager.wait_for_n8n"),
+    ):
+        reachable = launcher.ensure_serving(workspace.id)
+
+    assert reachable.started is True
+    assert reachable.workspace.state is WorkspaceState.RUNNING
+    docker.up.assert_called_once()
+
+
+def test_ensure_serving_never_starts_what_docker_already_runs(tmp_path: Path) -> None:
+    """A stack brought up outside the launcher is served, not started again."""
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    # A crash can leave STOPPED in SQLite while the container never went down.
+    docker.status.return_value = ComposeStatus(
+        raw_output='{"Service":"n8n","State":"running"}\n',
+        returncode=0,
+    )
+
+    with (
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch("n8n_launcher.workspaces.manager.wait_for_n8n") as wait,
+    ):
+        reachable = launcher.ensure_serving(workspace.id)
+
+    assert reachable.started is False
+    assert reachable.workspace.id == workspace.id
+    assert reachable.workspace.port == workspace.port
+    docker.up.assert_not_called()
+    wait.assert_called_once_with(f"http://127.0.0.1:{workspace.port}", timeout=20.0)
+
+
+def test_ensure_serving_opens_an_up_instance_that_never_answers(tmp_path: Path, caplog) -> None:
+    """A running-but-broken stack is the page's error, not a blocked open."""
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    docker.status.return_value = ComposeStatus(
+        raw_output='{"Service":"n8n","State":"running"}\n',
+        returncode=0,
+    )
+
+    with (
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch(
+            "n8n_launcher.workspaces.manager.wait_for_n8n",
+            side_effect=OwnerSetupError("n8n n'est pas prêt"),
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        reachable = launcher.ensure_serving(workspace.id)
+
+    assert reachable.workspace.id == workspace.id
+    assert "without a ready n8n" in caplog.text
+
+
 def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
     launcher, _store, docker, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
@@ -277,6 +365,22 @@ def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
         changed = launcher.reconcile_all()
 
     assert changed == 0
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
+def test_reconcile_all_clears_stale_active_state_when_docker_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].state = WorkspaceState.RUNNING
+    store.save(config)
+    docker.list_project_states.side_effect = RuntimeError("Docker unavailable")
+
+    changed = launcher.reconcile_all()
+
+    assert changed == 1
     assert store.load().workspaces[0].state is WorkspaceState.STOPPED
 
 

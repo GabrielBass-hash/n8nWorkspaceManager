@@ -203,6 +203,10 @@ class LauncherApp:
             )
         app = ensure_application()
         apply_theme(app)
+        # Reconcile persisted lifecycle state before the first paint. A crash
+        # can leave RUNNING in SQLite even though Docker and n8n are gone.
+        with contextlib.suppress(Exception):
+            self.manager.reconcile_all()
         window = MainWindow(self.manager)
         window.show()
         # Gives the interpreter a periodic callback so a Python signal handler

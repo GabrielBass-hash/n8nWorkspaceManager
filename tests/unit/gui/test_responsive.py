@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -69,27 +68,14 @@ def test_main_window_remains_contained_across_viewports(qt_app, qtbot, size: QSi
     assert header is not None
     assert_rect_within("MainWindow.header", _rect(header), central_bounds, viewport)
 
-    controls = [window.findChild(QWidget, name) for name in ("new", "start", "stop")]
-    assert all(control is not None for control in controls)
-    for control in controls:
-        assert control is not None
-        assert_rect_within(
-            f"MainWindow.{control.objectName()}",
-            _rect(control),
-            _rect(header),
-            viewport,
-        )
-
-    for first, second in pairwise(controls):
-        assert first is not None and second is not None
-        first_rect = _rect(first)
-        second_rect = _rect(second)
-        assert not first_rect.intersects(second_rect), (
-            "FAIL - Responsive layout violation\n"
-            f"Component: MainWindow.{first.objectName()} / {second.objectName()}\n"
-            f"Viewport: {viewport.width}x{viewport.height}\n"
-            "Reason: controls overlap"
-        )
+    control = window.findChild(QWidget, "new")
+    assert control is not None
+    assert_rect_within(
+        "MainWindow.new",
+        _rect(control),
+        _rect(header),
+        viewport,
+    )
 
     assert_rect_within("MainWindow.board", _rect(window.board), central_bounds, viewport)
     assert window.minimumSize() == QSize(1024, 640)

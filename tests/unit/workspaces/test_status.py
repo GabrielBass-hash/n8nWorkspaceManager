@@ -10,6 +10,7 @@ from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.workspaces.status import (
     StatusTone,
     can_delete,
+    can_open,
     can_start,
     can_stop,
     state_label,
@@ -56,6 +57,19 @@ def test_can_stop_is_true_only_for_running() -> None:
 def test_can_delete_is_true_only_for_stopped() -> None:
     for state in WorkspaceState:
         assert can_delete(state) is (state is WorkspaceState.STOPPED)
+
+
+def test_can_open_covers_a_running_workspace_not_only_a_stopped_one() -> None:
+    """A card you can open is not the same as a card you can start."""
+    for state in WorkspaceState:
+        assert can_open(state) is (
+            state in {WorkspaceState.STOPPED, WorkspaceState.ERROR, WorkspaceState.RUNNING}
+        )
+
+
+def test_can_open_is_refused_while_a_transition_owns_the_outcome() -> None:
+    assert can_open(WorkspaceState.STARTING) is False
+    assert can_open(WorkspaceState.STOPPING) is False
 
 
 def test_labels_are_the_french_ones() -> None:

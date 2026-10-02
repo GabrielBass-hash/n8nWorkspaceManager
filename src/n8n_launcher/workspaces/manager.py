@@ -8,7 +8,7 @@ import secrets
 import shlex
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,7 +33,7 @@ from ..database import (
     has_db_layout,
 )
 from ..docker.compose import compose_project_name, render_remote_compose, write_compose
-from ..docker.manager import DockerManager, parse_compose_status
+from ..docker.manager import ComposeStatus, DockerManager, parse_compose_status
 from ..git import (
     GitError,
     ensure_local_excludes,
@@ -63,7 +63,7 @@ from ..git import (
 from ..github import auth
 from ..github.api import GitHubClient, GitHubError
 from ..n8n.api import N8nApiClient, N8nApiError
-from ..n8n.owner import OwnerSetup
+from ..n8n.owner import OwnerSetup, OwnerSetupError, wait_for_n8n
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
 from ..remote import (
@@ -95,6 +95,12 @@ logger = logging.getLogger(__name__)
 # plus the workflow/credential import, which is far past the 30 s that every
 # other git call gets.
 _PUBLISH_PUSH_TIMEOUT = 300
+
+# Grace given to an instance Docker already reports as running before the
+# launcher opens it anyway: long enough for a just-restarted n8n to finish
+# booting (~5 s measured), short enough that a container that will never serve
+# is reported by the page itself instead of a silent wait.
+_SERVE_GRACE_TIMEOUT = 20.0
 
 
 def _is_push_rejection(exc: GitError) -> bool:
@@ -128,6 +134,20 @@ def _project_live_state(projects: dict[str, dict[str, str]], project: str) -> Wo
 
 class WorkspaceError(RuntimeError):
     """Raised when a workspace operation cannot be completed."""
+
+
+@dataclass(frozen=True)
+class Reachable:
+    """A workspace whose n8n answers, and whether reaching it started the stack.
+
+    ``started`` is what separates "raise the window already showing this
+    instance" from "open a fresh one": after a start, any window left over from
+    the instance's previous life can only be showing the connection that died
+    with it.
+    """
+
+    workspace: Workspace
+    started: bool
 
 
 class WorkspaceObserver(Protocol):
@@ -240,18 +260,41 @@ class WorkspaceManager:
         try:
             projects = self.docker.list_project_states()
         except Exception:
-            return 0
+            try:
+                config = self.store.load()
+            except Exception:
+                return 0
+            updates = {
+                workspace.id: WorkspaceState.STOPPED
+                for workspace in config.workspaces
+                if workspace.state is not WorkspaceState.STOPPED
+            }
+            if not updates:
+                return 0
+
+            def mark_stopped(config: AppConfig) -> None:
+                for workspace in config.workspaces:
+                    if workspace.id in updates:
+                        workspace.state = WorkspaceState.STOPPED
+
+            try:
+                self.store.mutate(mark_stopped)
+            except Exception:
+                return 0
+            self._notify_workspaces_changed()
+            return len(updates)
         try:
             config = self.store.load()
         except Exception:
             return 0
         updates: dict[str, WorkspaceState] = {}
         for workspace in config.workspaces:
-            # Workspaces whose Compose file is gone (e.g. a partial folder
-            # deletion) keep their stored state and are never force-stopped.
+            # Without a Compose file there is no launcher-managed stack that
+            # could still be running, so stale active states are stopped.
             if not compose_file(workspace.id).exists():
-                continue
-            live = _project_live_state(projects, compose_project_name(workspace))
+                live = WorkspaceState.STOPPED
+            else:
+                live = _project_live_state(projects, compose_project_name(workspace))
             if live is not workspace.state:
                 updates[workspace.id] = live
         if not updates:
@@ -1247,6 +1290,9 @@ class WorkspaceManager:
         logger.info("Starting %s on port %d", workspace.name, workspace.port)
         try:
             self.docker.up(workspace, compose)
+            docker_status = self.docker.status(workspace, compose)
+            if isinstance(docker_status, ComposeStatus):
+                wait_for_n8n(f"http://127.0.0.1:{workspace.port}")
             if workspace.db.mode is DbMode.MANAGED:
                 self.migrations.ensure(workspace, compose)
                 self.migrations.apply(
@@ -1282,6 +1328,30 @@ class WorkspaceManager:
         self._notify_workspace_changed(running)
         logger.info("Started %s on port %d", workspace.name, workspace.port)
         return running
+
+    def ensure_serving(self, workspace_id: str) -> Reachable:
+        """Return the workspace with a reachable n8n, starting it only if needed.
+
+        Docker — not the persisted state — decides whether a stack is up: a
+        workspace started outside the launcher (or started before a crash that
+        left ``STOPPED`` behind) is already serving and must be opened, never
+        started a second time. A start waits for readiness and *fails* if n8n
+        never answers; an instance that is merely up gets
+        ``_SERVE_GRACE_TIMEOUT`` to answer and is opened either way, because a
+        running-but-broken stack is the page's own error to report.
+
+        The returned ``started`` flag is what tells a caller opening the instance
+        whether the window left over from its previous life is still the one to
+        raise, or a dead one to replace.
+        """
+        workspace = self._find(self.store.load(), workspace_id)
+        if self.live_state(workspace) is not WorkspaceState.RUNNING:
+            return Reachable(workspace=self.start(workspace_id), started=True)
+        try:
+            wait_for_n8n(f"http://127.0.0.1:{workspace.port}", timeout=_SERVE_GRACE_TIMEOUT)
+        except OwnerSetupError as exc:
+            logger.warning("Opening %s without a ready n8n: %s", workspace.name, exc)
+        return Reachable(workspace=workspace, started=False)
 
     def _workspace_db_mode(self, workspace_id: str) -> DbMode:
         """Return the persisted DB mode of a workspace (for pre-start checks)."""

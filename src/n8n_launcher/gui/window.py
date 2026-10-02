@@ -10,7 +10,7 @@ board must not pretend to hold a row.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QModelIndex, QSize, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -36,10 +36,11 @@ from ..gui_utils.responsive import (
     Viewport,
     initial_window_size,
 )
-from ..workspaces.manager import WorkspaceManager
+from ..workspaces.manager import Reachable, WorkspaceManager
 from ..workspaces.status import status_for
 from . import theme
 from .actions import WorkspaceActions
+from .browser import WebAppLaunchError, open_web_app, workspace_url
 from .card_delegate import CARD_HEIGHT, CARD_WIDTH, CardDelegate
 from .create_panel import CreateWorkspaceDialog
 from .notifier import WorkspaceNotifier
@@ -103,7 +104,10 @@ class MainWindow(QMainWindow):
         selection = self._board.selectionModel()
         if selection is not None:
             selection.selectionChanged.connect(self._sync_actions)
+
+        self._board.doubleClicked.connect(self._on_double_click)
         self._actions.failed.connect(self._on_failed)
+        self._actions.ready.connect(self._on_ready)
         self._actions.busyChanged.connect(self._on_busy)
         self._sync_actions()
 
@@ -121,15 +125,12 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         self._new_button = QPushButton("Nouveau", header)
         self._new_button.setObjectName("new")
-        self._start_button = QPushButton("Démarrer", header)
-        self._start_button.setObjectName("start")
         self._stop_button = QPushButton("Arrêter", header)
         self._stop_button.setObjectName("stop")
         self._new_button.clicked.connect(self._on_new)
-        self._start_button.clicked.connect(self._on_start)
         self._stop_button.clicked.connect(self._on_stop)
-        for button in (self._new_button, self._start_button, self._stop_button):
-            row.addWidget(button)
+        row.addWidget(self._new_button)
+        row.addWidget(self._stop_button)
         self._header_row = row
         return header
 
@@ -192,33 +193,51 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._actions.create(dialog.plan(), dialog.workflow_dir())
 
-    def _on_start(self) -> None:
-        """Start the selected workspace, if any."""
-        workspace = self.selected_workspace()
-        if workspace is not None:
-            self._actions.start(workspace)
+    def _on_double_click(self, index: QModelIndex) -> None:
+        """Open a workspace's n8n: start it when stopped, raise it when running.
+
+        Double-click is the whole gesture for every state that can be opened —
+        including a **running** workspace, whose n8n Docker already holds and
+        which a second ``docker up`` would only race.
+        """
+        workspace = self._model.workspace_at(index)
+        if workspace is not None and status_for(workspace.state).can_open:
+            self._actions.open(workspace)
 
     def _on_stop(self) -> None:
-        """Stop the selected workspace, if any."""
+        """Stop the selected workspace, if allowed."""
         workspace = self.selected_workspace()
-        if workspace is not None:
+        if workspace is not None and status_for(workspace.state).can_stop:
             self._actions.stop(workspace)
 
     def _sync_actions(self) -> None:
-        """Enable each action strictly on what the selected status allows."""
+        """Enable header actions based on the selected workspace's status."""
         workspace = self.selected_workspace()
         status = status_for(workspace.state) if workspace is not None else None
-        self._start_button.setEnabled(bool(status and status.can_start))
         self._stop_button.setEnabled(bool(status and status.can_stop))
 
     def _on_busy(self, busy: bool) -> None:
         """Lock the actions while a task runs, then re-derive them."""
         self._new_button.setEnabled(not busy)
         if busy:
-            self._start_button.setEnabled(False)
             self._stop_button.setEnabled(False)
         else:
             self._sync_actions()
+
+    def _on_ready(self, reachable: Reachable) -> None:
+        """Show a reachable n8n instance, raising the window it already has.
+
+        Which of the two happens is the browser's call, matched on the
+        instance's origin; the launcher only says whether the window on screen
+        can still be alive.
+        """
+        try:
+            open_web_app(
+                workspace_url(reachable.workspace.port),
+                reuse=not reachable.started,
+            )
+        except (ValueError, WebAppLaunchError) as exc:
+            self._on_failed("Ouverture de n8n impossible", str(exc))
 
     def _on_failed(self, title: str, message: str) -> None:
         """Surface a background failure instead of letting it vanish."""

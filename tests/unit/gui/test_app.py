@@ -84,6 +84,7 @@ def test_launcher_run_wires_the_observer_and_returns_on_shutdown() -> None:
 
     LauncherApp(MagicMock(), manager).run()
 
+    manager.reconcile_all.assert_called_once()
     manager.add_observer.assert_called_once()
     manager.remove_observer.assert_called_once()
 

@@ -51,6 +51,7 @@ class WorkspaceStatus:
     can_start: bool
     can_stop: bool
     can_delete: bool
+    can_open: bool
 
 
 def state_label(state: WorkspaceState) -> str:
@@ -81,6 +82,23 @@ def can_delete(state: WorkspaceState) -> bool:
     return state is WorkspaceState.STOPPED
 
 
+def can_open(state: WorkspaceState) -> bool:
+    """Return True when opening the workspace's n8n from its card makes sense.
+
+    A **running** workspace is the interesting case: opening it is not a start,
+    so it must never be gated behind ``can_start`` — Docker already holds a
+    running stack and a second ``docker up`` would only race the first. A
+    ``STARTING`` workspace is left alone because the start in flight owns the
+    outcome (it opens the instance itself when it completes), and a
+    ``STOPPING`` one because it is on its way out.
+    """
+    return state in (
+        WorkspaceState.STOPPED,
+        WorkspaceState.ERROR,
+        WorkspaceState.RUNNING,
+    )
+
+
 def status_for(state: WorkspaceState) -> WorkspaceStatus:
     """Build the full :class:`WorkspaceStatus` for *state*."""
     return WorkspaceStatus(
@@ -90,6 +108,7 @@ def status_for(state: WorkspaceState) -> WorkspaceStatus:
         can_start=can_start(state),
         can_stop=can_stop(state),
         can_delete=can_delete(state),
+        can_open=can_open(state),
     )
 
 
@@ -106,6 +125,7 @@ __all__ = [
     "StatusTone",
     "WorkspaceStatus",
     "can_delete",
+    "can_open",
     "can_start",
     "can_stop",
     "state_label",
