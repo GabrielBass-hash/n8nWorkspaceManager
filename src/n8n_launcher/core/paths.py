@@ -34,6 +34,16 @@ def workspace_runtime_dir(workspace_id: str) -> Path:
     return config_dir() / "workspaces" / workspace_id
 
 
+def browser_profile_dir() -> Path:
+    """Return the Chromium profile the launcher opens its n8n windows with.
+
+    Owned by the launcher on purpose: n8n's session cookie lives there, so
+    reopening an instance does not ask the owner to sign in again, and the
+    windows the launcher is able to raise are only ever its own.
+    """
+    return config_dir() / "browser"
+
+
 def compose_file(workspace_id: str) -> Path:
     """Return the Compose YAML path for a workspace."""
     return workspace_runtime_dir(workspace_id) / "compose.yml"

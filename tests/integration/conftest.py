@@ -67,17 +67,21 @@ class SshServer:
 
 
 def wait_for_n8n(base_url: str, timeout: float = 240.0) -> None:
-    """Block until the n8n health endpoint answers 200 on ``base_url``."""
+    """Block until n8n serves its UI on ``base_url``.
+
+    ``/healthz`` is a liveness probe: it answers while ``/`` still returns
+    ``Cannot GET /``, so the readiness endpoint is what gates the API calls.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            response = requests.get(f"{base_url}/healthz", timeout=2.0)
+            response = requests.get(f"{base_url}/healthz/readiness", timeout=2.0)
             if response.status_code == 200:
                 return
         except requests.RequestException:
             pass
         time.sleep(2.0)
-    raise AssertionError(f"n8n did not become healthy at {base_url}")
+    raise AssertionError(f"n8n did not become ready at {base_url}")
 
 
 def generate_keypair(directory: Path) -> Path:

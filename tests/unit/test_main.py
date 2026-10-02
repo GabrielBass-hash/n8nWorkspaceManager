@@ -11,6 +11,7 @@ import pytest
 from n8n_launcher.__main__ import (
     _backup_unreadable_config,
     _close_session,
+    _prompt_first_launch,
     _session_length,
     _signal_shutdown,
     _start_monitoring,
@@ -111,18 +112,82 @@ def test_stop_all_does_nothing_when_config_cannot_be_loaded() -> None:
     manager.stop.assert_not_called()
 
 
-def test_signal_shutdown_stops_workspaces_then_exits() -> None:
+def test_signal_shutdown_stops_workspaces_then_exits_without_a_gui() -> None:
     store = MagicMock()
     docker = MagicMock()
 
     with (
         patch("n8n_launcher.__main__.stop_all") as stop,
+        patch("n8n_launcher.__main__.request_shutdown", return_value=False),
         pytest.raises(SystemExit) as excinfo,
     ):
         _signal_shutdown(store, docker, 15, None)
 
     assert excinfo.value.code == 0
     stop.assert_called_once_with(store, docker)
+
+
+def test_signal_shutdown_asks_the_gui_to_quit_instead_of_raising() -> None:
+    """With a Qt loop running, SystemExit raised from a slot would be swallowed."""
+    store = MagicMock()
+    docker = MagicMock()
+
+    with (
+        patch("n8n_launcher.__main__.stop_all") as stop,
+        patch("n8n_launcher.__main__.request_shutdown", return_value=True) as request,
+    ):
+        _signal_shutdown(store, docker, 15, None)
+
+    stop.assert_called_once_with(store, docker)
+    request.assert_called_once_with()
+
+
+def test_self_test_flag_short_circuits_the_whole_run() -> None:
+    """A packager needs one exit code, with no config, lock or Docker touched."""
+    with (
+        patch("n8n_launcher.__main__.self_test", return_value=0) as smoke,
+        patch("n8n_launcher.__main__.acquire_single_instance_lock") as lock,
+        patch("n8n_launcher.__main__.run_gui") as run_gui,
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        main(["--self-test"])
+
+    assert exit_info.value.code == 0
+    smoke.assert_called_once_with()
+    lock.assert_not_called()
+    run_gui.assert_not_called()
+
+
+def test_self_test_flag_propagates_a_failing_shell() -> None:
+    with (
+        patch("n8n_launcher.__main__.self_test", return_value=1),
+        pytest.raises(SystemExit) as exit_info,
+    ):
+        main(["--self-test"])
+
+    assert exit_info.value.code == 1
+
+
+def test_prompt_first_launch_reports_a_cancelled_wizard() -> None:
+    with patch("n8n_launcher.__main__.prompt_first_launch", return_value=False):
+        assert _prompt_first_launch(MagicMock(), MagicMock()) is False
+
+
+def test_prompt_first_launch_swallows_a_missing_display(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from n8n_launcher.gui.app import GuiUnavailable
+
+    with (
+        patch(
+            "n8n_launcher.__main__.prompt_first_launch",
+            side_effect=GuiUnavailable("no display"),
+        ),
+        caplog.at_level(logging.ERROR, logger="n8n_launcher.__main__"),
+    ):
+        assert _prompt_first_launch(MagicMock(), MagicMock()) is False
+
+    assert any("Interface indisponible" in record.getMessage() for record in caplog.records)
 
 
 def test_start_monitoring_installs_the_event_store(tmp_path: Path) -> None:
@@ -265,20 +330,26 @@ def test_main_hands_the_store_manager_and_journal_to_the_interface(tmp_path: Pat
     ctx.monitor.close.assert_called_once()
 
 
-def test_main_shuts_the_workspaces_down_when_the_shell_is_not_implemented(
+def test_main_shuts_the_workspaces_down_when_no_display_is_available(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The stub refusing is a normal exit, not a crash that skips the teardown.
+    """A missing display is a normal exit, not a crash that skips the teardown.
 
-    ``run_gui`` is left *real* here: this is the run every launch is a run of
-    today, and the one thing that must not regress is that a launcher with no
-    interface still stops what it started.
+    ``run_gui`` is left *real* and made to raise ``GuiUnavailable``: this is the
+    run a service or an ssh command gets, and the one thing that must not
+    regress is that a launcher that could not open a window still stops what it
+    started.
     """
+    from n8n_launcher.gui.app import GuiUnavailable
+
     store = _configured(tmp_path)
     ctx = _patch_main(store)
 
     with (
-        _enter(ctx),
+        _enter(ctx) as stack,
+        stack.enter_context(
+            patch("n8n_launcher.__main__.run_gui", side_effect=GuiUnavailable("no display"))
+        ),
         patch("n8n_launcher.__main__.stop_all") as stop,
         caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"),
     ):
@@ -287,25 +358,51 @@ def test_main_shuts_the_workspaces_down_when_the_shell_is_not_implemented(
     stop.assert_called_once_with(store, ctx.docker)
     ctx.monitor.close.assert_called_once()
     errors = [record for record in caplog.records if record.levelno == logging.ERROR]
-    assert any("phase 2" in record.getMessage() for record in errors)
+    assert any("Interface indisponible" in record.getMessage() for record in errors)
     assert any("Surveillance terminée" in record.getMessage() for record in caplog.records)
 
 
-def test_main_without_a_config_stops_and_creates_no_backup(
+def test_main_without_a_config_runs_the_wizard_and_creates_no_backup(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A true first launch has nothing to show and nothing to preserve."""
+    """A true first launch opens the wizard instead of inventing a config."""
     store = ConfigStore(tmp_path / "launcher.db")
     ctx = _patch_main(store)
 
     with _enter(ctx) as stack:
+        prompt = stack.enter_context(
+            patch("n8n_launcher.__main__._prompt_first_launch", return_value=False)
+        )
         run_gui = stack.enter_context(patch("n8n_launcher.__main__.run_gui"))
-        with caplog.at_level(logging.ERROR, logger="n8n_launcher.__main__"):
+        with caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"):
             main()
 
+    prompt.assert_called_once_with(store, ctx.docker)
     run_gui.assert_not_called()
     assert not list(tmp_path.glob("launcher.db.corrupt-*"))
-    assert any("phase 2" in record.getMessage() for record in caplog.records)
+    assert any("premier lancement" in record.getMessage() for record in caplog.records)
+
+
+def test_main_opens_the_interface_after_a_successful_wizard(tmp_path: Path) -> None:
+    """Once the wizard has written a config, the manager and the shell follow."""
+    from n8n_launcher.core.models import AppConfig
+
+    store = ConfigStore(tmp_path / "launcher.db")
+    ctx = _patch_main(store)
+
+    def write_config(_store: ConfigStore, _docker: object) -> bool:
+        _store.save(AppConfig("owner@example.test", "Secret123", tmp_path))
+        return True
+
+    with _enter(ctx) as stack:
+        prompt = stack.enter_context(
+            patch("n8n_launcher.__main__._prompt_first_launch", side_effect=write_config)
+        )
+        run_gui = stack.enter_context(patch("n8n_launcher.__main__.run_gui"))
+        main()
+
+    prompt.assert_called_once_with(store, ctx.docker)
+    run_gui.assert_called_once()
 
 
 def test_main_corrupt_config_is_backed_up_before_stopping(
@@ -316,10 +413,14 @@ def test_main_corrupt_config_is_backed_up_before_stopping(
     ctx = _patch_main(store)
 
     with _enter(ctx) as stack:
+        prompt = stack.enter_context(patch("n8n_launcher.__main__._prompt_first_launch"))
         run_gui = stack.enter_context(patch("n8n_launcher.__main__.run_gui"))
         with caplog.at_level(logging.INFO, logger="n8n_launcher.__main__"):
             main()
 
+    # A config that exists but cannot be read must never be treated as a first
+    # launch and overwritten by the wizard.
+    prompt.assert_not_called()
     run_gui.assert_not_called()
     backups = list(tmp_path.glob("launcher.db.corrupt-*"))
     assert len(backups) == 1

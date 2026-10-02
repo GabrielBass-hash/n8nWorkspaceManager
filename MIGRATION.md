@@ -1,206 +1,171 @@
 # MIGRATION.md — the interface is gone; the logic is not
 
-**Status: the launcher has no GUI.** `src/n8n_launcher/gui/` is a two-file stub.
-`run_gui(store, manager, monitor)` and `LauncherApp(store, manager, monitor).run()`
-raise `NotImplementedError("new GUI not yet implemented (phase 2)")` on purpose,
-and `main()` catches that refusal so the journal session closes and every
-workspace is still stopped.
+**Historical: this describes phase 1 (6.0.0 rebuilds the shell on PySide6).**
+During phase 1 `src/n8n_launcher/gui/` was a two-file seam whose `run_gui()` and
+`LauncherApp.run()` raised `NotImplementedError("new GUI not yet implemented
+(phase 2)")` on purpose, and `main()` caught that refusal so the journal session
+still closed and every workspace was still stopped. None of that is true any
+more; the rules below are.
 
-This document exists because the deletion was only half the work. Tkinter took
-9,205 lines of `src/` with it, and every *decision* those lines made — what a
-creation form collects, in what order a shutdown runs, how wide a column should
-be, what to ask the user before downloading an update — had to be rescued first
-or it would have been lost. It was rescued. This is where it went, what it looks
-like now, and what a new interface has to be careful about.
+This file is the record of that deletion and of what survived it. It is kept
+because the deleted code cost real debugging time and its rules still describe
+correct behaviour — not because it schedules anything.
 
-## Why the widgets went
+## What was deleted, and how much
 
-The interface was ~15,000 lines of views that could only be exercised through a
-widget tree, under Xvfb, against three operating systems at once. `tests/test_structure.py`
-and `tests/test_parity.py` existed to walk that tree and compare the three OS
-against each other. That is a large amount of machinery whose only subject was
-itself, and none of it survives an interface rewrite — but the rules the views
-enforced did not have to die with them.
+The interface was exercised only through a widget tree, under Xvfb, against
+three operating systems at once; `tests/test_structure.py` and
+`tests/test_parity.py` existed to walk that tree and compare the three OS
+against each other.
 
-## What was kept, and where it went
+| Removed | Lines |
+|---|---|
+| `src/n8n_launcher/gui/` (18 files) | 9,917 |
+| `tests/unit/gui/` (18 files of widget fakes and view tests) | 13,022 |
+| `tests/test_structure.py` + `tests/test_parity.py` | 618 |
+| Dead code with no caller left after the extraction (see below) | −4,497 |
 
-Extraction was not the same as keeping everything, and a second pass (see
-**What was then deleted as dead**) removed what had no caller left. What
-survives is a plain function or dataclass with a plain test. No toolkit, no
-event loop, no display.
+What remains of the package is 88 lines: `gui/app.py` (71) and
+`gui/__init__.py` (17). The largest file it had was `app.py` at 2,971 lines,
+followed by `dialogs.py` (1,199), `monitoring.py` (1,095), `layout.py` (778),
+`ci_page.py` (727), `board.py` (681), `ci_runs.py` (594) and `ci_edit.py`
+(388).
+
+## Where the decisions went
+
+Extraction was not the same as keeping everything. What survives is a plain
+function or dataclass with a plain test — no toolkit, no event loop, no display.
 
 The test for a survivor is not "it has no widgets" but **it answers a question
-the domain still asks**: which DB a new workspace gets, what order a shutdown
-happens in, how wide a column is, whether a pipeline is testable. A row
-formatter, a status badge and a snapshot dataclass answer none of those, so
+the domain still asks**: which DB a new workspace gets, in what order a shutdown
+runs, how wide a column should be, what to ask before downloading an update. A
+row formatter, a status badge and a snapshot dataclass answer none of those, so
 they went.
 
 | Concern | Now lives in | Entry points |
 |---|---|---|
-| What a creation form collects | `workspaces/dialogs.py` | `CreatePlan`, `GitClonePlan`, `GitConfigChoice`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan` |
+| What a creation form collects | `workspaces/dialogs.py` | `CreatePlan`, `GitConfigChoice`, `GitClonePlan`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan` |
 | Which DB a new workspace gets | `workspaces/dialogs.py` | `default_creation_db`, `fresh_managed_db_config` |
 | Shutdown order | `workspaces/close.py` | `CloseSequence`, `CloseHooks` |
-| Update: check → download → install | `platform/update_flow.py` | `UpdateController` (all questions injected) |
+| Update: check → download → install | `platform/update_flow.py` | `UpdateController` (every question injected) |
 | Update: network + filesystem | `platform/updater.py` | unchanged — it was already separate |
-| Column and room sizing | `gui_utils/text.py` | `column_widths`, `fit_budget`, `ellipsize`, `ELLIPSIS` |
+| Column and room sizing | `gui_utils/text.py` | `ELLIPSIS`, `ellipsize`, `column_widths`, `fit_budget` |
 | Is this pipeline testable? | `workspaces/ci.py` | `workflow_eligibility`, `missing_credentials`, `load_export` |
 
-`workflow_eligibility` is the borderline case, and it is deliberate: it is the
-rule that decides whether the `N8N_CI_CREDENTIALS` secret and the tests
-selection are even *meaningful*, so it stays even though the view that used to
-show the verdict is gone. It takes the persisted `(name, type)` metadata
-directly — a caller that can tick a pipeline has to ask it, because
-`save_ci_selection()` writes whatever it is handed.
+`workflow_eligibility` is the borderline case, and it is deliberate: it decides
+whether the `N8N_CI_CREDENTIALS` secret and the tests selection are even
+meaningful. It takes the persisted `(name, type)` metadata directly, because
+`save_ci_selection()` writes whatever it is handed — a caller that can tick a
+pipeline has to ask.
+
+`gui_utils/text.py` also dropped `wrap_at`: it took a `tk.Label` and set
+`config(wraplength=…)`, which is a widget call wearing a decision's clothes.
 
 ## The three designs worth not breaking
 
 ### 1. A view collects, it does not decide
 
 `CreatePlan` is a dataclass. `default_creation_db(workspace)` returns a `DbMode`
-by looking at whether `db/migrations/` has SQL in it. A form asks for a folder
-and a name and hands back one of these; nothing downstream re-derives the
-decision from a widget's contents. This is what let the dialogs go without the
-behaviour going.
+by looking at whether `db/migrations/` holds SQL. A form asks for a folder and a
+name and hands back one of these; nothing downstream re-derives the decision
+from a widget's contents. This is what let the dialogs go without the behaviour
+going.
 
-**When rebuilding:** a form may validate and convert, never decide. If a new
-question appears ("use the existing Postgres?"), add a field to the plan and a
-rule to the module that fills it — not a `if check_var.get():` in the view.
+A new question ("use the existing Postgres?") is a new field on the plan plus a
+rule in the module that fills it — not an `if var.get():` in a view.
 
 ### 2. `measure` is a parameter, not a widget call
 
-`gui_utils/text.py::column_widths(rows, measure, …)` takes a
-`measure(text, font) -> int` callable. The old `gui/theme.py::text_measure`
-resolved a named Tk font and fell back to a per-character estimate; that is now
-the caller's job. `wrap_at` and `bind_wraplength` did *not* come with it: both
-took a `tk.Label` and set `config(wraplength=…)`, which is a widget call wearing
-a decision's clothes, so they went with the widgets. This is why the sizing rule is still testable on a machine with
-no display: the tests pass a `lambda s: len(s)`.
+`gui_utils/text.py::column_widths(rows, *, headings, minimums, maximums,
+measure, …)` takes a `measure: Callable[[str], int]`. The old
+`gui/theme.py::text_measure(root, font)` resolved a named Tk font and fell back
+to a per-character estimate; that is now the caller's job, and it is why the
+sizing rule is still testable on a machine with no display (the tests pass
+`len`).
 
 The rule itself is the one thing not to "improve": **a column's width is its
 content, and the room is a budget the table absorbs.** `fit_budget` gives the
-surplus to the declared `flexible` column, takes a short room away
-proportionally, and never cuts below a column's minimum. A room of `0` or `1`
-means *unmeasured* (what a widget reports before its first layout), so the
-columns keep their natural widths. The two bugs it exists to prevent — a nearly
-empty column reserving a long one's room, and the leftover handed to a
-"flexible" column that was not the one being clipped — are still live.
+surplus to the declared `flexible` column, takes a short room back
+proportionally and never below a column's minimum. An `available` of `0` or `1`
+means *unmeasured* — what a geometry manager answers before the first layout —
+so the columns keep their content widths. The two bugs it exists to prevent, a
+nearly empty column reserving a long one's room and the leftover handed to a
+"flexible" column that was not the one being clipped, are still live.
 
-Measurement should stay short-listed to the 8 longest values per column
+Measurement stays short-listed to the 8 longest values per column
 (`_MEASURED_CANDIDATES`), so a 500-row table costs what a 5-row one costs.
 
 ### 3. Side effects are injected, so the flow runs headless
 
-`CloseSequence` takes a `CloseHooks` of callables; `UpdateController` takes every
-question as a callback. Neither knows what a button is. The Tk answer for
-`UpdateController`'s prompts lived in three methods of the old window; the flow
-around them was identical, which is what made the move a re-export rather than a
-rewrite.
+`CloseSequence` takes a `CloseHooks` of callables; `UpdateController` takes
+every question as a callback. Neither knows what a button is. The Tk answer for
+`UpdateController`'s prompts lived in three methods of the old window and the
+flow around them was identical, which is what made the move a re-export rather
+than a rewrite.
 
-**When rebuilding:** a new prompt is a new callback parameter with a default, not
-a branch inside the flow. Then the same tests keep working.
+A new prompt is a new callback parameter with a default, not a branch inside
+the flow. Then the same tests keep working.
 
-## The measurements that were taken, and should not be re-taken by guessing
+## Measurements that were taken, and should not be re-taken by guessing
 
 These cost real debugging on a real Tk 9.0.4. They are gone from the code
-because the code they described is gone; they are recorded here so phase 2 does
-not spend the same week rediscovering them.
+because the code they described is gone; they are recorded so the same facts do
+not have to be rediscovered.
 
 - **A `ttk.PanedWindow` has `n-1` sashes**, and `sashpos(i)` is the **right edge
   of pane `i`** (ask for 600, pane 0 measures 600). Tkinter cannot count sashes
   — `sash(i, "max")` is not exposed — so asking for the last one raises
   `sash index i out of range`. `weight` only decides who absorbs the *leftover*:
   a `weight=0` pane is **not** given its request, it freezes at whatever width
-  its first layout gave it (the journal stayed at 491px in a 1600px window), and
-  `pane.configure(width=…)` does nothing. The only lever is `sashpos(i, x)`. The
-  gap between two panes is exactly **12px**.
+  its first layout gave it (the journal stayed at 491 px in a 1600 px window),
+  and `pane.configure(width=…)` does nothing. The only lever is `sashpos(i, x)`.
+  The gap between two panes is exactly **12 px**.
 - **`ttk.Treeview` sizes itself from its columns but does not invalidate the
-  request it handed its geometry manager.** `configure(height=cget("height"))` is
-  what re-reads it. This is why a fitter that only sets column widths looks
-  correct and then does nothing.
+  request it handed its geometry manager.** `configure(height=cget("height"))`
+  is what re-reads it. A fitter that only sets column widths looks correct and
+  then does nothing.
 - **`panes()` answers widget *paths*, not widget objects.**
 - **A container is as wide as its widest child**, so a prose label placed beside
   a table silently widens the card the table was fitted for.
 - **Tk delivers a key to the focused widget, its class and the toplevel** — a
   `<Control-c>` binding on a panel never fires if it is bound on the panel.
 - **A label's requested width is not its mapped width.** `winfo_reqwidth` is the
-  text's own request; `winfo_width` is what the layout gave it, and before the
+  text's own request, `winfo_width` is what the layout gave it, and before the
   first layout it answers `1`.
-- **Native `listbox` text is never measured**, only fixed characters, so a
-  table inside one is fitted from the column rule, never from `bbox()`.
+- **Native `listbox` text is never measured**, only fixed characters, so a table
+  inside one is fitted from the column rule, never from `bbox()`.
 
-## What the host owes its views (habits, not code)
+## Habits that outlived the pages
 
-The deleted pages were good for reasons that survive them:
-
-- **A page never does its own I/O.** It was handed what the host had fetched and
-  it called back (`source`/`refresh`/`available`, `runs_source`/`runs_run`/…),
-  which is what kept git, GitHub and SSH calls on background workers rather than
-  in a paint handler.
-- **Focus is lifecycle.** `on_show`/`on_hide` were the only thing that started
+- **A page never did its own I/O.** It rendered what the host fed it and called
+  back, which is what kept git, GitHub and SSH calls on background workers rather
+  than in a paint handler.
+- **Focus was lifecycle.** `on_show`/`on_hide` were the only thing that started
   and stopped a page's timers, and a snapshot that landed after its card was
   closed was cached but never rendered.
 - **A snapshot for a workspace the selection has left is dropped**, not rendered.
-- **The journal is the observability surface.** `EventStore` keeps 30 days,
-  redacts before writing, and the panel's single free-text field folded the level
-  into the searched text — so `EventStore.search_events` / `export_events` are
-  now the direct path to the history the panel used to show.
-- **A retry loop must not overwrite the message on every attempt.**
-  `CriticalGate` groups repeats of one `LEVEL|name` signature for 60 s.
-- **Never leave `finished` derived from anything but n8n's own vocabulary.**
+- **A retry loop must not overwrite the message on every attempt.** `gui/monitoring.py`
+  grouped repeats of one `LEVEL|name` signature for 60 s through a `CriticalGate`;
+  that class went with the panel, so the rule survives as a rule, not as code.
+- **Never derive `finished` from anything but n8n's own vocabulary.**
   `TERMINAL_EXECUTION_STATUSES` / `PENDING_EXECUTION_STATUSES` live in
   `remote/deploy.py`, are injected into the generated server script through
-  `__TERMINAL_STATUSES__`/`__PENDING_STATUSES__`, and a meta-test asserts the two
-  parsers agree for every status.
+  `__TERMINAL_STATUSES__` / `__PENDING_STATUSES__`, and a meta-test asserts the
+  two parsers agree for every status.
 
-## Rebuilding checklist
+What went with the pages, for the record: `PageSubject` / `PageKind` /
+`log_page_event` (`core/subjects.py`), the in-memory `filter_events` and every
+row formatter (`monitoring/present.py`), the runs model
+(`workspaces/ci_runs.py`) and the server snapshot model. The surviving path to
+that history is `EventStore.search_events` / `export_events` and
+`WorkspaceManager.server_health` / `server_logs` / `server_deploy_status` /
+`server_execution_status`.
 
-1. **Pick a toolkit, deliberately.** Nothing depends on PyQt6/PySide6 any more
-   — it was removed from `pyproject.toml` rather than left as a floor for a
-   layer nobody imported. Add it back with the version you actually tested
-   against, and add the display-server problem it brings (macOS PATH, Linux
-   headless CI) to the release notes.
-2. **Fill in `gui/app.py` and stop raising.** Keep `run_gui(store, manager,
-   monitor)` and `LauncherApp(store, manager, monitor)` as the signatures — the
-   entry point, the CI and the integration harness all expect them. Replace
-   `tests/unit/gui/test_stub.py` as you go; do not delete the file while the
-   stub still refuses.
-3. **Do not re-create `tests/conftest.py`'s removed Tk fake** unless there is a
-   toolkit to fake. A `FakeTtk` that is not asserted on is dead weight, and the
-   fakes it held encoded the bugs above.
-4. **Wire the first launch.** `main()` currently stops when there is no config,
-   and the first-launch validation went with the dead-code pass (nothing else
-   called it). Until it is written the launcher cannot create its own config,
-   so it cannot be used for a first run. Reuse `validate_password()` in
-   `n8n/api.py`, which is where n8n's own policy lives and is still tested.
-5. **The `_start_monitoring` → `run_gui` → `_close_session` bracket is the
-   contract.** Every run, including the failure paths, must end with
-   `Surveillance terminée` in the journal and the workspaces stopped. There is a
-   test for the stub-refusal path (`test_main_shuts_the_workspaces_down_when_the_shell_is_not_implemented`)
-   — keep it passing.
-
-## Reference: what was deleted
-
-| Removed | Was |
-|---|---|
-| `gui/app.py` | 2,971 lines — the window, the workspace list, every action |
-| `gui/dialogs.py` | 1,199 lines — the creation, git, clone and GitHub forms |
-| `gui/layout.py` | 778 lines — the fitters and binders (the rule itself survived in `gui_utils/text.py`) |
-| `gui/monitoring.py` | 773 lines — the journal panel, its scopes and the export |
-| `gui/ci_page.py`, `gui/ci_runs.py`, `gui/board.py` | 719 / 594 / 681 lines — the dashboard and its cards |
-| `gui/ci_edit.py`, `gui/dialog.py`, `gui/theme.py`, `gui/server_page.py`, `gui/update_flow.py`, `gui/close.py`, `gui/pages.py`, `gui/tokens.py`, `gui/first_launch.py` | the remaining views and their constants |
-| `tests/test_structure.py`, `tests/test_parity.py` | widget-tree snapshots under Xvfb and the cross-OS comparison |
-| `tests/unit/gui/` (18 files) | 12,684 lines of widget fakes and view tests |
-
-Kept: 9 lines in `gui/app.py` and 17 in `gui/__init__.py`, plus 523 lines of
-newly headless logic in `gui_utils/text.py`, `workspaces/dialogs.py` and
-`platform/update_flow.py`.
-
-## What was then deleted as dead
+## The dead-code pass
 
 The extraction left a second problem: some of what it kept was kept *wrong*. A
-module with no caller does not become valid by being toolkit-free, and the
-entries below had no production caller once the views were gone. Deleting them
-was the point of a follow-up pass, not an afterthought of it.
+module with no caller does not become valid by being toolkit-free. The pass
+that removed them was part of the deletion, not an afterthought of it.
 
 | Removed | Was |
 |---|---|
@@ -213,6 +178,41 @@ was the point of a follow-up pass, not an afterthought of it.
 | four leaves in live modules | `ensure_directories`, `browser_app_dir`, `_tokenized_remote`, `secrets_path` |
 
 `core/subjects.py` went as a consequence, not a choice: `CI_SUBJECT` was the
-last construction site, and `PageSubject` itself existed to be handed to
+last construction site, and `PageSubject` itself existed only to be handed to
 `filter_events`. `EventStore.search_events` keeps the search, the redaction and
 the retention; only the duplicate in-memory filter and the row formatters went.
+
+Consequence for the conventions: `pyproject.toml` still carries six
+`per-file-ignores` entries for paths that no longer exist —
+`gui/ci_edit.py`, `gui/ci_runs.py`, `gui/close.py`, `gui/dialogs.py`,
+`gui/monitoring.py` and `gui/update_flow.py`. They match nothing. The entry for
+`gui/app.py` still matches, but its rules (`S603`, `S606`, `S607`, `S110` — the
+subprocess launch and fail-graceful catches of the old window) are vestigial too,
+since the stub raises before doing any work.
+
+## The seam contract
+
+Four things are the interface's contract with the rest of the launcher. They
+are what `__main__.py` calls, what CI builds, and what the integration harness
+expects.
+
+1. `run_gui(store, manager, monitor)` and `LauncherApp(store, manager, monitor)`
+   with a `.run()` — the three collaborators are what a shell needs.
+2. `main()` keeps the `_start_monitoring` → `run_gui` → `_close_session`
+   bracket: every run, including every failure path, ends with
+   `Surveillance terminée` in the journal and the workspaces stopped. The
+   test for the refusal path
+   (`test_main_shuts_the_workspaces_down_when_the_shell_is_not_implemented`)
+   pins it.
+3. `tests/unit/gui/test_stub.py` is replaced, not deleted, while the seam still
+   refuses. It currently pins that both entry points raise and that importing a
+   shipped module pulls in no toolkit.
+4. `pyproject.toml` has no GUI toolkit in `dependencies`. A shell adds one — with
+   the version actually tested against — rather than a floor nobody imports.
+
+The first-launch validation went with the dead-code pass (nothing else called
+it), so `main()` stops when there is no config and the launcher cannot create
+its own. Nothing in `src/` validates an owner password today: `validate_password()`
+was in `gui/first_launch.py` and is gone, so n8n's policy — 8 to 64 characters,
+at least one digit and one uppercase letter — has to be re-derived wherever a
+password is actually set.

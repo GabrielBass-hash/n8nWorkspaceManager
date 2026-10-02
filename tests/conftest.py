@@ -1,7 +1,14 @@
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+# Qt must never look for a display in the test suite. This has to be set before
+# the first Qt import anywhere, which is why it sits at module import time
+# rather than in a fixture; the offscreen platform draws nothing and is what
+# every CI runner has. A test that needs the real platform can override it.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace
 

@@ -172,6 +172,21 @@ class ConfigStore:
         except OSError as exc:
             raise ConfigError(f"Could not write configuration export: {target}") from exc
 
+    def close(self) -> None:
+        """Close the cached SQLite connection; later operations reopen it.
+
+        The connection is otherwise held for the lifetime of the store, which
+        keeps the database *and* its ``-wal`` / ``-shm`` sidecars locked. On
+        Windows an open handle makes those files undeletable until the process
+        exits, so anything that wants to remove a config directory — the
+        first-launch self-test does exactly that — has to close it first. It is
+        idempotent, like :meth:`monitoring.store.EventStore.close`.
+        """
+        with self._lock:
+            connection, self._connection = self._connection, None
+            if connection is not None:
+                connection.close()
+
     @contextlib.contextmanager
     def _transaction(self, conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         """Serialize a write as ``BEGIN IMMEDIATE`` + commit / rollback."""

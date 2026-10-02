@@ -11,11 +11,61 @@ import requests
 
 from .scopes import REQUIRED_WORKFLOW_SCOPES
 
-__all__ = ["REQUIRED_WORKFLOW_SCOPES", "ApiCredentials", "OwnerSetup", "OwnerSetupError"]
+__all__ = [
+    "REQUIRED_WORKFLOW_SCOPES",
+    "ApiCredentials",
+    "OwnerSetup",
+    "OwnerSetupError",
+    "wait_for_n8n",
+]
 
 
 class OwnerSetupError(RuntimeError):
     """Raised when the n8n owner setup cannot complete."""
+
+
+def wait_for_n8n(
+    base_url: str,
+    *,
+    timeout: float = 180.0,
+    interval: float = 1.0,
+    session: requests.Session | None = None,
+) -> None:
+    """Wait until n8n serves its UI, not merely until the port answers.
+
+    Docker reporting a running container only means the process exists, and
+    ``/healthz`` only means the socket does: measured on n8n 2.40, liveness goes
+    green ~2 s *before* the frontend handler is mounted, and ``GET /`` answers
+    ``Cannot GET /`` in that window. ``/healthz/readiness`` is the endpoint that
+    tracks the editor actually being reachable (it stays 503 until migrations
+    and the frontend are done), so it is the gate. n8n releases predating that
+    route answer 404 on it and fall back to the UI root, which is the same
+    condition read from the other side.
+
+    Raises:
+        OwnerSetupError: If n8n does not serve its UI before *timeout*.
+    """
+    client = session or requests.Session()
+    root = base_url.rstrip("/")
+    per_request = min(10.0, max(timeout, 0.1))
+    deadline = time.monotonic() + timeout
+    last_error = "aucune réponse"
+    while time.monotonic() < deadline:
+        try:
+            response = client.get(f"{root}/healthz/readiness", timeout=per_request)
+            if response.ok:
+                return
+            if response.status_code == 404:
+                page = client.get(f"{root}/", timeout=per_request)
+                if page.ok:
+                    return
+                last_error = f"HTTP {page.status_code} sur /"
+            else:
+                last_error = f"HTTP {response.status_code}"
+        except requests.RequestException as exc:
+            last_error = str(exc)
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+    raise OwnerSetupError(f"n8n n'est pas prêt après {timeout:g}s ({last_error})")
 
 
 def hash_owner_password(password: str) -> str:

@@ -27,13 +27,13 @@ def wait_for_n8n(base_url: str, timeout: float = 180.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            response = requests.get(f"{base_url}/healthz", timeout=2.0)
+            response = requests.get(f"{base_url}/healthz/readiness", timeout=2.0)
             if response.status_code == 200:
                 return
         except requests.RequestException:
             pass
         time.sleep(2.0)
-    raise AssertionError(f"n8n did not become healthy at {base_url}")
+    raise AssertionError(f"n8n did not become ready at {base_url}")
 
 
 def _appraisal_table_count(docker_manager, workspace: Workspace, compose_file: Path) -> int:
