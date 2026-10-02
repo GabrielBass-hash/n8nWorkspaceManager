@@ -8,10 +8,10 @@ import secrets
 import shlex
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from ..core.config import ConfigStore
@@ -33,7 +33,7 @@ from ..database import (
     has_db_layout,
 )
 from ..docker.compose import compose_project_name, render_remote_compose, write_compose
-from ..docker.manager import DockerManager, parse_compose_status
+from ..docker.manager import ComposeStatus, DockerManager, parse_compose_status
 from ..git import (
     GitError,
     ensure_local_excludes,
@@ -63,7 +63,7 @@ from ..git import (
 from ..github import auth
 from ..github.api import GitHubClient, GitHubError
 from ..n8n.api import N8nApiClient, N8nApiError
-from ..n8n.owner import OwnerSetup
+from ..n8n.owner import OwnerSetup, OwnerSetupError, wait_for_n8n
 from ..n8n.workflows import SyncRunner
 from ..platform.ports import suggest_port
 from ..remote import (
@@ -95,6 +95,12 @@ logger = logging.getLogger(__name__)
 # plus the workflow/credential import, which is far past the 30 s that every
 # other git call gets.
 _PUBLISH_PUSH_TIMEOUT = 300
+
+# Grace given to an instance Docker already reports as running before the
+# launcher opens it anyway: long enough for a just-restarted n8n to finish
+# booting (~5 s measured), short enough that a container that will never serve
+# is reported by the page itself instead of a silent wait.
+_SERVE_GRACE_TIMEOUT = 20.0
 
 
 def _is_push_rejection(exc: GitError) -> bool:
@@ -130,6 +136,39 @@ class WorkspaceError(RuntimeError):
     """Raised when a workspace operation cannot be completed."""
 
 
+@dataclass(frozen=True)
+class Reachable:
+    """A workspace whose n8n answers, and whether reaching it started the stack.
+
+    ``started`` is what separates "raise the window already showing this
+    instance" from "open a fresh one": after a start, any window left over from
+    the instance's previous life can only be showing the connection that died
+    with it.
+    """
+
+    workspace: Workspace
+    started: bool
+
+
+class WorkspaceObserver(Protocol):
+    """Receives change notifications from the manager.
+
+    A view implements this to refresh without polling. Kept toolkit-free (a
+    :class:`~typing.Protocol`, no imports beyond typing) so the manager never
+    depends on a GUI library, and a test can pass a bare recorder. Every method
+    is called *after* the change is committed, and a notification that raises is
+    logged and ignored — a broken view must never fail an operation.
+    """
+
+    def workspaces_changed(self) -> None:
+        """The set of workspaces changed (created, deleted, reconciled)."""
+        ...
+
+    def workspace_changed(self, workspace: Workspace) -> None:
+        """One workspace's fields or lifecycle state changed."""
+        ...
+
+
 class WorkspaceManager:
     """Central controller for workspace CRUD and the start/stop lifecycle.
 
@@ -150,6 +189,33 @@ class WorkspaceManager:
         self.owner_booter = owner_booter or self._default_owner_booter
         self.api_factory = api_factory or self._default_api_factory
         self.migrations = MigrationRunner(docker)
+        self._observers: list[WorkspaceObserver] = []
+
+    def add_observer(self, observer: WorkspaceObserver) -> None:
+        """Register *observer* for change notifications."""
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(self, observer: WorkspaceObserver) -> None:
+        """Stop notifying *observer*; a no-op if it was never registered."""
+        if observer in self._observers:
+            self._observers.remove(observer)
+
+    def _notify_workspaces_changed(self) -> None:
+        """Tell every observer the workspace list changed, isolating failures."""
+        for observer in list(self._observers):
+            try:
+                observer.workspaces_changed()
+            except Exception:
+                logger.warning("Observer failed on workspaces_changed", exc_info=True)
+
+    def _notify_workspace_changed(self, workspace: Workspace) -> None:
+        """Tell every observer one workspace changed, isolating failures."""
+        for observer in list(self._observers):
+            try:
+                observer.workspace_changed(workspace)
+            except Exception:
+                logger.warning("Observer failed on workspace_changed", exc_info=True)
 
     @staticmethod
     def _default_owner_booter(base_url: str, email: str, password: str) -> str:
@@ -194,18 +260,41 @@ class WorkspaceManager:
         try:
             projects = self.docker.list_project_states()
         except Exception:
-            return 0
+            try:
+                config = self.store.load()
+            except Exception:
+                return 0
+            updates = {
+                workspace.id: WorkspaceState.STOPPED
+                for workspace in config.workspaces
+                if workspace.state is not WorkspaceState.STOPPED
+            }
+            if not updates:
+                return 0
+
+            def mark_stopped(config: AppConfig) -> None:
+                for workspace in config.workspaces:
+                    if workspace.id in updates:
+                        workspace.state = WorkspaceState.STOPPED
+
+            try:
+                self.store.mutate(mark_stopped)
+            except Exception:
+                return 0
+            self._notify_workspaces_changed()
+            return len(updates)
         try:
             config = self.store.load()
         except Exception:
             return 0
         updates: dict[str, WorkspaceState] = {}
         for workspace in config.workspaces:
-            # Workspaces whose Compose file is gone (e.g. a partial folder
-            # deletion) keep their stored state and are never force-stopped.
+            # Without a Compose file there is no launcher-managed stack that
+            # could still be running, so stale active states are stopped.
             if not compose_file(workspace.id).exists():
-                continue
-            live = _project_live_state(projects, compose_project_name(workspace))
+                live = WorkspaceState.STOPPED
+            else:
+                live = _project_live_state(projects, compose_project_name(workspace))
             if live is not workspace.state:
                 updates[workspace.id] = live
         if not updates:
@@ -221,6 +310,7 @@ class WorkspaceManager:
             self.store.mutate(apply)
         except Exception:
             return 0
+        self._notify_workspaces_changed()
         return len(updates)
 
     def create(
@@ -272,7 +362,9 @@ class WorkspaceManager:
             config.workspaces.append(workspace)
             return workspace
 
-        return self.store.mutate(append)
+        created = self.store.mutate(append)
+        self._notify_workspaces_changed()
+        return created
 
     def clone_from_git(
         self,
@@ -359,6 +451,7 @@ class WorkspaceManager:
 
         result = self.store.mutate(append)
         self._ensure_workspace_branch(result)
+        self._notify_workspaces_changed()
         return result
 
     def update(self, workspace_id: str, **changes: object) -> Workspace:
@@ -391,7 +484,9 @@ class WorkspaceManager:
             config.workspaces[config.workspaces.index(current)] = updated
             return updated
 
-        return self.store.mutate(apply)
+        updated = self.store.mutate(apply)
+        self._notify_workspace_changed(updated)
+        return updated
 
     def delete(self, workspace_id: str) -> None:
         """Remove a stopped workspace from the configuration."""
@@ -403,6 +498,7 @@ class WorkspaceManager:
             config.workspaces.remove(workspace)
 
         self.store.mutate(remove)
+        self._notify_workspaces_changed()
 
     def ensure_running(
         self,
@@ -1190,9 +1286,13 @@ class WorkspaceManager:
         write_compose(workspace, compose)
         workspace.state = WorkspaceState.STARTING
         self.store.save(config)
+        self._notify_workspace_changed(workspace)
         logger.info("Starting %s on port %d", workspace.name, workspace.port)
         try:
             self.docker.up(workspace, compose)
+            docker_status = self.docker.status(workspace, compose)
+            if isinstance(docker_status, ComposeStatus):
+                wait_for_n8n(f"http://127.0.0.1:{workspace.port}")
             if workspace.db.mode is DbMode.MANAGED:
                 self.migrations.ensure(workspace, compose)
                 self.migrations.apply(
@@ -1215,6 +1315,7 @@ class WorkspaceManager:
                 self._find(config, workspace_id).state = WorkspaceState.ERROR
 
             self.store.mutate(mark_error)
+            self._notify_workspace_changed(self._find(self.store.load(), workspace_id))
             raise
 
         def mark_running(config: AppConfig) -> None:
@@ -1223,8 +1324,34 @@ class WorkspaceManager:
             current.restart_required = False
 
         self.store.mutate(mark_running)
+        running = self._find(self.store.load(), workspace_id)
+        self._notify_workspace_changed(running)
         logger.info("Started %s on port %d", workspace.name, workspace.port)
-        return self._find(self.store.load(), workspace_id)
+        return running
+
+    def ensure_serving(self, workspace_id: str) -> Reachable:
+        """Return the workspace with a reachable n8n, starting it only if needed.
+
+        Docker — not the persisted state — decides whether a stack is up: a
+        workspace started outside the launcher (or started before a crash that
+        left ``STOPPED`` behind) is already serving and must be opened, never
+        started a second time. A start waits for readiness and *fails* if n8n
+        never answers; an instance that is merely up gets
+        ``_SERVE_GRACE_TIMEOUT`` to answer and is opened either way, because a
+        running-but-broken stack is the page's own error to report.
+
+        The returned ``started`` flag is what tells a caller opening the instance
+        whether the window left over from its previous life is still the one to
+        raise, or a dead one to replace.
+        """
+        workspace = self._find(self.store.load(), workspace_id)
+        if self.live_state(workspace) is not WorkspaceState.RUNNING:
+            return Reachable(workspace=self.start(workspace_id), started=True)
+        try:
+            wait_for_n8n(f"http://127.0.0.1:{workspace.port}", timeout=_SERVE_GRACE_TIMEOUT)
+        except OwnerSetupError as exc:
+            logger.warning("Opening %s without a ready n8n: %s", workspace.name, exc)
+        return Reachable(workspace=workspace, started=False)
 
     def _workspace_db_mode(self, workspace_id: str) -> DbMode:
         """Return the persisted DB mode of a workspace (for pre-start checks)."""
@@ -1272,7 +1399,7 @@ class WorkspaceManager:
                 current.state = WorkspaceState.STOPPING
                 return current
 
-            self.store.mutate(mark_stopping)
+            self._notify_workspace_changed(self.store.mutate(mark_stopping))
         compose = compose_file(workspace.id)
         # Skip `docker down` when already stopped: makes the call idempotent so
         # the atexit stop_all() pass after a GUI close does not tear containers
@@ -1286,7 +1413,9 @@ class WorkspaceManager:
             current.state = WorkspaceState.STOPPED
             return current
 
-        return self.store.mutate(mark_stopped)
+        stopped = self.store.mutate(mark_stopped)
+        self._notify_workspace_changed(stopped)
+        return stopped
 
     def _ensure_db_credentials(self, workspace: Workspace) -> None:
         if workspace.db.mode is DbMode.NONE:

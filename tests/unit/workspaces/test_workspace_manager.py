@@ -155,6 +155,94 @@ def test_start_and_stop_update_state(tmp_path: Path) -> None:
     docker.down.assert_called_once()
 
 
+def test_start_waits_for_n8n_health_before_marking_running(tmp_path: Path) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    docker.status.return_value = ComposeStatus(
+        raw_output='{"Service":"n8n","State":"running"}\n',
+        returncode=0,
+    )
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
+        patch("n8n_launcher.workspaces.manager.wait_for_n8n") as wait,
+    ):
+        started = launcher.start(workspace.id)
+
+    wait.assert_called_once_with(f"http://127.0.0.1:{workspace.port}")
+    assert started.state is WorkspaceState.RUNNING
+    assert store.load().workspaces[0].state is WorkspaceState.RUNNING
+
+
+def test_ensure_serving_starts_a_stopped_workspace(tmp_path: Path) -> None:
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
+        patch("n8n_launcher.workspaces.manager.wait_for_n8n"),
+    ):
+        reachable = launcher.ensure_serving(workspace.id)
+
+    assert reachable.started is True
+    assert reachable.workspace.state is WorkspaceState.RUNNING
+    docker.up.assert_called_once()
+
+
+def test_ensure_serving_never_starts_what_docker_already_runs(tmp_path: Path) -> None:
+    """A stack brought up outside the launcher is served, not started again."""
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    # A crash can leave STOPPED in SQLite while the container never went down.
+    docker.status.return_value = ComposeStatus(
+        raw_output='{"Service":"n8n","State":"running"}\n',
+        returncode=0,
+    )
+
+    with (
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch("n8n_launcher.workspaces.manager.wait_for_n8n") as wait,
+    ):
+        reachable = launcher.ensure_serving(workspace.id)
+
+    assert reachable.started is False
+    assert reachable.workspace.id == workspace.id
+    assert reachable.workspace.port == workspace.port
+    docker.up.assert_not_called()
+    wait.assert_called_once_with(f"http://127.0.0.1:{workspace.port}", timeout=20.0)
+
+
+def test_ensure_serving_opens_an_up_instance_that_never_answers(tmp_path: Path, caplog) -> None:
+    """A running-but-broken stack is the page's error, not a blocked open."""
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    docker.status.return_value = ComposeStatus(
+        raw_output='{"Service":"n8n","State":"running"}\n',
+        returncode=0,
+    )
+
+    with (
+        patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose),
+        patch(
+            "n8n_launcher.workspaces.manager.wait_for_n8n",
+            side_effect=OwnerSetupError("n8n n'est pas prêt"),
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        reachable = launcher.ensure_serving(workspace.id)
+
+    assert reachable.workspace.id == workspace.id
+    assert "without a ready n8n" in caplog.text
+
+
 def test_stop_skips_down_when_never_launched(tmp_path: Path) -> None:
     launcher, _store, docker, _ = manager(tmp_path)
     workspace = create_none(launcher, tmp_path)
@@ -277,6 +365,22 @@ def test_reconcile_all_is_idempotent_on_stopped(tmp_path: Path) -> None:
         changed = launcher.reconcile_all()
 
     assert changed == 0
+    assert store.load().workspaces[0].state is WorkspaceState.STOPPED
+
+
+def test_reconcile_all_clears_stale_active_state_when_docker_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    launcher, store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    config = store.load()
+    config.workspaces[0].state = WorkspaceState.RUNNING
+    store.save(config)
+    docker.list_project_states.side_effect = RuntimeError("Docker unavailable")
+
+    changed = launcher.reconcile_all()
+
+    assert changed == 1
     assert store.load().workspaces[0].state is WorkspaceState.STOPPED
 
 
@@ -2230,3 +2334,170 @@ def test_server_observability_requires_a_configured_server(tmp_path: Path) -> No
     ):
         with pytest.raises(WorkspaceError, match="Aucun serveur configuré"):
             call(workspace.id)
+
+
+class _ObserverRecorder:
+    """Minimal WorkspaceObserver that records what it was told."""
+
+    def __init__(self) -> None:
+        self.list_changes = 0
+        self.changes: list[Workspace] = []
+
+    def workspaces_changed(self) -> None:
+        self.list_changes += 1
+
+    def workspace_changed(self, workspace: Workspace) -> None:
+        self.changes.append(workspace)
+
+    @property
+    def states(self) -> list[WorkspaceState]:
+        return [workspace.state for workspace in self.changes]
+
+
+def test_create_notifies_observers_of_a_new_list(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    create_none(launcher, tmp_path)
+
+    assert observer.list_changes == 1
+    assert observer.changes == []
+
+
+def test_update_notifies_the_changed_workspace(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    launcher.update(workspace.id, name="Renamed")
+
+    assert observer.list_changes == 0
+    assert [item.name for item in observer.changes] == ["Renamed"]
+
+
+def test_delete_notifies_observers(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    launcher.delete(workspace.id)
+
+    assert observer.list_changes == 1
+
+
+def test_start_notifies_starting_then_running(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+    ):
+        launcher.start(workspace.id)
+
+    assert observer.states == [WorkspaceState.STARTING, WorkspaceState.RUNNING]
+
+
+def test_start_failure_notifies_the_error_state(tmp_path: Path) -> None:
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    docker.up.side_effect = DockerError("boom")
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    with (
+        patch(
+            "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "compose.yml"
+        ),
+        pytest.raises(DockerError),
+    ):
+        launcher.start(workspace.id)
+
+    assert observer.states == [WorkspaceState.STARTING, WorkspaceState.ERROR]
+
+
+def test_stop_notifies_stopping_then_stopped(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    observer = _ObserverRecorder()
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.start(workspace.id)
+        launcher.add_observer(observer)
+        launcher.stop(workspace.id)
+
+    assert observer.states == [WorkspaceState.STOPPING, WorkspaceState.STOPPED]
+
+
+def test_stopping_an_already_stopped_workspace_notifies_nothing(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    with patch(
+        "n8n_launcher.workspaces.manager.compose_file", return_value=tmp_path / "missing.yml"
+    ):
+        launcher.stop(workspace.id)
+
+    assert observer.changes == []
+    assert observer.list_changes == 0
+
+
+def test_reconcile_all_notifies_once_when_something_changed(tmp_path: Path) -> None:
+    launcher, _store, docker, _ = manager(tmp_path)
+    workspace = create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    docker.list_project_states.return_value = {f"n8n-ws-{workspace.id}": {"n8n": "running"}}
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.reconcile_all()
+
+    assert observer.list_changes == 1
+
+
+def test_reconcile_all_is_silent_when_nothing_changed(tmp_path: Path) -> None:
+    launcher, _store, docker, _ = manager(tmp_path)
+    create_none(launcher, tmp_path)
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    docker.list_project_states.return_value = {}
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+
+    with patch("n8n_launcher.workspaces.manager.compose_file", return_value=compose):
+        launcher.reconcile_all()
+
+    assert observer.list_changes == 0
+
+
+def test_a_broken_observer_never_breaks_the_operation(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    broken = MagicMock()
+    broken.workspaces_changed.side_effect = RuntimeError("observer exploded")
+    launcher.add_observer(broken)
+
+    workspace = create_none(launcher, tmp_path)
+
+    assert workspace.id
+    broken.workspaces_changed.assert_called_once()
+
+
+def test_remove_observer_stops_notifications(tmp_path: Path) -> None:
+    launcher, _store, _docker, _ = manager(tmp_path)
+    observer = _ObserverRecorder()
+    launcher.add_observer(observer)
+    launcher.remove_observer(observer)
+
+    create_none(launcher, tmp_path)
+
+    assert observer.list_changes == 0

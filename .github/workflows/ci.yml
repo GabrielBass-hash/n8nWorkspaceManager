@@ -68,20 +68,45 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
+      # Qt links against these even on the offscreen platform plugin and the
+      # GitHub Linux image does not guarantee them; without them importing
+      # QApplication fails at load time rather than inside a test assertion.
+      - name: Install Qt runtime libraries (Linux)
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+
       - name: Install dependencies
         run: uv sync --frozen
 
-      # No display needed: nothing imports a GUI toolkit any more, so there is
-      # no ``python3-tk`` to install and no ``xvfb`` to wrap the suite in. The
-      # coverage floor is kept where it was — headless does not mean untested.
+      # The suite now imports Qt, but only through ``src/n8n_launcher/gui/`` and
+      # only with the offscreen platform plugin, so there is no X server and no
+      # ``xvfb`` to install. The coverage floor is kept where it was — headless
+      # does not mean untested.
       - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: uv run pytest --cov-fail-under=80 --junitxml=pytest-report-${{ matrix.os_name }}.xml
+
+      - name: Run blocking responsive GUI tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run pytest tests/unit/gui/test_responsive.py -m responsive --junitxml=responsive-report-${{ matrix.os_name }}.xml
 
       - name: Upload pytest report
         uses: actions/upload-artifact@v4
         with:
           name: pytest-report-${{ matrix.os_name }}
           path: pytest-report-${{ matrix.os_name }}.xml
+          if-no-files-found: error
+
+      - name: Upload responsive report
+        uses: actions/upload-artifact@v4
+        with:
+          name: responsive-report-${{ matrix.os_name }}
+          path: responsive-report-${{ matrix.os_name }}.xml
           if-no-files-found: error
 
   integration:
@@ -109,8 +134,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      # ``-p no:pytest-qt`` is not cosmetic: the plugin imports QtGui from its
+      # ``pytest_configure``, before any test runs, and PySide6.QtGui links
+      # against libEGL/libGL that this job deliberately does not install (it has
+      # no Qt test to run). Without the flag the whole session dies with an
+      # INTERNALERROR ``ImportError: libEGL.so.1`` instead of a test result.
       - name: Run integration tests
-        run: uv run pytest tests/integration -m integration --junitxml=pytest-report-integration.xml
+        run: uv run pytest tests/integration -m integration -p no:pytest-qt --junitxml=pytest-report-integration.xml
         timeout-minutes: 60
 
       - name: Upload pytest report
@@ -128,10 +158,13 @@ jobs:
         include:
           - os: macos-latest
             artifact: dist/n8n-launcher-macos.dmg
+            dist_root: dist/n8n-launcher.app
           - os: ubuntu-latest
             artifact: dist/n8n-launcher
+            dist_root: dist/n8n-launcher
           - os: windows-latest
-            artifact: dist/n8n-launcher.exe
+            artifact: dist/n8n-launcher
+            dist_root: dist/n8n-launcher
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -144,12 +177,59 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --no-group dev --group packaging
 
+      # The smoke tests below import PySide6 from inside the frozen bundle, and
+      # QtGui links against these system libraries whatever the bundle ships.
+      # Without them the artifact dies at import — the one packaging failure a
+      # user sees as « the app does nothing » — which is exactly what these two
+      # steps exist to catch, so the runner has to be able to import it too.
+      - name: Install Qt runtime libraries (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+
       - name: Build executable
         run: uv run python scripts/build.py
+
+      # A bundle without its Qt platform plugin starts and dies with no window,
+      # which stays invisible until a user tries it: assert it here instead.
+      - name: Verify the Qt bundle
+        run: uv run python scripts/build.py --verify "${{ matrix.dist_root }}"
 
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: bash scripts/build_appimage.sh
+
+      - name: Smoke test the built application (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/n8n-launcher/n8n-launcher --self-test
+
+      - name: Smoke test the AppImage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/n8n-launcher-linux-x86_64.AppImage --self-test
+
+      - name: Smoke test the built application (macOS)
+        if: matrix.os == 'macos-latest'
+        run: dist/n8n-launcher.app/Contents/MacOS/n8n-launcher --self-test
+
+      # A --windowed build on Windows is a GUI-subsystem binary: PowerShell does
+      # not wait for it and never sees its exit code, hence Start-Process -Wait.
+      - name: Smoke test the built application (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $exe = "dist\n8n-launcher\n8n-launcher.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "self-test exited with $($proc.ExitCode)" }
+
+      - name: Dry-run the macOS installer
+        if: matrix.os == 'macos-latest'
+        run: bash scripts/install_macos.sh -n -f dist/n8n-launcher-macos.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

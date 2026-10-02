@@ -266,3 +266,22 @@ def test_config_store_export_json(tmp_path: Path) -> None:
 
     exported = json.loads(target.read_text(encoding="utf-8"))
     assert exported == config.to_dict()
+
+
+def test_close_releases_the_handle_and_later_reads_still_work(tmp_path: Path) -> None:
+    """A closed store reopens on demand: closing is not a one-way door."""
+    store = ConfigStore(tmp_path / "launcher.db")
+    config = AppConfig("owner@example.test", "Secret123", tmp_path)
+    store.save(config)
+    assert store._connection is not None
+
+    store.close()
+
+    assert store._connection is None
+    # Idempotent, and reading again goes through a fresh connection.
+    store.close()
+    assert store.load().owner_email == "owner@example.test"
+
+
+def test_close_on_a_store_that_never_connected_is_a_no_op(tmp_path: Path) -> None:
+    ConfigStore(tmp_path / "launcher.db").close()

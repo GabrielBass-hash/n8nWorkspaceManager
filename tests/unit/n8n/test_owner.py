@@ -1,10 +1,14 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from n8n_launcher.n8n.owner import (
     REQUIRED_WORKFLOW_SCOPES,
     ApiCredentials,
     OwnerSetup,
+    OwnerSetupError,
     hash_owner_password,
+    wait_for_n8n,
 )
 
 
@@ -121,3 +125,52 @@ def test_owner_setup_retries_while_n8n_is_starting() -> None:
 
     assert credentials == ApiCredentials("api-key")
     assert len(setup_attempts) == 3
+
+
+def test_wait_for_n8n_returns_when_readiness_endpoint_is_ready() -> None:
+    session = MagicMock()
+    session.get.return_value = response({"status": "ok"})
+
+    wait_for_n8n("http://n8n:5678", session=session)
+
+    session.get.assert_called_once_with("http://n8n:5678/healthz/readiness", timeout=10.0)
+
+
+def test_wait_for_n8n_keeps_waiting_while_readiness_is_503() -> None:
+    """A 503 is n8n still migrating; the UI root would answer ``Cannot GET /``."""
+    session = MagicMock()
+    session.get.side_effect = [
+        response({"status": "error"}, status_code=503),
+        response({"status": "ok"}),
+    ]
+
+    wait_for_n8n("http://n8n:5678", interval=0, session=session)
+
+    assert [call.args[0] for call in session.get.call_args_list] == [
+        "http://n8n:5678/healthz/readiness",
+        "http://n8n:5678/healthz/readiness",
+    ]
+
+
+def test_wait_for_n8n_falls_back_to_ui_root_without_the_readiness_route() -> None:
+    """An n8n without ``/healthz/readiness`` is gated on the page itself."""
+    session = MagicMock()
+    session.get.side_effect = [
+        response({"message": "not found"}, status_code=404),
+        response("<!DOCTYPE html>", status_code=200),
+    ]
+
+    wait_for_n8n("http://n8n:5678", session=session)
+
+    assert [call.args[0] for call in session.get.call_args_list] == [
+        "http://n8n:5678/healthz/readiness",
+        "http://n8n:5678/",
+    ]
+
+
+def test_wait_for_n8n_fails_when_timeout_expires() -> None:
+    session = MagicMock()
+    session.get.side_effect = RuntimeError("unexpected")
+
+    with pytest.raises(OwnerSetupError, match="n'est pas prêt"):
+        wait_for_n8n("http://n8n:5678", timeout=0, session=session)
