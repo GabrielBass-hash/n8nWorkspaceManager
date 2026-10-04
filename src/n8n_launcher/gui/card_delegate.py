@@ -103,6 +103,16 @@ def pill_hit(rect: QRectF, status: WorkspaceStatus, font: QFont, point: QPointF 
     return pill_rect(rect, status, font).contains(QPointF(point))
 
 
+def name_text_rect(rect: QRectF, workspace: Workspace, font: QFont, pill_left: float) -> QRectF:
+    """Return the rectangle of the workspace name text (same as painted)."""
+    name_font = QFont(font)
+    name_font.setBold(True)
+    metrics = QFontMetrics(name_font)
+    room = max(int(pill_left - rect.left() - theme.CARD_PADDING - _GAP), 0)
+    top = rect.top() + theme.CARD_PADDING
+    return QRectF(rect.left() + theme.CARD_PADDING, top, room, metrics.height())
+
+
 class CardDelegate(QStyledItemDelegate):
     """Draws a workspace as a rounded card: name, summary and a status pill.
 
@@ -227,14 +237,15 @@ class CardDelegate(QStyledItemDelegate):
         pill_left: float,
     ) -> None:
         """Draw the name (left of the pill) and the summary line under it."""
+        name_r = name_text_rect(rect, workspace, base_font, pill_left)
         name_metrics = QFontMetrics(name_font)
-        room = max(int(pill_left - rect.left() - theme.CARD_PADDING - _GAP), 0)
+        room = max(int(name_r.width()), 0)
         name = ellipsize(workspace.name, room, name_metrics.horizontalAdvance)
         top = rect.top() + theme.CARD_PADDING
         painter.setFont(name_font)
         painter.setPen(QColor(theme.TEXT))
         painter.drawText(
-            QRectF(rect.left() + theme.CARD_PADDING, top, room, name_metrics.height()),
+            name_r,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             name,
         )
@@ -264,6 +275,7 @@ __all__ = [
     "CARD_WIDTH",
     "CardDelegate",
     "card_rect",
+    "name_text_rect",
     "pill_hit",
     "pill_rect",
     "tone_color",
