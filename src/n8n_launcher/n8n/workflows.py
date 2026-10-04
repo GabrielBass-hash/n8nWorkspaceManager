@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .api import N8nApiClient
-
-# Matches the launcher's own export filenames (``<name>-<id>.json``) so the
-# root mirror can tell its files apart from user-authored JSON (package.json,
-# manually named exports…) and clean only its own orphans.
-EXPORT_NAME_RE = re.compile(r".+-\d+\.json$")
+from .exports import EXPORT_NAME_RE, create_payload, export_filename
 
 
 @dataclass(frozen=True)
@@ -85,9 +79,8 @@ class SyncRunner:
             if not workflow_id:
                 skipped += 1
                 continue
-            target = (
-                self.workflows_dir
-                / f"{_safe_name(workflow.get('name', workflow_id))}-{workflow_id}.json"
+            target = self.workflows_dir / export_filename(
+                workflow.get("name", workflow_id), workflow_id
             )
             if target.exists():
                 skipped += 1
@@ -117,8 +110,7 @@ class SyncRunner:
             workflow_id = str(workflow.get("id", ""))
             if not workflow_id:
                 continue
-            name = _safe_name(workflow.get("name", workflow_id))
-            filename = f"{name}-{workflow_id}.json"
+            filename = export_filename(workflow.get("name", workflow_id), workflow_id)
             body = json.dumps(self.api.get_workflow(workflow_id), indent=2, sort_keys=True) + "\n"
             (self.workflows_dir / filename).write_text(body, encoding="utf-8")
             exported.add(filename)
@@ -166,7 +158,7 @@ class SyncRunner:
             if str(workflow.get("name")) in existing_names:
                 skipped += 1
                 continue
-            self.api.create_workflow(_create_payload(workflow))
+            self.api.create_workflow(create_payload(workflow))
             pushed += 1
         return SyncReport(pushed=pushed, skipped=skipped)
 
@@ -180,48 +172,18 @@ class SyncRunner:
             self._stop_event.wait(self.interval)
 
 
-def _safe_name(value: object) -> str:
-    text = str(value or "workflow").strip()
-    safe = "".join(
-        character if character.isalnum() or character in "-_" else "_" for character in text
-    )
-    return safe or "workflow"
-
-
 def _export_id(stem: str) -> str:
     """Extract the n8n workflow id carried by a launcher export file name.
 
     Launcher exports follow the ``<safe_name>-<id>.json`` convention (see
-    :func:`_safe_name` and :meth:`SyncRunner.export_all`), so a file like
+    :func:`~n8n_launcher.n8n.exports.export_filename`), so a file like
     ``Meteo-42.json`` encodes the id ``42`` even when the workflow's ``name``
     inside diverges from the file name — a renamed workflow is still skipped on
     re-import by its id instead of being re-created as a duplicate.
+
+    :func:`~n8n_launcher.n8n.exports.parse_export_id` answers the same question
+    from a full file name and answers ``None`` outside the convention; this
+    helper survives only until ``import_all`` consumes
+    :func:`~n8n_launcher.n8n.exports.plan_import`.
     """
     return stem.rsplit("-", 1)[-1]
-
-
-def _create_payload(workflow: dict[str, Any]) -> dict[str, Any]:
-    """Build a create-request body that the public API accepts.
-
-    The public POST /workflows endpoint validates the body against a strict
-    OpenAPI schema (``additionalProperties: false``): any property outside its
-    declared set is rejected with "must NOT have additional properties". A
-    whitelist is therefore safer than a blacklist, because export files carry
-    many read-only/server fields (``description``, ``active``,
-    ``triggerCount``, ``shared``, ...) that are not part of the create schema.
-    """
-    allowed = {
-        "name",
-        "nodes",
-        "connections",
-        "settings",
-        "staticData",
-        "pinData",
-        "nodeGroups",
-        "projectId",
-        "parentFolderId",
-    }
-    payload = {key: value for key, value in workflow.items() if key in allowed}
-    # The public create schema marks settings as required.
-    payload.setdefault("settings", {})
-    return payload
