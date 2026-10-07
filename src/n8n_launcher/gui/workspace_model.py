@@ -10,6 +10,8 @@ compute them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
@@ -31,11 +33,17 @@ class WorkspaceListModel(QAbstractListModel):
     #: Carries the :class:`~n8n_launcher.workspaces.status.WorkspaceStatus`.
     StatusRole = Qt.ItemDataRole.UserRole + 2
 
-    def __init__(self, manager: WorkspaceManager, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        manager: WorkspaceManager,
+        parent: QObject | None = None,
+        rename_handler: Callable[[str, str], None] | None = None,
+    ) -> None:
         """Hold *manager* as the source of truth; nothing is read yet."""
         super().__init__(parent)
         self._manager = manager
         self._rows: list[Workspace] = []
+        self._rename_handler = rename_handler
 
     def refresh(self) -> None:
         """Reload every row from the manager, resetting the view."""
@@ -60,7 +68,7 @@ class WorkspaceListModel(QAbstractListModel):
         if not index.isValid() or not 0 <= index.row() < len(self._rows):
             return None
         workspace = self._rows[index.row()]
-        if role == Qt.ItemDataRole.DisplayRole:
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             return workspace.name
         if role == self.WorkspaceRole:
             return workspace
@@ -85,6 +93,37 @@ class WorkspaceListModel(QAbstractListModel):
             if workspace.id == workspace_id:
                 return self.index(row, 0)
         return QModelIndex()
+
+    def setData(
+        self,
+        index: QModelIndex | QPersistentModelIndex,
+        value: object,
+        role: int = Qt.ItemDataRole.EditRole,
+    ) -> bool:
+        """Set data for the given *role* at *index*."""
+        if not index.isValid() or not 0 <= index.row() < len(self._rows):
+            return False
+        if role not in (Qt.ItemDataRole.EditRole, Qt.ItemDataRole.DisplayRole):
+            return False
+        ws = self._rows[index.row()]
+        candidate = str(value).strip()
+        if candidate == "":
+            return False
+        # check uniqueness (case-insensitive)
+        for other in self._rows:
+            if other.id == ws.id:
+                continue
+            if other.name.strip().lower() == candidate.lower():
+                return False
+        if self._rename_handler is not None:
+            self._rename_handler(ws.id, candidate)
+        return True
+
+    def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlag:
+        """Return item flags; name is editable."""
+        if not index.isValid():
+            return Qt.ItemFlag(0)
+        return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable
 
     def apply_workspace(self, workspace: Workspace) -> None:
         """Update one row in place, or reload when it is not yet known."""

@@ -82,8 +82,12 @@ class MainWindow(QMainWindow):
         )
         self.resize(QSize(*initial))
 
-        self._model = WorkspaceListModel(manager, self)
         self._actions = WorkspaceActions(manager, self)
+        self._model = WorkspaceListModel(
+            manager,
+            self,
+            rename_handler=self._actions.rename_workspace,
+        )
         # Declared before the header is wired: _sync_actions reads it on the very
         # first call, and a card gesture is refused while it is set.
         self._busy = False
@@ -121,6 +125,7 @@ class MainWindow(QMainWindow):
             selection.selectionChanged.connect(self._sync_actions)
 
         self._board.doubleClicked.connect(self._on_double_click)
+        self._board.nameEditRequested.connect(self._on_name_edit_requested)
         self._board.pillActivated.connect(self._on_pill_activated)
         self._board.contextRequested.connect(self._on_context_requested)
         self._actions.failed.connect(self._on_failed)
@@ -219,6 +224,11 @@ class MainWindow(QMainWindow):
         dialog = CreateWorkspaceDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._actions.create(dialog.plan(), dialog.workflow_dir())
+
+    def _on_name_edit_requested(self, index: QModelIndex) -> None:
+        """Start inline editing of the workspace name."""
+        if index.isValid():
+            self._board.edit(index)
 
     def _on_double_click(self, index: QModelIndex) -> None:
         """Open a workspace's n8n: start it when stopped, raise it when running.

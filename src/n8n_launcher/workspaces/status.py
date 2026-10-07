@@ -75,6 +75,7 @@ class WorkspaceStatus:
     can_stop: bool
     can_delete: bool
     can_open: bool
+    can_rename: bool = True
 
 
 def state_label(state: WorkspaceState) -> str:
@@ -129,6 +130,11 @@ def can_open(state: WorkspaceState) -> bool:
     )
 
 
+def can_rename(ws: Workspace | None = None, state: WorkspaceState | None = None) -> bool:
+    """Return True when the workspace name can be renamed."""
+    return True
+
+
 def status_for(state: WorkspaceState) -> WorkspaceStatus:
     """Build the full :class:`WorkspaceStatus` for *state*."""
     return WorkspaceStatus(
@@ -139,6 +145,7 @@ def status_for(state: WorkspaceState) -> WorkspaceStatus:
         can_stop=can_stop(state),
         can_delete=can_delete(state),
         can_open=can_open(state),
+        can_rename=True,
     )
 
 
@@ -213,6 +220,7 @@ __all__ = [
     "WorkspaceStatus",
     "can_delete",
     "can_open",
+    "can_rename",
     "can_start",
     "can_stop",
     "card_actions",

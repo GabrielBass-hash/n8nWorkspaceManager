@@ -26,9 +26,17 @@ from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPoint, Q
 from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtWidgets import QAbstractItemView, QListView, QWidget
 
+from ..core.models import Workspace
 from ..workspaces.status import WorkspaceAction, WorkspaceStatus, primary_action
 from . import theme
-from .card_delegate import CARD_SIZE, CardDelegate, card_rect, pill_hit
+from .card_delegate import (
+    CARD_SIZE,
+    CardDelegate,
+    card_rect,
+    name_text_rect,
+    pill_hit,
+    pill_rect,
+)
 from .workspace_model import WorkspaceListModel
 
 #: Tooltip wording for the pill, so the hover ring is never the only cue.
@@ -47,6 +55,8 @@ class WorkspaceBoard(QListView):
     #: position itself: a right-click may also arrive through ``contextMenuEvent``,
     #: which carries its own point, so one signal has to serve both paths.
     contextRequested = Signal(QModelIndex)
+    #: Emitted when a double-click lands on the workspace name text.
+    nameEditRequested = Signal(QModelIndex)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Build the grid; nothing is read until a model is attached."""
@@ -139,6 +149,27 @@ class WorkspaceBoard(QListView):
         if pill.isValid() and event.button() == Qt.MouseButton.LeftButton:
             self.pillActivated.emit(pill)
             event.accept()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Edit name on double-click over its text, else open as usual."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.pos()
+            idx = self.indexAt(pos)
+            if idx.isValid():
+                model = self.model()
+                ws = model.data(idx, WorkspaceListModel.WorkspaceRole) if model else None
+                status = model.data(idx, WorkspaceListModel.StatusRole) if model else None
+                if isinstance(ws, Workspace) and isinstance(status, WorkspaceStatus):
+                    visual = self.visualRect(idx)
+                    card_r = card_rect(visual)
+                    local = QPointF(pos.x() - card_r.left(), pos.y() - card_r.top())
+                    pill_r = pill_rect(card_r, status, self.font())
+                    name_r = name_text_rect(card_r, ws, self.font(), pill_r.left())
+                    if name_r.contains(local):
+                        self.nameEditRequested.emit(idx)
+                        event.accept()
+                        return
+        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         """Ask for the card's menu on a right-click anywhere on the card.

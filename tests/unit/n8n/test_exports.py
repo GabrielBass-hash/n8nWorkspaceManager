@@ -133,6 +133,21 @@ def test_iter_local_exports_prefers_the_canonical_copy(tmp_path: Path) -> None:
     assert found[1].name == "Meteo-42.json"
 
 
+def test_iter_local_exports_orders_each_group_by_string_not_by_path(tmp_path: Path) -> None:
+    _reference_tree(tmp_path)
+
+    found = list(iter_local_exports(tmp_path))
+    canonical = [e.name for e in found if e.relpath.startswith(f"{CANONICAL_DIRNAME}/")]
+    legacy = [e.name for e in found if not e.relpath.startswith(f"{CANONICAL_DIRNAME}/")]
+
+    # Sorting the Path objects instead of the names would put "Veille-7.json"
+    # last on Windows, where PurePath compares case-folded: the enumeration has
+    # to mean the same thing on the three OS the launcher ships on.
+    assert canonical == sorted(canonical)
+    assert legacy == sorted(legacy)
+    assert legacy == ["Veille-7.json", "broken.json", "notes.json"]
+
+
 def test_iter_local_exports_keeps_a_non_conforming_root_file(tmp_path: Path) -> None:
     _write(tmp_path / "notes.json", _workflow("Notes"))
 

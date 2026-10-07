@@ -500,6 +500,28 @@ class WorkspaceManager:
         self.store.mutate(remove)
         self._notify_workspaces_changed()
 
+    def rename_workspace(self, workspace_id: str, new_name: str) -> Workspace:
+        """Rename workspace *workspace_id* to *new_name* (after trim)."""
+
+        def apply(config: AppConfig) -> Workspace:
+            workspace = self._find(config, workspace_id)
+            name = new_name.strip()
+            if name == "":
+                raise WorkspaceError("Le nom du workspace ne peut pas être vide")
+            for other in config.workspaces:
+                if other.id == workspace_id:
+                    continue
+                if other.name.strip().lower() == name.lower():
+                    raise WorkspaceError("Ce nom de workspace existe déjà")
+            updated = replace(workspace, name=name)
+            idx = config.workspaces.index(workspace)
+            config.workspaces[idx] = updated
+            return updated
+
+        updated = self.store.mutate(apply)
+        self._notify_workspace_changed(updated)
+        return updated
+
     def ensure_running(
         self,
         workspace_id: str,

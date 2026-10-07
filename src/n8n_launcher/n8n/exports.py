@@ -142,6 +142,19 @@ def _local_export(path: Path, relpath: str) -> LocalExport:
     )
 
 
+def _json_files(directory: Path) -> list[Path]:
+    """Return a directory's ``*.json`` files, ordered by name on every platform.
+
+    ``sorted()`` over ``Path`` objects is **not** a string sort: ``PurePath``
+    compares its case-folded form, so Windows orders ``Veille-7.json`` after
+    ``notes.json`` while Linux and macOS order it before. Sorting the *name*
+    pins the one order that was already shipped on POSIX, which is what keeps
+    the import order, the prune order and every report built from them
+    identical on a developer's Mac and on a user's Windows.
+    """
+    return sorted(directory.glob("*.json"), key=lambda path: path.name)
+
+
 def iter_local_exports(root: Path) -> Iterator[LocalExport]:
     """Yield every workflow export of a workspace, canonical ones first.
 
@@ -155,12 +168,12 @@ def iter_local_exports(root: Path) -> Iterator[LocalExport]:
     canonical = root / CANONICAL_DIRNAME
     canonical_names: set[str] = set()
     if canonical.is_dir():
-        for path in sorted(canonical.glob("*.json")):
+        for path in _json_files(canonical):
             if not path.is_file():
                 continue
             canonical_names.add(path.name)
             yield _local_export(path, f"{CANONICAL_DIRNAME}/{path.name}")
-    for path in sorted(root.glob("*.json")):
+    for path in _json_files(root):
         if not path.is_file():
             continue
         if path.name in ROOT_BLOCKLIST or path.name in canonical_names:
@@ -272,7 +285,7 @@ def plan_export(root: Path, remote: list[dict[str, Any]]) -> ExportPlan:
     canonical = root / CANONICAL_DIRNAME
     prune = tuple(
         stale
-        for stale in sorted(canonical.glob("*.json"))
+        for stale in _json_files(canonical)
         if stale.is_file() and stale.name not in live and EXPORT_NAME_RE.match(stale.name)
     )
     return ExportPlan(write=tuple(write), prune=prune)

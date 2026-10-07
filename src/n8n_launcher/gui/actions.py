@@ -128,6 +128,13 @@ class WorkspaceActions(QObject):
             announce_created=True,
         )
 
+    def rename_workspace(self, workspace_id: str, new_name: str) -> None:
+        """Rename a workspace in the background."""
+        self._dispatch(
+            "Renommage impossible",
+            lambda: self._manager.rename_workspace(workspace_id, new_name),
+        )
+
     def _dispatch(
         self,
         failure_title: str,
