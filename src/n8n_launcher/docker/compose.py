@@ -58,6 +58,9 @@ def _render(
         data_volumes += f"  pgdata-{workspace.id}:\n"
     bind_host = "127.0.0.1:" if loopback else ""
     project_line = f"name: {name}\n" if name else ""
+    # N8N_SECURE_COOKIE: everything here talks plain HTTP, so n8n would mark
+    # the n8n-auth session cookie "Secure" and every /rest call would 401.
+    # Same setting in the disposable CI containers (runner.py.tmpl).
     service_block = f"""  n8n:
     image: {n8n_image}
     restart: unless-stopped

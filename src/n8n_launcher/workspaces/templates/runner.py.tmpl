@@ -1,0 +1,518 @@
+# __MARKER__
+# Runner de tests : exécute les pipelines sélectionnées dans un conteneur n8n
+# jetable. Bibliothèque standard uniquement, aucun paquet à installer.
+# Usage : python .n8n-tests/runner.py
+# Variables gérées par GitHub Actions : N8N_CI_CREDENTIALS (secret) et
+# N8N_IMAGE (variable, optionnelle — la version pinnée par le launcher est
+# utilisée par défaut).
+from __future__ import annotations
+
+import http.cookiejar
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+SELECTION_FILE = ROOT / ".n8n-tests" / "tests.json"
+
+# Image pinnée par le launcher (surritable via le variable N8N_IMAGE).
+N8N_IMAGE = os.environ.get("N8N_IMAGE") or "__N8N_IMAGE__"
+SECRET_NAME = "N8N_CI_CREDENTIALS"
+
+OWNER_EMAIL = "ci@n8n-launcher.test"
+OWNER_PASSWORD = "CiPassw0rd-n8n9"  # conforme à la politique de mot de passe n8n
+API_KEY_LABEL = "n8n-ci"
+
+# Délais (secondes) : démarrage du conteneur / exécution d'une pipeline.
+START_TIMEOUT = 240.0
+RUN_TIMEOUT = 300.0
+POLL_INTERVAL = 2.0
+
+MANUAL_TRIGGERS = {
+    "n8n-nodes-base.manualTrigger",
+    "@n8n/n8n-nodes-langchain.manualChatTrigger",
+}
+SCHEDULE_TRIGGERS = {"n8n-nodes-base.scheduleTrigger"}
+
+BLOCKLIST_ROOT = {
+    "package.json", "package-lock.json", "tsconfig.json", "composer.json",
+    "Pipfile", "Pipfile.lock", "deno.json", "deno.lock",
+}
+
+# Champ acceptés par le schéma public de création de workflows (strict).
+CREATE_WHITELIST = {
+    "name", "nodes", "connections", "settings", "staticData", "pinData",
+    "nodeGroups", "projectId", "parentFolderId",
+}
+
+
+def _verbose(message: str) -> None:
+    print(f"[runner] {message}", flush=True)
+
+
+def find_free_port() -> int:
+    """Laisse l'OS choisir un port local libre pour publier n8n."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class Http:
+    """Client HTTP JSON minimaliste avec gestion des cookies (stdlib only)."""
+
+    def __init__(self, base_url: str, *, timeout: float = 15.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.cookies = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookies)
+        )
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: object | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, Any]:
+        """Exécute la requête ; rend (code HTTP, corps JSON ou texte)."""
+        url = self.base_url + path
+        data = None
+        request_headers = dict(headers or {})
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            request_headers.setdefault("Content-Type", "application/json")
+        request = urllib.request.Request(
+            url, data=data, headers=request_headers, method=method
+        )
+        try:
+            with self.opener.open(request, timeout=self.timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+                code = response.status
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            code = exc.code
+        except OSError as exc:
+            return 0, str(exc)
+        text = raw.strip()
+        if not text:
+            return code, None
+        try:
+            return code, json.loads(text)
+        except ValueError:
+            return code, text
+
+
+def collect_workflows():
+    found = []
+    pipeline_names = set()
+    pipelines = ROOT / "n8nPipelines"
+    if pipelines.is_dir():
+        for path in sorted(pipelines.glob("*.json")):
+            if path.is_file():
+                found.append(f"n8nPipelines/{path.name}")
+                pipeline_names.add(path.name)
+    for path in sorted(ROOT.glob("*.json")):
+        if (
+            path.is_file()
+            and path.name not in BLOCKLIST_ROOT
+            and path.name not in pipeline_names
+        ):
+            found.append(path.name)
+    return sorted(found)
+
+
+def read_selection():
+    try:
+        data = json.loads(SELECTION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    return {str(item) for item in data.get("selected", []) if isinstance(item, str)}
+
+
+def wait_ready(http: Http) -> None:
+    """Attend que n8n réponde en JSON (owner/setup sert de sonde)."""
+    deadline = time.monotonic() + START_TIMEOUT
+    payload = {
+        "firstName": "CI",
+        "lastName": "Runner",
+        "email": OWNER_EMAIL,
+        "password": OWNER_PASSWORD,
+    }
+    while True:
+        try:
+            code, body = http.request("POST", "/rest/owner/setup", payload)
+        except Exception as exc:
+            code, body = 0, str(exc)
+        if not isinstance(body, str):
+            print(f"[runner] n8n répond (HTTP {code}) — prêt", flush=True)
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("n8n ne répond pas en JSON dans le délai imparti")
+        time.sleep(2.0)
+
+
+def login(http: Http) -> None:
+    """Connecte le propriétaire ; l'auth des endpoints /rest passe par le
+    cookie de session ``n8n-auth`` posé par la réponse (jamais par un jeton
+    dans le corps de réponse sur n8n 2.33+). Le jeton éventuel du corps n'est
+    accepté que comme signal de secours pour de futures versions."""
+    code, body = http.request(
+        "POST",
+        "/rest/login",
+        {"emailOrLdapLoginId": OWNER_EMAIL, "password": OWNER_PASSWORD},
+    )
+    body_token = isinstance(body, dict) and bool((body.get("data") or {}).get("token"))
+    has_session = any(cookie.name == "n8n-auth" for cookie in http.cookies)
+    if code not in (200, 201) or not (body_token or has_session):
+        raise RuntimeError(f"connexion au propriétaire impossible (HTTP {code}) : {body}")
+
+
+def create_api_key(http: Http) -> str:
+    code, body = http.request(
+        "POST",
+        "/rest/api-keys",
+        {
+            "label": API_KEY_LABEL,
+            "scopes": [
+                "workflow:list",
+                "workflow:create",
+                "workflow:read",
+                "credential:list",
+                "credential:read",
+                "credential:create",
+            ],
+            "expiresAt": 0,
+        },
+    )
+    if not isinstance(body, dict):
+        raise RuntimeError(f"n8n n'a pas répondu en JSON pour la clé API (HTTP {code})")
+    secret = body.get("data", {}).get("rawApiKey") or body.get("rawApiKey")
+    if not secret:
+        raise RuntimeError(f"n8n n'a pas renvoyé de clé API (HTTP {code}) : {body}")
+    return str(secret)
+
+
+def _public_get(http: Http, api_key: str, path: str):
+    code, body = http.request(
+        "GET",
+        path,
+        headers={"X-N8N-API-KEY": api_key, "Accept": "application/json"},
+    )
+    if code not in (200, 201):
+        raise RuntimeError(f"n8n a refusé {path} (HTTP {code}) : {body}")
+    if isinstance(body, list):
+        return [item for item in body if isinstance(item, dict)]
+    if isinstance(body, dict):
+        data = body.get("data", [])
+        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+    return []
+
+
+def import_workflows(http: Http, api_key: str):
+    """Importe tous les exports ; renvoie {chemin relatif: id n8n}."""
+    existing = _public_get(http, api_key, "/api/v1/workflows")
+    by_name = {str(item.get("name")): str(item.get("id")) for item in existing if item.get("id")}
+    known_names = set(by_name)
+    mapping = {}
+    headers = {"X-N8N-API-KEY": api_key, "Accept": "application/json"}
+    for rel in collect_workflows():
+        try:
+            data = json.loads((ROOT / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"export « {rel} » illisible : {exc}") from exc
+        name = str(data.get("name") or "").strip()
+        if name in known_names:
+            mapping[rel] = by_name[name]
+            continue
+        payload = {key: value for key, value in data.items() if key in CREATE_WHITELIST}
+        payload.setdefault("settings", {})
+        code, body = http.request("POST", "/api/v1/workflows", payload, headers)
+        if code not in (200, 201) or not isinstance(body, dict):
+            raise RuntimeError(f"import de « {rel} » refusé (HTTP {code}) : {body}")
+        created = body if isinstance(body, dict) else {}
+        workflow_id = created.get("id") or created.get("data", {}).get("id")
+        if not workflow_id:
+            raise RuntimeError(f"n8n n'a pas renvoyé d'identifiant pour « {rel} »")
+        mapping[rel] = str(workflow_id)
+        known_names.add(name)
+        by_name[name] = str(workflow_id)
+    print(f"[runner] {len(mapping)} workflow(s) disponible(s) dans le conteneur", flush=True)
+    return mapping
+
+
+def configure_credentials(http: Http, api_key: str) -> int:
+    """Reproduit dans le conteneur les credentials du secret ; 0 par défaut."""
+    raw = os.environ.get(SECRET_NAME, "")
+    if not raw:
+        _verbose(
+            f"secret {SECRET_NAME} absent — les pipelines qui utilisent des "
+            "credentials échoueront à l'exécution"
+        )
+        return 0
+    try:
+        items = json.loads(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"le secret {SECRET_NAME} n'est pas un JSON valide") from exc
+    if not isinstance(items, list):
+        raise RuntimeError(f"le secret {SECRET_NAME} doit être une liste de credentials")
+    if not items:
+        _verbose(f"secret {SECRET_NAME} vide — aucun credential à recréer")
+        return 0
+    existing = _public_get(http, api_key, "/api/v1/credentials")
+    known = {
+        (str(item.get("name")), str(item.get("type")))
+        for item in existing
+        if item.get("name") and item.get("type")
+    }
+    headers = {"X-N8N-API-KEY": api_key, "Accept": "application/json"}
+    created = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        ctype = str(item.get("type") or "").strip()
+        data = item.get("data") or {}
+        if not name or not ctype:
+            _verbose(f"credential ignorée (nom/type manquants) : {item!r}")
+            continue
+        if (name, ctype) in known:
+            continue
+        code, body = http.request(
+            "POST",
+            "/api/v1/credentials",
+            {"name": name, "type": ctype, "data": data},
+            headers,
+        )
+        if code not in (200, 201):
+            raise RuntimeError(f"création de la credential « {name} » refusée (HTTP {code}) : {body}")
+        created += 1
+        known.add((name, ctype))
+    _verbose(f"{created} credential(s) créée(s) dans le conteneur")
+    return created
+
+
+def run_payload(export: dict):
+    """Choisit le payload de /rest/workflows/{id}/run.
+
+    Renvoie (kind, payload) : « trigger » pour un run depuis un nœud de
+    déclenchement, « destination » pour un run complet depuis un déclencheur
+    inconnu (programmé), ou (None, None) quand rien n'est exécutable.
+    """
+    nodes = [n for n in export.get("nodes", []) if isinstance(n, dict)]
+    pin_data = export.get("pinData") or {}
+    manual = next((n for n in nodes if n.get("type") in MANUAL_TRIGGERS), None)
+    if manual:
+        return "trigger", {"triggerToStartFrom": {"name": manual.get("name")}}
+    schedule = next((n for n in nodes if n.get("type") in SCHEDULE_TRIGGERS), None)
+    if schedule:
+        destination = next((n.get("name") for n in reversed(nodes)), None)
+        if not destination:
+            return None, None
+        return "destination", {
+            "destinationNode": {"nodeName": destination, "mode": "inclusive"}
+        }
+    pinned = next(
+        (
+            n
+            for n in nodes
+            if str(n.get("type", "")).rsplit(".", 1)[-1].endswith("Trigger")
+            and n.get("name") in pin_data
+        ),
+        None,
+    )
+    if pinned:
+        return "trigger", {"triggerToStartFrom": {"name": pinned.get("name")}}
+    return None, None
+
+
+def trigger_run(http: Http, workflow_id: str, payload: dict) -> str | None:
+    """Lance le run ; renvoie l'id d'exécution ou None si en attente webhook.
+
+    La réponse est soit ``{"executionId": ...}`` soit, selon les versions,
+    ``{"data": {"executionId": ...}}`` — les deux sont acceptées."""
+    code, body = http.request(
+        "POST", f"/rest/workflows/{workflow_id}/run", payload
+    )
+    if not isinstance(body, dict):
+        raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
+    data = body.get("data")
+    if body.get("waitingForWebhook") or (
+        isinstance(data, dict) and data.get("waitingForWebhook")
+    ):
+        return None
+    execution_id = body.get("executionId")
+    if not execution_id and isinstance(data, dict):
+        execution_id = data.get("executionId")
+    if execution_id:
+        return str(execution_id)
+    raise RuntimeError(f"n8n a refusé le run de {workflow_id} (HTTP {code}) : {body}")
+
+
+def _execution_detail(data: object) -> str:
+    if not isinstance(data, dict):
+        return ""
+    result = data.get("resultData") or {}
+    error = result.get("error") if isinstance(result, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    node = data.get("lastNodeExecuted") or data.get("stoppedAt") or ""
+    if message:
+        return f"{node} : {message}" if node else str(message)
+    return f"dernier nœud : {node}" if node else ""
+
+
+def wait_execution(http: Http, execution_id: str):
+    """Sonde une exécution ; renvoie (statut, détail)."""
+    deadline = time.monotonic() + RUN_TIMEOUT
+    while True:
+        code, body = http.request(
+            "GET", f"/rest/executions/{execution_id}"
+        )
+        if not isinstance(body, dict):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"n8n n'a pas renvoyé l'exécution {execution_id} (HTTP {code})")
+            time.sleep(POLL_INTERVAL)
+            continue
+        data = body.get("data") or body
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                data = {}
+        if not isinstance(data, dict):
+            time.sleep(POLL_INTERVAL)
+            continue
+        status = str(data.get("status") or "")
+        if status == "waiting":
+            return "waiting", "exécution en attente d'une requête (webhook)"
+        if status in ("running", "new", "started"):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"exécution {execution_id} toujours en cours après {RUN_TIMEOUT:.0f}s")
+            time.sleep(POLL_INTERVAL)
+            continue
+        if not status and not data.get("finished"):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"exécution {execution_id} sans statut après {RUN_TIMEOUT:.0f}s")
+            time.sleep(POLL_INTERVAL)
+            continue
+        return status or ("error" if data.get("finished") else "running"), _execution_detail(data)
+
+
+STATUS_LABELS = {
+    "success": "réussie",
+    "error": "en échec",
+    "crashed": "crash",
+    "failed": "en échec",
+    "timeout": "délai dépassé",
+    "cancelled": "annulée",
+    "waiting": "en attente (webhook)",
+}
+
+
+def summarize(results):
+    """Affiche le bilan ; 1 si au moins une pipeline en échec."""
+    passed = [rel for rel, status in results if status == "success"]
+    failed = [(rel, status) for rel, status in results if status not in ("success", "waiting")]
+    waiting = [rel for rel, status in results if status == "waiting"]
+    print()
+    print("Résultats des pipelines :")
+    for rel, status in results:
+        label = STATUS_LABELS.get(status, status)
+        mark = "✔" if status == "success" else ("◻" if status == "waiting" else "✘")
+        print(f"  - {mark} {rel} ({label})")
+    print()
+    print(f"réussies : {len(passed)} | en attente : {len(waiting)} | en échec : {len(failed)}")
+    for rel, status in failed:
+        print(f"échec : {rel} ({STATUS_LABELS.get(status, status)})", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def main():
+    selected = read_selection()
+    if not selected:
+        _verbose("aucune pipeline sélectionnée dans tests.json — rien à exécuter")
+        return 0
+    port = find_free_port()
+    http = Http(f"http://127.0.0.1:{port}")
+    name = f"n8n-ci-{os.getpid()}"
+    _verbose(f"démarrage du conteneur {N8N_IMAGE} ({name})")
+    docker = os.environ.get("DOCKER") or "docker"
+    try:
+        subprocess.run(
+            [
+                docker,
+                "run",
+                "--name", name,
+                "-d",
+                "-p", f"127.0.0.1:{port}:5678",
+                "-e", "N8N_DIAGNOSTICS_ENABLED=false",
+                "-e", "N8N_DISABLE_TELEMETRY=true",
+                "-e", "N8N_VERSION_NOTIFICATIONS_ENABLED=false",
+                # Le conteneur est local et jetable : sans ce flag le cookie
+                # de session n8n-auth est marqué « Secure » et ne serait pas
+                # rejoué en HTTP plain par le client standard, d'où des 401
+                # sur /rest/api-keys. Même réglage que les conteneurs gérés.
+                "-e", "N8N_SECURE_COOKIE=false",
+                "-e", f"N8N_ENCRYPTION_KEY={os.environ.get('N8N_ENCRYPTION_KEY') or 'n8n-ci-encryption-key-0123456789abcdef'}",
+                "-e", "EXECUTIONS_TIMEOUT=300",
+                "-e", "EXECUTIONS_TIMEOUT_MAX=300",
+                N8N_IMAGE,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"docker run a échoué : {exc.stderr.strip() or exc.stdout.strip() or exc}"
+        ) from exc
+    try:
+        wait_ready(http)
+        login(http)
+        api_key = create_api_key(http)
+        mapping = import_workflows(http, api_key)
+        configure_credentials(http, api_key)
+
+        results = []
+        for rel in sorted(selected):
+            if rel not in mapping:
+                raise RuntimeError(f"pipeline « {rel} » n'a pas pu être importée dans n8n")
+            export = json.loads((ROOT / rel).read_text(encoding="utf-8"))
+            _, payload = run_payload(export)
+            if payload is None:
+                raise RuntimeError(f"pipeline « {rel} » n'a aucun déclencheur exécutable")
+            execution_id = trigger_run(http, mapping[rel], payload)
+            if execution_id is None:
+                results.append((rel, "waiting"))
+                continue
+            status, detail = wait_execution(http, execution_id)
+            results.append((rel, status))
+            suffix = f" ({detail})" if detail else ""
+            _verbose(f"{rel} : {status}{suffix}")
+        return summarize(results)
+    finally:
+        subprocess.run(
+            [docker, "rm", "-f", name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
+if __name__ == "__main__":
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Pas de sys.exit() : sous `python -i` / console IDE, une SystemExit au
+    # niveau module était retranscrite en « SystemExit: 1 ». os._exit() donne
+    # le bon code de sortie (CI) sans jamais afficher de traceback.
+    os._exit(code)

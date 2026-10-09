@@ -79,7 +79,13 @@ class ApiCredentials:
 
 
 class OwnerSetup:
-    """Bootstrap the n8n owner account and create a launcher API key."""
+    """Bootstrap the n8n owner account and create a launcher API key.
+
+    Everything here authenticates through the ``n8n-auth`` session cookie from
+    ``POST /rest/login``: ``/rest/*`` returns no body token and rejects
+    ``Authorization: Bearer <JWT>`` with 401, so one session object is reused
+    for setup, login and key creation.
+    """
 
     def __init__(self, *, timeout: float = 10.0, session: requests.Session | None = None) -> None:
         self.timeout = timeout
@@ -95,7 +101,12 @@ class OwnerSetup:
         last_name: str = "Launcher",
         ready_timeout: float = 180.0,
     ) -> ApiCredentials:
-        """Ensure the owner exists, log in, and return a fresh launcher API key."""
+        """Ensure the owner exists, log in, and return a fresh launcher API key.
+
+        The key is created with a ``scopes`` array and a numeric
+        ``expiresAt`` (``0`` = never) — n8n rejects a request missing either
+        shape.
+        """
         root = base_url.rstrip("/")
         self._ensure_owner(root, email, password, first_name, last_name, ready_timeout)
         login = self._request(
@@ -135,6 +146,16 @@ class OwnerSetup:
         last_name: str,
         ready_timeout: float,
     ) -> None:
+        """Create the owner through the internal REST endpoint until it sticks.
+
+        n8n is driven through ``POST /rest/owner/setup``, not the
+        ``N8N_INSTANCE_OWNER_*`` env vars. While the instance is still
+        starting it answers with transient HTML or a non-JSON body, so any
+        refusal that could be "not ready yet" is retried inside
+        *ready_timeout*; a refusal naming the payload itself ("must be",
+        "invalid_type", …) is raised immediately because retrying a rejected
+        schema cannot succeed, and "already" means the owner exists.
+        """
         deadline = time.monotonic() + ready_timeout
         payload = {
             "firstName": first_name,

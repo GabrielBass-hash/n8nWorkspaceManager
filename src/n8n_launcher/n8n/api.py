@@ -62,7 +62,13 @@ class N8nApiClient:
         return self._request("POST", f"/workflows/{workflow_id}/{action}")
 
     def list_credentials(self) -> list[dict[str, Any]]:
-        """Return all credentials; a missing list is treated as empty."""
+        """Return all credentials; a missing list is treated as empty.
+
+        Listing through the public API additionally needs the
+        ``credential:list`` scope on the key (it is in
+        :data:`n8n_launcher.n8n.scopes.REQUIRED_WORKFLOW_SCOPES`), or n8n
+        answers 403 « Forbidden ».
+        """
         payload = self._request("GET", "/credentials", ignore_not_found=True)
         return list(payload.get("data", []))
 

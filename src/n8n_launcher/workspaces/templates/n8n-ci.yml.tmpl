@@ -1,0 +1,49 @@
+# __MARKER__
+# GitHub Actions CI pour ce workspace n8n : exécute les pipelines sélectionnées
+# dans un conteneur n8n isolé et jetable (voir .n8n-tests/runner.py).
+name: n8n-launcher CI
+
+on:
+  push:
+    branches: ["dev"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Valider les exports
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validation statique des exports
+        run: python .n8n-tests/validate.py
+
+  test:
+    name: Exécuter les pipelines
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compter les pipelines sélectionnées
+        id: selection
+        run: |
+          count=$(python -c "import json;print(len(json.load(open('.n8n-tests/tests.json', encoding='utf-8'))['selected']))" 2>/dev/null || echo 0)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+      - name: Lancer le runner de tests n8n
+        # Une sélection vide (aucun test coché) ne lance rien : le job passe
+        # « vert » sans démarrer de conteneur, au lieu d'exécuter l'ancienne
+        # sélection encore présente sur GitHub.
+        if: steps.selection.outputs.count != '0'
+        env:
+          N8N_IMAGE: ${{ vars.N8N_IMAGE }}
+          N8N_CI_CREDENTIALS: ${{ secrets.N8N_CI_CREDENTIALS }}
+        run: python .n8n-tests/runner.py

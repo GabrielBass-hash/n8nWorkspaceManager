@@ -1,0 +1,89 @@
+# __MARKER__
+# Validation statique des exports de workflows et de la sélection de tests.
+# Reste volontairement en bibliothèque standard, sans Docker.
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SELECTION_FILE = ROOT / ".n8n-tests" / "tests.json"
+
+# Fichiers de manifest manifestement non-workflow (miroir du launcher).
+BLOCKLIST_ROOT = {
+    "package.json", "package-lock.json", "tsconfig.json", "composer.json",
+    "Pipfile", "Pipfile.lock", "deno.json", "deno.lock",
+}
+
+
+def collect_workflows():
+    found = []
+    pipeline_names = set()
+    pipelines = ROOT / "n8nPipelines"
+    if pipelines.is_dir():
+        for path in sorted(pipelines.glob("*.json")):
+            if path.is_file():
+                found.append(f"n8nPipelines/{path.name}")
+                pipeline_names.add(path.name)
+    for path in sorted(ROOT.glob("*.json")):
+        if (
+            path.is_file()
+            and path.name not in BLOCKLIST_ROOT
+            and path.name not in pipeline_names
+        ):
+            found.append(path.name)
+    return sorted(found)
+
+
+def main():
+    errors = []
+    seen_names = set()
+    exports = {}
+    for rel in collect_workflows():
+        path = ROOT / rel
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            errors.append(f"{rel} : fichier JSON illisible ({exc})")
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
+            errors.append(f"{rel} : export invalide (\"nodes\" manquant)")
+            continue
+        name = str(data.get("name") or "").strip()
+        if not name:
+            errors.append(f"{rel} : nom de workflow manquant")
+        if name in seen_names:
+            errors.append(f"{rel} : nom de workflow dupliqué (« {name} »)")
+        seen_names.add(name)
+        if not isinstance(data.get("connections"), dict):
+            errors.append(f"{rel} : connexions invalides")
+        for index, node in enumerate(data.get("nodes")):
+            if not isinstance(node, dict) or not str(node.get("name") or "").strip() or not str(node.get("type") or "").strip():
+                errors.append(f"{rel} : nœud n°{index} invalide (nom/type manquants)")
+        exports[rel] = data
+    try:
+        selection = json.loads(SELECTION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        selection = {}
+    selected = set()
+    if isinstance(selection, dict):
+        selected = {str(item) for item in selection.get("selected", []) if isinstance(item, str)}
+    for rel in sorted(selected):
+        if rel not in exports:
+            errors.append(f"tests.json : « {rel} » ne correspond à aucun export connu")
+    if not errors:
+        print(f"OK : {len(exports)} export(s) valide(s), {len(selected)} pipeline(s) sélectionnée(s).")
+        return 0
+    for error in errors:
+        print(error, file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Pas de sys.exit() : sous `python -i` / console IDE, une SystemExit au
+    # niveau module était retranscrite en « SystemExit: 1 ». os._exit() donne
+    # le bon code de sortie (CI) sans jamais afficher de traceback.
+    os._exit(code)

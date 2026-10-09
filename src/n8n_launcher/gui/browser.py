@@ -169,6 +169,17 @@ def open_web_app(
     bar violate the launcher workflow. The caller receives a clear error when
     no supported browser is installed.
 
+    Reopening is not a URL problem: n8n routes client-side (a fresh window on
+    ``/`` lands on ``/signin?redirect=%252F`` with no HTTP redirect), so the
+    same URL twice would still produce two windows. Instead this reads the
+    port Chromium published in ``DevToolsActivePort`` inside a
+    launcher-owned profile (:func:`browser_profile_dir`), matches the
+    instance's **origin** in ``/json/list`` and calls ``/json/activate/<id>``.
+    Two races fall back to launching a new window: the port file appearing
+    before the endpoint accepts requests, and a crashed browser leaving the
+    file behind. The DevTools endpoint binds loopback only, over a profile
+    already readable in the user's own config directory.
+
     Args:
         url: The instance's local URL.
         reuse: Whether a window already showing that instance may be raised
