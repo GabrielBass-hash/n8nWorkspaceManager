@@ -1,9 +1,9 @@
-# docs/architecture.md — the module map and the measured gotchas
+# docs/architecture.md — the module map and a gotchas index
 
 This file exists so that `AGENTS.md` stays short enough to be useful on every
-turn. It holds the two sections of `AGENTS.md` that answer *where does this
-behaviour live* and *what was measured on a real host* — questions you ask
-once per task, not once per edit.
+turn. It holds the module map — *where does this behaviour live* — and an index
+of the facts measured on a real host, which you ask once per task, not once per
+edit.
 
 **Read this file when** you are about to touch `n8n/`, `remote/`, `docker/`,
 `git/`, `github/`, `database/`, `monitoring/`, `platform/`, or the three GUI
@@ -12,9 +12,13 @@ modules that own the card gestures — `gui/browser.py`, `gui/window.py` and
 the packaging story" — that is `AGENTS.md` §Commands, or `README.md`
 §Distribution.
 
-Nothing here is a summary of the source: both sections moved here verbatim, and
-they are the only place either is maintained. A change to a module's role or to
-a measured fact is edited here first.
+Nothing here is a summary of the source. The module map is maintained here;
+each package's ``src/n8n_launcher/*/__init__.py`` docstring carries its
+one-line digest (role, entry, headline gotcha) so the navigation ladder can
+answer a role question without opening this file. The measured gotchas are
+**not** maintained here: their full text lives in the docstring or comment of
+the symbol it concerns, and the index below points at each one — the fact and
+the code cannot drift apart.
 
 ---
 
@@ -41,16 +45,18 @@ a measured fact is edited here first.
 | `workspaces/status.py` | What a card shows and which actions it offers: `StatusTone`, `WorkspaceAction`, `CardAction`, `WorkspaceStatus`, `status_for`, `state_label`, `summary_line`, `can_start` / `can_stop` / `can_delete` / `can_open`, `primary_action` (what the status pill does) and `card_actions` (the right-click menu). A view renders this; it never re-derives a label, a tone or a rule. |
 | `workspaces/close.py` | `CloseSequence`: the ordered shutdown (reconcile → export → git sync → stop, per workspace) with every decision injected as a `CloseHooks` callback (`on_progress`, `on_sync_failed`, `on_stop_failed`, `on_push_failed`), so it runs headless and is testable without a window. |
 | `workspaces/dialogs.py` | What the forms *collect*, not how they looked: `CreatePlan`, `GitConfigChoice`, `GitClonePlan`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan`, plus `fresh_managed_db_config`, `default_creation_db` (managed when `has_db_layout()` — a `db/schema.sql` or a `db/migrations/*.sql`), `int_or` and `repo_name_from`. |
-| `workspaces/ci.py` | The CI harness for a workspace's *own* repo: `github_repo_path` (remote URL → `owner/repo`), workflow discovery (`collect_workflows`: `n8nPipelines/*.json` + root `*.json` minus a blocklist, **deduped by basename in favour of `n8nPipelines/`**), `load_export`, `missing_credentials`, `workflow_eligibility`, `save_ci_selection`, and `render_harness()` which emits the workflow YAML plus a stdlib-only `validate.py` / `runner.py` (`GENERATED_MARKER`-commented, image pinned through the `__N8N_IMAGE__` token). |
+| `workspaces/ci.py` | The CI harness for a workspace's *own* repo: `github_repo_path` (remote URL → `owner/repo`), workflow discovery (`collect_workflows`: `n8nPipelines/*.json` + root `*.json` minus a blocklist, **deduped by basename in favour of `n8nPipelines/`**), `load_export`, `missing_credentials`, `workflow_eligibility`, `save_ci_selection`, and `render_harness()` which emits the workflow YAML plus a stdlib-only `validate.py` / `runner.py` from the template documents in `workspaces/templates/` (`GENERATED_MARKER`-commented, image pinned through the `__N8N_IMAGE__` token). |
 | `docker/compose.py` | Renders Compose YAML. One project per workspace, `n8n-ws-<id>`; named volumes `n8ndata-<id>` and, in managed mode, `pgdata-<id>`. Handles managed Postgres and `DbMode.NONE` (no DB service at all). `render_remote_compose` emits a top-level `name:` so the project is stable on the server. |
 | `docker/manager.py` | Thin subprocess wrapper around `docker compose`, always with `-p <project>` and `-f <file>` for isolation. `list_project_states()` reads `Labels` through `parse_container_labels()`, which accepts the three shapes the CLI produces (object, JSON string, and the flat `k=v,k=v` string Compose 2.35 emits on Docker Desktop). `resolve_docker_command()` probes the macOS install locations before falling back to `PATH`. |
 | `core/config.py` | SQLite config store (`launcher.db`, WAL). `load()` / `mutate(fn)` are safe under threads *and* processes (`BEGIN IMMEDIATE` write serialization + 10 s busy timeout; readers use the WAL). The connection is cached for the process lifetime, so `close()` exists — `__main__`'s `finally` and `gui/app.py::self_test()` both call it, and on Windows an open handle makes `launcher.db` undeletable. A legacy `config.json` is migrated once when the database is missing; the database and its `-wal` / `-shm` sidecars are chmodded `0o600` on non-Windows. |
 | `core/filelock.py` | Cross-platform `FileLock` (fcntl/shared on POSIX, `msvcrt.locking` on Windows) and `acquire_single_instance_lock()`. |
 | `core/models.py` | Dataclasses: `DbMode` (`NONE` / `MANAGED`), `DbConfig`, `GitConfig`, `ServerConfig`, `WorkspaceState`, `Workspace`, `AppConfig`. |
 | `core/paths.py` | `platformdirs` paths for config, logs and runtime under `n8n-launcher`; `compose_file(workspace_id)` and `browser_profile_dir()`. |
+| `core/templates.py` | `read_template(package, name)` — loads the `__TOKEN__` template documents (`remote/templates/*.tmpl`, `workspaces/templates/*.tmpl`) through `importlib.resources`, at import time of the calling module. `scripts/build.py` ships them with `--add-data` and asserts their presence in `--verify`. |
 | `n8n/api.py` | Small HTTP client for the n8n **public** API (workflows, credentials). |
 | `n8n/owner.py` | Owner bootstrap through the internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`), retrying through the transient HTML n8n serves while starting. `wait_for_n8n()` polls readiness. Also `hash_owner_password()` (bcrypt). |
 | `n8n/scopes.py` | `REQUIRED_WORKFLOW_SCOPES` — the one scope list, shared by the local bootstrap and by the generated remote `deploy.py` through the `__API_KEY_SCOPES__` token. It is a contract with the n8n version; never duplicate it. |
+| `n8n/exports.py` | Export/import planning for workflow JSON: `plan_import` / `plan_export`, the `SKIP_*` reasons, `export_filename` / `parse_export_id`, and `WORKFLOW_KEYS` — the whitelist the public create schema accepts (`additionalProperties: false`). |
 | `n8n/workflows.py` | `SyncRunner`: `import_all()` creates in n8n every workflow JSON found in the workspace folder; `export_all(mirror=…)` refreshes `n8nPipelines/` exports and optionally mirrors identical copies at the workspace root; optional background sync thread. |
 | `git/manager.py` | Git operations for a workspace's workflow synchronization, in the `workflows_dir`. `WORKSPACE_BRANCH = "dev"` and `workspace_branch(id)`; `git_init` seeds that branch. `workspace_git_lock(path)` is the reentrant per-workspace lock. `git_push` (`-u origin <branch>`, one retry on a server-side rejection). `git_seed_remote` + `tokenize_remote_url` build the one-shot tokenized GitHub push URL. |
 | `github/api.py` | GitHub REST client: `github_owner()`, `create_repo()`, `list_workflow_runs()`, `list_run_jobs()`, `fetch_job_logs()`, `dispatch_workflow()`; typed `GitHubError` with `status_code`. Repo paths keep a **literal** slash (`repos/owner/repo/...`) because URL-encoding it makes every Actions endpoint 404. |
@@ -60,75 +66,31 @@ a measured fact is edited here first.
 | `monitoring/` | Structured event journal: `events.py` (`Event`), `store.py` (`EventStore`, SQLite `logs_dir()/events.db`, `RETENTION_DAYS = 30`, `latest_events` / `search_events` / `export_events`), `redaction.py` (secret-shaped values masked *before* they are persisted) and `bootstrap.py` (`bootstrap_logging`, `capture_exceptions`, `sys` / `threading` excepthooks). |
 | `platform/ports.py` | `is_port_available` and `suggest_port`. |
 | `platform/update_flow.py` | `UpdateController`: the release check → download → install order, with every question injected as a constructor callback (`set_status`, `on_offer`, `on_error`, `on_status_link`, `schedule`, `is_closed`, `finish_close`) and queue results routed back through `events`. All the network and filesystem work is `platform/updater.py`, which also compares `__version__`. Per-platform assets are the macOS `.dmg`, the Linux onedir tarball (`n8n-launcher-linux.tar.gz`, with an `.AppImage` fallback) and the Windows onedir zip (`n8n-launcher-windows.zip`); `install_target()` returns the `.app` bundle on macOS and the onedir **install directory** elsewhere, and the generated helper scripts unpack the archive and swap that directory. |
-| `remote/ssh.py` / `remote/deploy.py` | Remote server deployment and bounded observability: `ssh_run` / `scp` plumbing, atomic `write_remote_file`, the generated `post-receive` hook + `deploy.py` (template strings), and the read-only health / logs / marker / execution-status reads. `REMOTE_STATUS_CAPABILITY` and the execution-status sets live here. |
+| `remote/ssh.py` / `remote/deploy.py` | Remote server deployment and bounded observability: `ssh_run` / `scp` plumbing, atomic `write_remote_file`, the generated `post-receive` hook + `deploy.py` (template documents in `remote/templates/`, loaded by `core/templates.py`), and the read-only health / logs / marker / execution-status reads. `REMOTE_STATUS_CAPABILITY` and the execution-status sets live here. |
 
 `git/__init__.py` and `remote/__init__.py` re-export their package's public
 surface; import managers through them.
 
 ---
 
-## Measured gotchas
+## Measured gotchas (index)
 
 Facts verified against a real n8n 2.x / Docker Desktop / Chromium host. Do not
-re-derive them by guessing.
+re-derive them by guessing. The full text lives at the symbol — that docstring
+or comment is the source of truth; this index only says where to look.
 
-- **`/healthz` is liveness, not readiness.** On n8n 2.40, `/healthz` answers 200
-  at ~2.8 s while `GET /` still returns 404 `Cannot GET /`; only at ~4.7 s does
-  `/healthz/readiness` go 200 — the moment the frontend handler is mounted.
-  Anything that opens the UI or calls the API gates on
-  `/healthz/readiness`, which is what `n8n/owner.py::wait_for_n8n` polls. An n8n
-  without that route answers 404 and the wait falls back to the UI root.
-- **Public API is schema-strict**: `POST /api/v1/workflows` validates with
-  `additionalProperties: false`, so a server-only field in the body is HTTP 400
-  "must NOT have additional properties". Only `_create_payload`'s whitelist
-  survives.
-- **`/rest/*` authenticates with the `n8n-auth` session cookie** from
-  `POST /rest/login`; n8n returns no body token and `Authorization: Bearer <JWT>`
-  is rejected with 401. Because urllib / requests refuse to replay a `Secure`
-  cookie over plain HTTP, the generated CI runner starts its disposable container
-  with `N8N_SECURE_COOKIE=false` (same as the managed Compose containers) —
-  without it `POST /rest/api-keys` 401s on every version. Listing credentials
-  through the public API additionally needs the `credential:list` scope, or
-  `GET /api/v1/credentials` is 403 « Forbidden ». `trigger_run` must accept both
-  `{"executionId": …}` and `{"data": {"executionId": …}}`.
-- **Owner bootstrap uses the internal REST endpoints**, not the
-  `N8N_INSTANCE_OWNER_*` env vars; API keys need a `scopes` array and a numeric
-  `expiresAt`; n8n serves transient HTML while starting, so the bootstrap retries
-  until it gets JSON.
-- **Reopening a browser window is not a URL problem.** n8n routes client-side (a
-  fresh window on `/` lands on `/signin?redirect=%252F` with no HTTP redirect), so
-  `--app=<same URL>` twice leaves two windows. `gui/browser.py` opens windows in a
-  launcher-owned profile (`browser_profile_dir`), reads the port Chromium published
-  in `DevToolsActivePort` (`--remote-debugging-port=0`), matches the instance's
-  **origin** in `/json/list` and calls `/json/activate/<id>`. Two races (the port
-  file appears before the endpoint accepts; a crashed browser leaves the file
-  behind) fall back to launching a window. Security delta: the DevTools endpoint
-  binds loopback only, over a profile already readable in the user's own config
-  directory.
-- **A missing Qt platform plugin fails silently** — the one packaging failure a
-  user sees as « the app does nothing ». `verify_qt_bundle()` runs at the end of
-  every build (and as `scripts/build.py --verify <root>` in CI), and
-  `n8n-launcher --self-test` runs on the finished artifact on all three OS.
-- **`docker ps` labels are not always a map** (see `docker/manager.py`).
-- **macOS bundle-launched apps get a minimal `PATH`**, so `docker` is located by
-  probing the standard install locations, never by bare name.
-- **First launch and the unreadable config are two different branches.**
-  `store.load()` raising `ConfigError` means either « absent » (wizard) or
-  « present and broken » (back up and stop). The discriminator is
-  `store.path.exists()`: a wizard may never run on top of a config it could not
-  read.
-- **`validate_password` is a mirror, not the source of truth** (8–64 chars, one
-  digit, one uppercase, per n8n 2.40). It only saves the user a round trip; if n8n
-  changes, both move together.
-- **Activation on the server is best effort, through the owner session**: the
-  public activate endpoint is refused by n8n 2.x for a workflow the key's user
-  cannot activate. Creating the API key revokes the deploy session, so the
-  `versionId` lookup re-logs in and retries. A refusal is logged, never raised —
-  the import has already succeeded.
-- **`finished` is derived, never sent.** `GET /rest/executions` returns no
-  `finished` flag, so it comes from n8n's own vocabulary:
-  `TERMINAL_EXECUTION_STATUSES` ⇒ `True`, `PENDING_EXECUTION_STATUSES` ⇒ `False`,
-  anything else ⇒ `None`, an explicit boolean always winning. Both sets live in
-  `remote/deploy.py` and are injected into the generated script; a meta-test
-  asserts both parsers agree for every status. Callers sort on `startedAt`
-  (newest first) — the remote order is not a contract.
+- `n8n/owner.py::wait_for_n8n` — `/healthz` is liveness, `/healthz/readiness` is the gate (n8n 2.40 timings, 404 fallback).
+- `n8n/exports.py::WORKFLOW_KEYS` — the public create schema is `additionalProperties: false`; only the whitelist survives.
+- `n8n/owner.py::OwnerSetup` — `/rest/*` authenticates with the `n8n-auth` session cookie; a Bearer token is 401.
+- `docker/compose.py::_render` — `N8N_SECURE_COOKIE=false` over plain HTTP, or every `/rest` call 401s (same in `workspaces/templates/runner.py.tmpl`).
+- `n8n/api.py::list_credentials` — listing through the public API needs the `credential:list` scope, or it is 403.
+- `workspaces/templates/runner.py.tmpl::trigger_run` — accepts both `{"executionId": …}` and `{"data": {"executionId": …}}`.
+- `n8n/owner.py::_ensure_owner` — bootstrap drives the internal REST endpoints (not `N8N_INSTANCE_OWNER_*`), retried through the transient HTML; API keys need a `scopes` array and numeric `expiresAt`.
+- `gui/browser.py::open_web_app` — reopening is a DevTools *origin* match, not a URL problem; two races fall back to launching a window.
+- `scripts/build.py::verify_qt_bundle` — a missing Qt platform plugin fails silently; hence `--verify` in CI and `--self-test` on the artifact.
+- `docker/manager.py::parse_container_labels` — `docker ps` Labels is not always a map (flat `k=v,k=v` since Compose 2.35).
+- `docker/manager.py::resolve_docker_command` — macOS bundle launches get a minimal `PATH`: probe install locations, never bare name.
+- `__main__.py::_backup_unreadable_config` — an unreadable config is moved aside and the run stops; an absent config (`store.path.exists()`) opens the wizard instead.
+- `core/first_launch.py::validate_password` — a mirror of n8n's password policy, not the source of truth.
+- `remote/templates/deploy.py.tmpl::activate_workflow` — activation is best effort through the owner session; a refusal is logged, never raised.
+- `remote/deploy.py::TERMINAL_EXECUTION_STATUSES` — `finished` is derived from n8n's vocabulary, never sent by `/rest/executions`.

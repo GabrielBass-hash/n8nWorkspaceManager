@@ -1,4 +1,9 @@
-"""Application observability, event persistence, and logging integration."""
+"""Application observability, event persistence, and logging integration.
+
+Entry: :class:`~n8n_launcher.monitoring.store.EventStore` (``store.py``),
+``bootstrap_logging`` (``bootstrap.py``), ``redact_secrets`` (``redaction.py``).
+Map: ``docs/architecture.md``.
+"""
 
 from .bootstrap import bootstrap_logging, capture_exceptions, install_exception_capture
 from .events import Event, MonitoringEvent

@@ -26,6 +26,13 @@ n8n-launcher = "n8n_launcher.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The generated-artefact templates (post-receive hook, remote deploy script,
+# CI harness) are data files inside their package; without this they are left
+# out of any non-editable install.
+[tool.setuptools.package-data]
+"n8n_launcher.remote" = ["templates/*.tmpl"]
+"n8n_launcher.workspaces" = ["templates/*.tmpl"]
+
 [tool.setuptools.dynamic]
 version = {attr = "n8n_launcher.__version__"}
 
@@ -74,8 +81,8 @@ ignore = []
 "src/n8n_launcher/remote/**" = ["S603", "S604", "S607"]
 # database: subprocess + SQL built via _sql_literal() (safe)
 "src/n8n_launcher/database/**" = ["S603", "S604", "S605", "S607", "S105", "S608"]
-# ci.py: template strings for generated validate.py/runner.py (long lines, token names)
-"src/n8n_launcher/workspaces/ci.py" = ["E501", "S105"]
+# ci.py: SECRET_NAME / token constants are names, not credentials (S105)
+"src/n8n_launcher/workspaces/ci.py" = ["S105"]
 # __main__.py: fail-graceful import probing
 "src/n8n_launcher/__main__.py" = ["S110"]
 # gui: a view shells out only to open a URL or reveal a file. No ``S110`` here on

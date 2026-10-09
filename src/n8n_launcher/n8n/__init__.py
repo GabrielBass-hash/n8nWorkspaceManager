@@ -1,8 +1,13 @@
 """n8n instance integration: public API client, owner bootstrap and workflow
 synchronization.
 
+Entry: :class:`N8nApiClient` (``api.py``), :class:`~n8n_launcher.n8n.owner.OwnerSetup`
+/ ``wait_for_n8n`` (``owner.py``), :class:`~n8n_launcher.n8n.workflows.SyncRunner`
+(``workflows.py``).
+Gotcha: ``/healthz`` is liveness, not readiness — see ``owner.wait_for_n8n``.
 The public surface is re-exported here so consumers can import from
 ``n8n_launcher.n8n`` without knowing the internal file layout.
+Map: ``docs/architecture.md``.
 """
 
 from .api import N8nApiClient, N8nApiError

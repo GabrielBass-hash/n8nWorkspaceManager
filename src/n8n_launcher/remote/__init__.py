@@ -1,8 +1,14 @@
 """Remote server deployment and bounded observability helpers.
 
+Entry: ``render_hook`` / ``render_deploy_script`` (``deploy.py``),
+``ssh_run`` / ``write_remote_file`` (``ssh.py``); ``REMOTE_STATUS_CAPABILITY``
+and the execution-status sets live in ``deploy.py``.
+Gotcha: activation on the server is best effort through the owner session — a
+refusal is logged, never raised; see ``deploy.render_deploy_script``.
 The launcher deploys a workspace to a production server through git and uses
 the same SSH connection for read-only health, log, marker and execution-status
 queries. Credential-bearing files are never returned by those helpers.
+Map: ``docs/architecture.md``.
 """
 
 from .deploy import (

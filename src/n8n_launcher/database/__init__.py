@@ -1,8 +1,12 @@
 """Per-workspace data-database layer: schema layout detection, migration
 runner and n8n credential provisioning.
 
+Entry: ``has_db_layout`` (``layout.py``), ``MigrationRunner`` (``migrations.py``),
+``data_db_target`` (``credentials.py``).
+Launcher-local only: the generated remote ``deploy.py`` never runs migrations.
 The public surface is re-exported here so consumers can import from
 ``n8n_launcher.database`` without knowing the internal file layout.
+Map: ``docs/architecture.md``.
 """
 
 from ..core.models import (
