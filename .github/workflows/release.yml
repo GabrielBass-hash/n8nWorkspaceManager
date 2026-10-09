@@ -72,11 +72,11 @@ jobs:
             dist_root: dist/n8n-launcher.app
             name: n8n-launcher-macos.dmg
           - os: ubuntu-latest
-            artifact: dist/n8n-launcher
+            artifact: dist/n8n-launcher-linux.tar.gz
             dist_root: dist/n8n-launcher
             name: n8n-launcher-linux
           - os: windows-latest
-            artifact: dist/n8n-launcher
+            artifact: dist/n8n-launcher-windows.zip
             dist_root: dist/n8n-launcher
             name: n8n-launcher-windows
     runs-on: ${{ matrix.os }}
@@ -143,6 +143,19 @@ jobs:
       - name: Dry-run the macOS installer
         if: matrix.os == 'macos-latest'
         run: bash scripts/install_macos.sh -n -f dist/n8n-launcher-macos.dmg
+
+      # The release step uploads every matched file as its own asset, and GitHub
+      # refuses a zero-byte asset. An onedir tree contains empty bundle files, so
+      # it is archived into a single non-empty asset before upload; publishing the
+      # tree file-by-file would also collide on basenames.
+      - name: Package the onedir (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: tar -czf dist/n8n-launcher-linux.tar.gz -C dist n8n-launcher
+
+      - name: Package the onedir (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Compress-Archive -Path dist\n8n-launcher -DestinationPath dist\n8n-launcher-windows.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
