@@ -9,9 +9,10 @@ restore-and-relaunch flow.
 The actual swap never happens inside the running process: the updater writes
 a tiny platform helper script (``sh`` on macOS/Linux, ``.cmd`` on Windows)
 and launches it detached. The helper waits for the launcher to exit, replaces
-the binary or ``.app`` bundle, and reopens the fresh version. This mirrors
-what ``scripts/install_macos.sh`` already does by hand, and is the only way to
-swap a running app on Windows (a running executable can be renamed, not
+the ``.app`` bundle (macOS) or the onedir install directory (Linux/Windows,
+unpacked from the downloaded archive), and reopens the fresh version. This
+mirrors what ``scripts/install_macos.sh`` already does by hand, and is the only
+way to swap a running app on Windows (a running executable can be renamed, not
 deleted).
 
 If the app lives in a directory the current user cannot write to (e.g. macOS
@@ -25,6 +26,7 @@ import contextlib
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -38,11 +40,14 @@ from ..core.paths import updates_dir
 #: GitHub owner/repo that publishes the launcher releases.
 REPO = "GabrielBass-hash/n8nWorkspaceManager"
 
-#: Per-platform release asset names, in preference order.
+#: Per-platform release asset names, in preference order. Each is a single
+#: self-contained artifact: the macOS DMG, the zipped Windows onedir tree, and
+#: the tarball of the Linux onedir tree (an out-of-band AppImage is accepted as
+#: a fallback by :func:`compatible_asset`).
 _ASSET_BY_PLATFORM: dict[str, tuple[str, ...]] = {
     "Darwin": ("n8n-launcher-macos.dmg",),
-    "Windows": ("n8n-launcher-windows.exe",),
-    "Linux": ("n8n-launcher-linux",),
+    "Windows": ("n8n-launcher-windows.zip",),
+    "Linux": ("n8n-launcher-linux.tar.gz",),
 }
 
 
@@ -175,8 +180,9 @@ def fetch_latest_release(
 def compatible_asset(release: Release, system: str | None = None) -> Asset | None:
     """Pick the release asset matching the current platform, if any.
 
-    On Linux the release workflow attaches a one-file binary named
-    ``n8n-launcher-linux``; an AppImage built out-of-band is accepted, too.
+    On Linux the release workflow attaches the onedir tarball
+    ``n8n-launcher-linux.tar.gz``; an AppImage built out-of-band is accepted as a
+    fallback. Windows ships ``n8n-launcher-windows.zip`` and macOS the DMG.
     """
     system = system or platform.system()
     for name in _ASSET_BY_PLATFORM.get(system, ()):
@@ -231,11 +237,15 @@ def download_asset(
 
 
 def install_target() -> Path | None:
-    """Return the app binary or bundle the updater would replace.
+    """Return the app bundle or onedir directory the updater would replace.
 
-    ``None`` when running from the source tree (no binary to swap). On macOS
-    the target is the ``.app`` bundle found by walking up from ``sys.executable``;
-    elsewhere it is the executable itself.
+    ``None`` when running from the source tree (no install to swap). On macOS the
+    target is the ``.app`` bundle found by walking up from ``sys.executable``;
+    elsewhere it is the *directory* that holds the executable — PyInstaller's
+    onedir layout keeps the executable next to its ``_internal`` payload, so the
+    whole directory has to be replaced, not just the launcher binary. Inside an
+    AppImage that directory is the read-only squashfs mount, which is why the
+    flow only offers a self-install when it is writable.
     """
     if not getattr(sys, "frozen", False):
         return None
@@ -245,20 +255,22 @@ def install_target() -> Path | None:
             if parent.suffix == ".app":
                 return parent
         return None
-    return executable
+    return executable.parent
 
 
 def cleanup_stale() -> None:
     """Best-effort removal of leftovers from a previously failed Windows swap.
 
-    A half-finished update can leave ``<exe>.old`` in place; deleting it at
-    startup keeps the app directory clean. No-op elsewhere and always silent.
+    A half-finished update leaves the staging tree (``<install>.new``) or the
+    moved-aside backup (``<install>.old``) behind; deleting them at startup keeps
+    the install's parent directory clean. No-op elsewhere and always silent.
     """
     target = install_target()
     if target is None or platform.system() != "Windows":
         return
-    with contextlib.suppress(OSError):
-        Path(str(target) + ".old").unlink(missing_ok=True)
+    for suffix in (".new", ".old"):
+        with contextlib.suppress(OSError):
+            shutil.rmtree(Path(str(target) + suffix))
 
 
 def installer_script(
@@ -349,7 +361,13 @@ def _macos_source(asset_path: Path, target: Path, pid: int) -> str:
 
 
 def _linux_source(asset_path: Path, target: Path, pid: int) -> str:
-    """Linux helper: atomically replace the executable, then relaunch it."""
+    """Linux helper: unpack the onedir tarball over the install, then relaunch.
+
+    ``target`` is the install *directory* (the onedir root). The downloaded
+    archive holds a top-level ``n8n-launcher/`` tree; it is staged beside the
+    install so the swap is a rename, and a failed extraction leaves the running
+    version untouched.
+    """
     old = shlex.quote(str(target))
     new = shlex.quote(str(asset_path))
     return "\n".join(
@@ -358,24 +376,30 @@ def _linux_source(asset_path: Path, target: Path, pid: int) -> str:
             "# n8n Launcher auto-update helper (Linux).",
             f"OLD={old}",
             f"NEW={new}",
+            'STAGE="$OLD.new"',
             f"while kill -0 {pid} 2>/dev/null; do sleep 1; done",
-            'TMP="$OLD.tmp"',
-            'cp "$NEW" "$TMP"',
-            'chmod +x "$TMP"',
-            'mv -f "$TMP" "$OLD"',
-            '"$OLD" &',
+            'rm -rf "$STAGE"',
+            'if mkdir -p "$STAGE" && tar -xzf "$NEW" -C "$STAGE" '
+            '&& [ -x "$STAGE/n8n-launcher/n8n-launcher" ]; then',
+            '  rm -rf "$OLD"',
+            '  mv "$STAGE/n8n-launcher" "$OLD"',
+            '  rm -rf "$STAGE"',
+            "else",
+            '  rm -rf "$STAGE"',
+            "fi",
+            '"$OLD/n8n-launcher" &',
             "",
         ]
     )
 
 
 def _windows_source(asset_path: Path, target: Path, pid: int) -> str:
-    """Windows helper: rename the running exe, swap in the new one, relaunch.
+    """Windows helper: expand the onedir zip over the install, then relaunch.
 
-    A running executable can be renamed (not deleted) on Windows, so the old
-    binary moves aside, the new one takes its name and the stale backup is
-    removed. If either step fails the helper restores the old binary and
-    relaunches it, so a locked file never bricks the install.
+    ``target`` is the install *directory*. The helper waits for the launcher to
+    exit, expands the downloaded zip beside it, moves the old tree aside, drops
+    the new one in place and removes the backup. Every failure path restores and
+    relaunches the previous tree, so a locked file never bricks the install.
     """
     old = str(target)
     new = str(asset_path)
@@ -386,6 +410,7 @@ def _windows_source(asset_path: Path, target: Path, pid: int) -> str:
             f'set "PID={pid}"',
             f'set "OLD={old}"',
             f'set "NEW={new}"',
+            'set "STAGE=%OLD%.new"',
             'set "OLD_BAK=%OLD%.old"',
             "",
             ":wait",
@@ -395,19 +420,32 @@ def _windows_source(asset_path: Path, target: Path, pid: int) -> str:
             "  goto :wait",
             ")",
             "",
+            'if exist "%STAGE%" rmdir /s /q "%STAGE%"',
+            'mkdir "%STAGE%"',
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+            "\"Expand-Archive -LiteralPath '%NEW%' -DestinationPath '%STAGE%' -Force\" "
+            ">nul 2>nul",
+            'if not exist "%STAGE%\\n8n-launcher\\n8n-launcher.exe" (',
+            '  rmdir /s /q "%STAGE%" 2>nul',
+            '  start "" "%OLD%\\n8n-launcher.exe"',
+            "  exit /b 1",
+            ")",
+            'if exist "%OLD_BAK%" rmdir /s /q "%OLD_BAK%"',
             'move /Y "%OLD%" "%OLD_BAK%" >nul 2>nul',
-            'if not exist "%OLD_BAK%" (',
-            '  start "" "%OLD%"',
+            'if not exist "%OLD_BAK%\\n8n-launcher.exe" (',
+            '  start "" "%OLD%\\n8n-launcher.exe"',
             "  exit /b 1",
             ")",
-            'copy /Y "%NEW%" "%OLD%" >nul 2>nul',
-            'if not exist "%OLD%" (',
+            'move /Y "%STAGE%\\n8n-launcher" "%OLD%" >nul 2>nul',
+            'if not exist "%OLD%\\n8n-launcher.exe" (',
+            '  rmdir /s /q "%OLD%" 2>nul',
             '  move /Y "%OLD_BAK%" "%OLD%" >nul 2>nul',
-            '  start "" "%OLD%"',
+            '  start "" "%OLD%\\n8n-launcher.exe"',
             "  exit /b 1",
             ")",
-            'del /Q "%OLD_BAK%" >nul 2>nul',
-            'start "" "%OLD%"',
+            'rmdir /s /q "%OLD_BAK%" 2>nul',
+            'rmdir /s /q "%STAGE%" 2>nul',
+            'start "" "%OLD%\\n8n-launcher.exe"',
             "",
         ]
     )

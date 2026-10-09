@@ -69,9 +69,12 @@ source version differs from the last `v<version>` tag — no auto-bump.
 
 Packaging: `.dmg` (macOS, ad-hoc signed **deepest-first**), a
 `dist/n8n-launcher/` onedir directory (Windows), and that same directory wrapped
-into the `.AppImage` on Linux. **Never `--onefile`**: Qt resolves its platform
-plugin at runtime and a single-file archive unpacks the bundle into a temp dir
-on every launch.
+into the `.AppImage` on Linux. On a release the Linux/Windows onedir tree is
+archived (`n8n-launcher-linux.tar.gz` / `n8n-launcher-windows.zip`) before it is
+attached — GitHub refuses a zero-byte asset and a PyInstaller tree contains
+empty files, so the tree is never published file-by-file. **Never `--onefile`**:
+Qt resolves its platform plugin at runtime and a single-file archive unpacks the
+bundle into a temp dir on every launch.
 
 ## Commands
 

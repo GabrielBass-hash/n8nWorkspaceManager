@@ -251,6 +251,14 @@ find its platform plugin at runtime, and a one-file archive would unpack the
 whole bundle into a temporary directory on every launch. The AppImage *is* the
 single-file Linux artifact — it is the packager, not PyInstaller.
 
+The release step attaches one asset per platform, so the onedir tree is
+**archived** before it is published: `n8n-launcher-linux.tar.gz` and
+`n8n-launcher-windows.zip` unpack to a `n8n-launcher/` directory containing the
+executable and its `_internal` payload. GitHub rejects a zero-byte asset, and a
+PyInstaller tree contains empty files, which is why the tree is never uploaded
+file-by-file. The in-app updater downloads that archive and swaps the whole
+install directory; see `src/n8n_launcher/platform/updater.py`.
+
 `scripts/build.py` refuses to finish a build whose Qt platform plugin is
 missing (`verify_qt_bundle`, also reachable as
 `python scripts/build.py --verify <dist-root>`): a bundle without it starts,
@@ -328,8 +336,9 @@ l'arbre des widgets sous un Xvfb et comparaient les trois OS entre eux.
 
 `.github/workflows/release.yml` ne se déclenche que sur un push vers `main` :
 il lit `__version__`, la compare au dernier tag, et ne tag/build/publie que si
-la version a bougé. Il construit la même matrix que `build` et joint tous les
-artifacts à la GitHub Release.
+la version a bougé. Il construit la même matrix que `build`, archive les onedir
+Linux/Windows (`n8n-launcher-linux.tar.gz`, `n8n-launcher-windows.zip`) et joint
+le `.dmg`, l'AppImage et ces deux archives à la GitHub Release.
 
 ## Releases
 
