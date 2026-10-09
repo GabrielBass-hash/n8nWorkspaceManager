@@ -77,8 +77,8 @@ PAYLOAD = {
     "tag_name": "v0.4.01",
     "assets": [
         {
-            "name": "n8n-launcher-windows.exe",
-            "browser_download_url": "https://example.test/n8n-launcher-windows.exe",
+            "name": "n8n-launcher-windows.zip",
+            "browser_download_url": "https://example.test/n8n-launcher-windows.zip",
             "size": 12345,
         },
         {
@@ -142,13 +142,13 @@ def test_compatible_asset_selects_per_platform() -> None:
     release = make_release(
         assets=[
             make_asset("n8n-launcher-macos.dmg"),
-            make_asset("n8n-launcher-windows.exe"),
-            make_asset("n8n-launcher-linux"),
+            make_asset("n8n-launcher-windows.zip"),
+            make_asset("n8n-launcher-linux.tar.gz"),
         ]
     )
     assert compatible_asset(release, system="Darwin").name == "n8n-launcher-macos.dmg"
-    assert compatible_asset(release, system="Windows").name == "n8n-launcher-windows.exe"
-    assert compatible_asset(release, system="Linux").name == "n8n-launcher-linux"
+    assert compatible_asset(release, system="Windows").name == "n8n-launcher-windows.zip"
+    assert compatible_asset(release, system="Linux").name == "n8n-launcher-linux.tar.gz"
 
 
 def test_compatible_asset_falls_back_to_appimage() -> None:
@@ -264,11 +264,11 @@ def test_install_target_macos_finds_app_bundle(monkeypatch, tmp_path: Path) -> N
     assert install_target() == tmp_path / "n8n-launcher.app"
 
 
-def test_install_target_other_platforms_return_executable(monkeypatch) -> None:
+def test_install_target_other_platforms_return_install_dir(monkeypatch) -> None:
     monkeypatch.setattr("sys.frozen", True, raising=False)
     monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
-    monkeypatch.setattr("sys.executable", "C:\\Program Files\\n8n-launcher.exe")
-    assert install_target() == Path("C:\\Program Files\\n8n-launcher.exe")
+    monkeypatch.setattr("sys.executable", "/opt/n8n-launcher/n8n-launcher")
+    assert install_target() == Path("/opt/n8n-launcher")
 
 
 def test_release_page_url_points_at_latest() -> None:
@@ -278,10 +278,10 @@ def test_release_page_url_points_at_latest() -> None:
 # --- installer helpers -------------------------------------------------------
 
 
-def test_installer_script_writes_executable_sh(monkeypatch, tmp_path: Path) -> None:
+def test_installer_script_unpacks_linux_onedir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Linux")
     target = tmp_path / "n8n-launcher"
-    asset = tmp_path / "n8n-launcher.new"
+    asset = tmp_path / "n8n-launcher-linux.tar.gz"
     script = installer_script(asset, target, script_dir=tmp_path)
 
     assert script.name == "apply_update.sh"
@@ -289,8 +289,9 @@ def test_installer_script_writes_executable_sh(monkeypatch, tmp_path: Path) -> N
         assert script.stat().st_mode & 0o100
     text = script.read_text(encoding="utf-8")
     assert "kill -0" in text
-    assert "mv -f" in text
-    assert '"$OLD" &' in text
+    assert "tar -xzf" in text
+    assert 'mv "$STAGE/n8n-launcher" "$OLD"' in text
+    assert '"$OLD/n8n-launcher" &' in text
 
 
 def test_installer_script_macos_replaces_bundle(monkeypatch, tmp_path: Path) -> None:
@@ -309,16 +310,16 @@ def test_installer_script_macos_replaces_bundle(monkeypatch, tmp_path: Path) -> 
 
 def test_installer_script_windows_waits_and_swaps(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
-    target = tmp_path / "n8n-launcher.exe"
-    asset = tmp_path / "n8n-launcher.new.exe"
+    target = tmp_path / "n8n-launcher"
+    asset = tmp_path / "n8n-launcher-windows.zip"
     script = installer_script(asset, target, script_dir=tmp_path)
 
     assert script.name == "apply_update.cmd"
     text = script.read_text(encoding="utf-8")
     assert "tasklist" in text
+    assert "Expand-Archive" in text
     assert "move /Y" in text
-    assert "copy /Y" in text
-    assert 'start "" "%OLD%"' in text
+    assert 'start "" "%OLD%\\n8n-launcher.exe"' in text
 
 
 def test_installer_command_uses_shell_per_platform(monkeypatch, tmp_path: Path) -> None:
@@ -347,15 +348,21 @@ def test_spawn_installer_launches_detached(monkeypatch, tmp_path: Path) -> None:
     assert kwargs["stdin"] == subprocess.DEVNULL
 
 
-def test_cleanup_stale_removes_windows_backup(monkeypatch, tmp_path: Path) -> None:
-    target = tmp_path / "n8n-launcher.exe"
-    target.write_bytes(b"old")
-    (tmp_path / "n8n-launcher.exe.old").write_bytes(b"backup")
+def test_cleanup_stale_removes_windows_leftovers(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "n8n-launcher"
+    target.mkdir()
+    (target / "n8n-launcher.exe").write_bytes(b"old")
+    stage = tmp_path / "n8n-launcher.new"
+    stage.mkdir()
+    (stage / "junk").write_bytes(b"x")
+    backup = tmp_path / "n8n-launcher.old"
+    backup.mkdir()
     monkeypatch.setattr("sys.frozen", True, raising=False)
     monkeypatch.setattr("n8n_launcher.platform.updater.platform.system", lambda: "Windows")
-    monkeypatch.setattr("sys.executable", str(target))
+    monkeypatch.setattr("sys.executable", str(target / "n8n-launcher.exe"))
 
     cleanup_stale()
 
-    assert not (tmp_path / "n8n-launcher.exe.old").exists()
+    assert not stage.exists()
+    assert not backup.exists()
     assert target.exists()

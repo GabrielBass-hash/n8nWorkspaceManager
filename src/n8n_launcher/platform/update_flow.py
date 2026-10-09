@@ -102,7 +102,7 @@ class UpdateController:
         asset = updater.compatible_asset(release)
         if asset is None:
             return
-        if os.access(target.parent, os.W_OK):
+        if os.access(target, os.W_OK):
             self._events.put((lambda: self._offer(release, asset), None))
         else:
             self._events.put((lambda: self._show_link(release), None))
