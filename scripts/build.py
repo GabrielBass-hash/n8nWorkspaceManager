@@ -13,6 +13,7 @@ for anyway — so the shipped layout is a directory the packager wraps.
 
 from __future__ import annotations
 
+import os
 import platform
 import plistlib
 import shutil
@@ -32,6 +33,17 @@ BUNDLE_ID = "io.launcher.n8n"
 # PyInstaller runs it correctly while the package keeps its relative imports.
 ENTRY_POINT = PROJECT_ROOT / "run.py"
 ICON_SOURCE = PROJECT_ROOT / "assets" / "icon.png"
+
+# Non-Python files the launcher reads at import time through
+# ``importlib.resources`` (the generated remote deploy script and the CI
+# harness). PyInstaller only ships what static analysis finds, so each of
+# these directories is passed as ``--add-data`` with a destination that
+# mirrors the package layout — any other destination makes
+# ``core.templates.read_template`` raise in the built artifact.
+TEMPLATE_DIRS = [
+    PROJECT_ROOT / "src" / "n8n_launcher" / "remote" / "templates",
+    PROJECT_ROOT / "src" / "n8n_launcher" / "workspaces" / "templates",
+]
 
 DMG_WINDOW_RECT = ((60, 80), (720, 490))  # 660 x 410
 DMG_BACKGROUND_SIZE = (660, 410)
@@ -124,66 +136,55 @@ def build_icns() -> Path:
     return icns
 
 
-HIDDEN_IMPORTS = [
-    "n8n_launcher.__main__",
-    "n8n_launcher.core",
-    "n8n_launcher.core.config",
-    "n8n_launcher.core.filelock",
-    "n8n_launcher.core.first_launch",
-    "n8n_launcher.core.models",
-    "n8n_launcher.core.paths",
-    "n8n_launcher.database",
-    "n8n_launcher.database.credentials",
-    "n8n_launcher.database.layout",
-    "n8n_launcher.database.migrations",
-    "n8n_launcher.docker",
-    "n8n_launcher.docker.compose",
-    "n8n_launcher.docker.manager",
-    "n8n_launcher.git",
-    "n8n_launcher.git.manager",
-    "n8n_launcher.github",
-    "n8n_launcher.github.api",
-    "n8n_launcher.github.auth",
-    "n8n_launcher.gui",
-    "n8n_launcher.gui.actions",
-    "n8n_launcher.gui.app",
-    "n8n_launcher.gui.card_delegate",
-    "n8n_launcher.gui.create_panel",
-    "n8n_launcher.gui.first_launch",
-    "n8n_launcher.gui.notifier",
-    "n8n_launcher.gui.theme",
-    "n8n_launcher.gui.window",
-    "n8n_launcher.gui.workspace_model",
-    "n8n_launcher.gui_utils.text",
-    "n8n_launcher.monitoring.bootstrap",
-    "n8n_launcher.monitoring.redaction",
-    "n8n_launcher.monitoring.store",
-    "n8n_launcher.n8n",
-    "n8n_launcher.n8n.api",
-    "n8n_launcher.n8n.owner",
-    "n8n_launcher.n8n.workflows",
-    "n8n_launcher.platform",
-    "n8n_launcher.platform.ports",
-    "n8n_launcher.platform.update_flow",
-    "n8n_launcher.platform.updater",
-    "n8n_launcher.remote.deploy",
-    "n8n_launcher.remote.ssh",
-    "n8n_launcher.workspaces",
-    "n8n_launcher.workspaces.ci",
-    "n8n_launcher.workspaces.close",
-    "n8n_launcher.workspaces.dialogs",
-    "n8n_launcher.workspaces.manager",
-    "n8n_launcher.workspaces.status",
-    "requests",
-    "bcrypt",
-    "platformdirs",
-]
+# Third-party packages PyInstaller cannot infer from the source: they are
+# imported dynamically (bcrypt through passlib, platformdirs through
+# importlib) or only by a subprocess. Kept apart so ``hidden_imports`` can
+# append them after the launcher's own modules.
+THIRD_PARTY_HIDDEN = ["requests", "bcrypt", "platformdirs"]
+
+
+def hidden_imports() -> list[str]:
+    """Return every module PyInstaller must be told to include, sorted.
+
+    The launcher imports its modules dynamically in several places, so a
+    literal list drifts the moment a file is added. Walk the package instead:
+    each ``*.py`` maps to its dotted name (``__init__.py`` to the package),
+    which cannot miss a module the way a hand-kept list silently does. The
+    third-party entries follow the package's own, since PyInstaller does not
+    care about the order.
+    """
+    source_root = PROJECT_ROOT / "src"
+    modules: set[str] = set()
+    for path in (source_root / "n8n_launcher").rglob("*.py"):
+        rel = path.relative_to(source_root).with_suffix("")
+        if rel.name == "__init__":
+            rel = rel.parent
+        modules.add(".".join(rel.parts))
+    return sorted(modules) + THIRD_PARTY_HIDDEN
+
+
+HIDDEN_IMPORTS = hidden_imports()
 
 
 def _hidden_import_args() -> list[str]:
     args = []
     for imp in HIDDEN_IMPORTS:
         args.extend(["--hidden-import", imp])
+    return args
+
+
+def _add_data_args() -> list[str]:
+    """Return one ``--add-data`` per template directory, package-relative.
+
+    The destination must mirror the package layout (``n8n_launcher/<pkg>/…``)
+    so ``importlib.resources.files("n8n_launcher.…")`` resolves inside the
+    bundle, where the modules live in the PYZ archive but data files sit on
+    disk under ``_MEIPASS``.
+    """
+    args = []
+    for directory in TEMPLATE_DIRS:
+        destination = "n8n_launcher/" + directory.parent.name + "/templates"
+        args.append(f"--add-data={directory}{os.pathsep}{destination}")
     return args
 
 
@@ -215,6 +216,7 @@ def build_onedir() -> Path:
         "--paths",
         str(PROJECT_ROOT / "src"),
         *_hidden_import_args(),
+        *_add_data_args(),
     ]
     if system == "Darwin":
         command += ["--icon", str(build_icns()), "--osx-bundle-identifier", BUNDLE_ID]
@@ -317,6 +319,22 @@ def verify_qt_bundle(root: Path) -> list[str]:
     return problems
 
 
+def verify_templates(root: Path) -> list[str]:
+    """Return the template files missing from the built tree, empty when complete.
+
+    ``read_template`` loads them through ``importlib.resources`` at import
+    time; a template lost to packaging would make every start of the built
+    artifact fail, so CI asserts their presence the same way it asserts the
+    Qt platform plugin.
+    """
+    missing: list[str] = []
+    for directory in TEMPLATE_DIRS:
+        for template in sorted(directory.glob("*.tmpl")):
+            if not any(root.rglob(template.name)):
+                missing.append(f"template {template.name} (importlib.resources)")
+    return missing
+
+
 def is_signable_bundle(path: Path) -> bool:
     """Return True when *path* is a directory ``codesign`` accepts as a bundle.
 
@@ -367,10 +385,10 @@ def sign_macos_bundle(app: Path) -> None:
 
 def verify_or_fail(root: Path) -> None:
     """Raise with every reason ``root`` would fail to start, or confirm it is sound."""
-    problems = verify_qt_bundle(root)
+    problems = verify_qt_bundle(root) + verify_templates(root)
     if problems:
         raise RuntimeError(f"incomplete distribution {root}: " + ", ".join(problems))
-    print(f"Qt bundle verified: {root}")
+    print(f"bundle verified: {root}")
 
 
 def build_macos_dmg() -> None:
@@ -385,9 +403,9 @@ def build_macos_dmg() -> None:
 def main() -> None:
     """Build the artifact for this platform, or verify one that already exists.
 
-    ``--verify <dist-root>`` only runs the Qt completeness check, which is how
-    CI asserts on a freshly built artifact (and on the AppDir copy of it)
-    without rebuilding.
+    ``--verify <dist-root>`` runs the Qt completeness check and the packaged-
+    template presence check, which is how CI asserts on a freshly built
+    artifact (and on the AppDir copy of it) without rebuilding.
     """
     if len(sys.argv) == 3 and sys.argv[1] == "--verify":
         verify_or_fail(Path(sys.argv[2]))

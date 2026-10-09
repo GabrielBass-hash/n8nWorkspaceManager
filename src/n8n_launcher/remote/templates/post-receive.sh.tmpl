@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# __MARKER__
+
+set -u
+set -o pipefail
+umask 077
+
+cd "$HOME"
+
+BASE=__BASE__
+BARE=__BARE__
+WORKFLOW=__WORKFLOW__
+LOG=__LOG__
+PROJECT=__PROJECT__
+MAX_LOG_BYTES=5242880
+HISTORY_LIMIT=100
+
+append_log() {
+    python3 - "$LOG" "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+path = sys.argv[1]
+event = str(sys.argv[2])[:100]
+sha = str(sys.argv[3])[:128]
+detail = str(sys.argv[4])[:2000]
+quoted = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+plain = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+bearer = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+url_password = re.compile(r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)''')
+def keep_quoted(match):
+    return match.group('prefix') + match.group('quote') + '[REDACTED]' + match.group('quote')
+
+detail = quoted.sub(keep_quoted, detail)
+detail = plain.sub(lambda m: m.group('prefix') + '[REDACTED]', detail)
+detail = bearer.sub(lambda m: m.group('prefix') + '[REDACTED]', detail)
+detail = url_password.sub(lambda m: m.group('prefix') + '[REDACTED]' + m.group('suffix'), detail)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+if os.path.exists(path) and os.path.getsize(path) > 5242880:
+    try:
+        os.replace(path, path + '.1')
+    except OSError:
+        pass
+entry = {'at': int(time.time()), 'event': event, 'sha': sha, 'detail': detail}
+with open(path, 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+try:
+    os.chmod(path, 0o600)
+except OSError:
+    pass
+PY
+}
+
+log_output() {
+    python3 - "$LOG" "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+path = sys.argv[1]
+event = str(sys.argv[2])[:100]
+sha = str(sys.argv[3])[:128]
+source = str(sys.argv[4])
+try:
+    with open(source, encoding='utf-8', errors='replace') as fh:
+        text = fh.read(65536)
+except OSError:
+    text = 'sortie de commande indisponible'
+secret = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+plain = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+bearer = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+url_password = re.compile(r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)''')
+def keep_quoted_text(match):
+    return match.group('prefix') + match.group('quote') + '[REDACTED]' + match.group('quote')
+
+text = secret.sub(keep_quoted_text, text)
+text = plain.sub(lambda m: m.group('prefix') + '[REDACTED]', text)
+text = bearer.sub(lambda m: m.group('prefix') + '[REDACTED]', text)
+text = url_password.sub(lambda m: m.group('prefix') + '[REDACTED]' + m.group('suffix'), text)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+if os.path.exists(path) and os.path.getsize(path) > 5242880:
+    try:
+        os.replace(path, path + '.1')
+    except OSError:
+        pass
+with open(path, 'a', encoding='utf-8') as fh:
+    for line in text.splitlines() or ['']:
+        entry = {'at': int(time.time()), 'event': event, 'sha': sha, 'detail': line[:2000]}
+        fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+try:
+    os.chmod(path, 0o600)
+except OSError:
+    pass
+PY
+}
+
+record() {
+    python3 - "$BASE" "$LOG" "$1" "$2" "$3" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+base = sys.argv[1]
+log_path = sys.argv[2]
+sha = str(sys.argv[3])[:128]
+status = str(sys.argv[4])[:32]
+error = str(sys.argv[5])[:2000]
+secret = re.compile(
+    r'''(?ix)(?P<prefix>["']?(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>.*?)(?P=quote)'''
+)
+plain = re.compile(
+    r'''(?ix)(?P<prefix>\b(?:owner_)?(?:password|passwd|api[_-]?key|token|secret|authorization|cookie|private[_-]?key|encryption[_-]?key|credentials)\b\s*[:=]\s*)(?P<value>[^\s,;}\]]+)'''
+)
+bearer = re.compile(r'''(?ix)(?P<prefix>\bBearer\s+)[^\s,;]+''')
+url_password = re.compile(r'''(?ix)(?P<prefix>https?://[^/\s:@]+:)[^@\s]+(?P<suffix>@)''')
+def keep_quoted_error(match):
+    return match.group('prefix') + match.group('quote') + '[REDACTED]' + match.group('quote')
+
+error = secret.sub(keep_quoted_error, error)
+error = plain.sub(lambda m: m.group('prefix') + '[REDACTED]', error)
+error = bearer.sub(lambda m: m.group('prefix') + '[REDACTED]', error)
+error = url_password.sub(lambda m: m.group('prefix') + '[REDACTED]' + m.group('suffix'), error)
+os.makedirs(base, exist_ok=True)
+payload = {'sha': sha, 'status': status, 'at': int(time.time())}
+if error:
+    payload['error'] = error
+marker = os.path.join(base, 'last-deploy.json')
+with open(marker + '.tmp', 'w', encoding='utf-8') as fh:
+    json.dump(payload, fh)
+os.replace(marker + '.tmp', marker)
+try:
+    os.chmod(marker, 0o600)
+except OSError:
+    pass
+history = os.path.join(base, 'deploy-history.jsonl')
+entry = dict(payload)
+entry['event'] = 'deploy'
+with open(history, 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+try:
+    with open(history, encoding='utf-8') as fh:
+        lines = fh.readlines()
+    if len(lines) > 100:
+        temporary = history + '.tmp'
+        with open(temporary, 'w', encoding='utf-8') as fh:
+            fh.writelines(lines[-100:])
+        os.replace(temporary, history)
+    os.chmod(history, 0o600)
+except OSError:
+    pass
+try:
+    entry = {'at': int(time.time()), 'event': 'deploy', 'sha': sha}
+    entry['status'] = status
+    entry['detail'] = error
+    with open(log_path, 'a', encoding='utf-8') as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    os.chmod(log_path, 0o600)
+except OSError:
+    pass
+PY
+}
+
+marker_matches() {
+    python3 - "$BASE/last-deploy.json" "$1" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as fh:
+        payload = json.load(fh)
+except (OSError, ValueError, TypeError):
+    sys.exit(1)
+if not isinstance(payload, dict) or payload.get('sha') != sys.argv[2]:
+    sys.exit(1)
+sys.exit(0 if payload.get('status') in ('ok', 'error') else 1)
+PY
+}
+
+(
+    flock -x 9
+    TMP_OUTPUT=""
+    trap 'rm -f -- "$TMP_OUTPUT"' EXIT
+    while read -r old new ref; do
+        [ "$ref" = "refs/heads/main" ] || continue
+        [ "$new" != "0000000000000000000000000000000000000000" ] || continue
+        append_log "$new" "received" "push"
+        mkdir -p "$WORKFLOW"
+        TMP_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/n8n-launcher-deploy.XXXXXX")"
+        if ! (git --git-dir="$BARE" archive "$new" | tar -x -C "$WORKFLOW") \
+            >"$TMP_OUTPUT" 2>&1; then
+            log_output "$new" "archive" "$TMP_OUTPUT"
+            record "$new" "error" "git archive a échoué"
+            exit 0
+        fi
+        log_output "$new" "archive" "$TMP_OUTPUT"
+        if ! docker compose -f "$WORKFLOW/compose.yml" -p "$PROJECT" up -d >"$TMP_OUTPUT" 2>&1; then
+            log_output "$new" "compose" "$TMP_OUTPUT"
+            record "$new" "error" "docker compose up -d a échoué"
+            exit 0
+        fi
+        log_output "$new" "compose" "$TMP_OUTPUT"
+        if ! DEPLOY_CHECKOUT="$WORKFLOW" DEPLOY_BASE="$BASE" \
+            DEPLOY_N8N_PORT=__N8N_PORT__ \
+            python3 "$BASE/deploy.py" "$new" >"$TMP_OUTPUT" 2>&1; then
+            log_output "$new" "deploy" "$TMP_OUTPUT"
+            if ! marker_matches "$new"; then
+                record "$new" "error" "deploy.py a échoué"
+            fi
+            exit 0
+        fi
+        log_output "$new" "deploy" "$TMP_OUTPUT"
+        if ! marker_matches "$new"; then
+            record "$new" "error" "deploy.py n'a pas confirmé le déploiement"
+        fi
+    done
+    exit 0
+) 9>>"$BASE/.deploy.lock"

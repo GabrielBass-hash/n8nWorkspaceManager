@@ -1,7 +1,13 @@
 """Git operations for workspace workflow synchronization.
 
+Entry: ``git_push``, ``git_seed_remote``, ``workspace_git_lock``
+(``manager.py``); ``WORKSPACE_BRANCH`` is ``"dev"`` — the work branch and the
+CI branch of every workspace.
+Gotcha: every git lifecycle call runs inside ``workspace_git_lock`` — auto-pull
+on start and auto-push on close/publish/CI must never interleave.
 The public surface is re-exported here so consumers can import from
 ``n8n_launcher.git`` without knowing the internal file layout.
+Map: ``docs/architecture.md``.
 """
 
 from .manager import (

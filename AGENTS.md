@@ -2,8 +2,10 @@
 
 ## How to navigate this repo
 
-57 modules, ~11.9k lines under `src/n8n_launcher/`. Locate before you read, in
-increasing order of cost — stop at the first step that answers the question:
+60 modules, ~11.6k lines under `src/n8n_launcher/` (plus the 5 `*.tmpl`
+generated-artefact templates, ~1.4k lines the tree-sitter index does not
+tree). Locate before you read, in increasing order of cost — stop at the first
+step that answers the question:
 
 1. `grep` — a literal identifier.
 2. `tree-sitter_find_usage` — a symbol's definition and every reference.
@@ -12,6 +14,11 @@ increasing order of cost — stop at the first step that answers the question:
 5. `tree-sitter_get_file` on a line range — never a whole file when a
    range will do.
 6. `read` with `offset`/`limit`.
+
+When the task is a known category, start one step earlier: `docs/tasks.md` maps
+*change → read → edit → test* in one table, so a row replaces exploratory reads.
+Each package `__init__.py` docstring also carries its role, entry symbol and
+headline gotcha — `tree-sitter_get_symbols` surfaces it for free.
 
 The tree-sitter MCP server indexes lazily. Call
 `register_project_tool(path=".", name="n8n-launcher")` **once per session**
@@ -27,11 +34,11 @@ to `MCPServer`, so an unpinned server dies on import with `ModuleNotFoundError`
 and OpenCode reports only `MCP error -32000: Connection closed`. JSON admits no
 comment, so the reason is recorded here.
 
-`docs/architecture.md` holds the module map (which file owns a behaviour) and
-the gotchas measured against a real n8n / Docker / Chromium host. Read it when
-you touch `n8n/`, `remote/`, `docker/`, `git/`, `github/`, `gui/browser.py`,
-`gui/window.py` or `gui/board.py`. Do not read it to answer "how do I run the
-tests" — that is §Commands below.
+`docs/architecture.md` holds the module map (which file owns a behaviour); its
+measured gotchas are an index and the full text lives in the docstring of the
+symbol it concerns. Read it when you touch `n8n/`, `remote/`, `docker/`, `git/`,
+`github/`, `gui/browser.py`, `gui/window.py` or `gui/board.py`. Do not read it
+to answer "how do I run the tests" — that is §Commands below.
 
 Type errors are reported live by the `basedpyright` LSP, which reads
 `pyproject.toml` — the same config `uv run basedpyright` uses, so an editor
@@ -58,8 +65,10 @@ into `workspaces/status.py`, `workspaces/dialogs.py`, `gui_utils/`, or
 
 `src/` is never pip-installed. `pythonpath = ["src"]` (pytest) and
 `--paths src` (PyInstaller, targeting `run.py` not `__main__.py`) are the only
-two places `src/` is made visible; relative imports inside the package are what
-the bundle depends on.
+two places `src/` is made importable; relative imports inside the package are
+what the bundle depends on. The `*.tmpl` template documents are the one
+exception — they are data, shipped by `--add-data` and asserted by
+`scripts/build.py --verify`, not by import.
 
 Version is single-source SemVer in `src/n8n_launcher/__init__.py`
 (`__version__`, currently **6.0.0**); `pyproject.toml` inherits it via
@@ -98,8 +107,8 @@ bash scripts/build_appimage.sh      # after build.py produced dist/n8n-launcher
 ```
 
 Gate state at the time of writing: `ruff check` clean, `ruff format --check`
-clean (119 files), `basedpyright` **0 errors**, `pytest` **887 passed / 7
-deselected** (7 = integration), coverage 91 % against a CI floor of
+clean (124 files), `basedpyright` **0 errors**, `pytest` **922 passed / 7
+deselected** (7 = integration), coverage 90 % against a CI floor of
 `--cov-fail-under=80`.
 
 `basedpyright` runs in `typeCheckingMode = "standard"` and excludes
@@ -212,8 +221,10 @@ gates `build` (three OS + the Linux AppImage).
 - **A view never does its own I/O.** Git / GitHub / SSH / Docker work belongs on
   a `QRunnable` (`gui/actions.py`) or an injected callback, never in a paint
   handler or a slot that Qt calls synchronously.
-- **Generated content is a template string, never an f-string**
-  (`remote/deploy.py`, `workspaces/ci.py`), so braces and `$` survive verbatim;
+- **Generated content is a template document, never an f-string** — the
+  post-receive hook and remote `deploy.py` live in `remote/templates/*.tmpl`,
+  the CI harness in `workspaces/templates/*.tmpl` (loaded by
+  `core/templates.py::read_template`), so braces and `$` survive verbatim;
   values arrive through `__TOKEN__` substitution.
 - **Ruff policy**: the shell-outs to `docker` / `git` / `gh` are deliberate, so
   each package that spawns processes carries its own
@@ -247,8 +258,8 @@ second rule a table can be laid out by.
   5-row one costs.
 
 The measurement archaeology behind this (Tk `PanedWindow` sashes, `Treeview`
-request invalidation, …) is in `MIGRATION.md` §2 — read it before rebuilding a
-table or a splitter.
+request invalidation, …) is in `docs/history/MIGRATION.md` §2 — read it before
+rebuilding a table or a splitter.
 
 ## Rules that no other file states
 
@@ -312,18 +323,19 @@ table or a splitter.
 
 ## Further reading
 
-- `docs/architecture.md` — the module map (which file owns which behaviour) and
-  the gotchas measured against a real n8n 2.x / Docker Desktop / Chromium host.
+- `docs/tasks.md` — the *change → read → edit → test* table. Start there when
+  the task is a known category; it names the module and the unit files in one
+  row.
+- `docs/architecture.md` — the module map (which file owns which behaviour);
+  the measured gotchas are an index pointing at the docstring of each symbol.
   Read it before touching `n8n/`, `remote/`, `docker/`, `git/`, `github/` or the
   two GUI modules that own I/O.
 - `README.md` — user-facing feature behaviour: git sync, GitHub, workflow import
   and export, remote deployment, CI, n8n integration notes, distribution, releases.
   The behaviour sections here deliberately do not repeat it.
-- `MIGRATION.md` — **historical** record of the phase-1 deletion of the Tk
-  interface. Its §1–§3 (a view collects, `measure` is a parameter, side effects
-  are injected) and the Tk measurements are what still governs; the rest is the
-  archive of how the deletion was sequenced. Do not read it to learn current
-  behaviour — the dependency set it assumes (no toolkit) is obsolete, PySide6 is
-  the interface and `gui/app.py` is real.
-- `PRODUCT_SUMMARY.md` — the behavioural contract in one pass, useful before
-  changing a lifecycle.
+- `docs/history/MIGRATION.md` — **historical** record of the phase-1 deletion
+  of the Tk interface. Its §1–§3 (a view collects, `measure` is a parameter,
+  side effects are injected) and the Tk measurements are what still governs; the
+  rest is the archive of how the deletion was sequenced. Do not read it to learn
+  current behaviour — the dependency set it assumes (no toolkit) is obsolete,
+  PySide6 is the interface and `gui/app.py` is real.
