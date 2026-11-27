@@ -457,14 +457,15 @@ pub fn installer_command(script: &Path, system: &str) -> Vec<String> {
 pub fn spawn_installer(script: &Path, system: &str) -> Result<(), UpdateError> {
     let mut cmd = std::process::Command::new(if is_windows(system) { "cmd" } else { "/bin/sh" });
     if is_windows(system) {
-        cmd.args(["/c", &script.to_string_lossy()]);
+        cmd.arg("/c").arg(script);
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(std::os::windows::process::CreationFlags::CREATE_NEW_PROCESS_GROUP);
+            // CREATE_NEW_PROCESS_GROUP = 0x00000200
+            cmd.creation_flags(0x00000200);
         }
     } else {
-        cmd.args(["/bin/sh", &script.to_string_lossy()]);
+        cmd.arg(script);
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
