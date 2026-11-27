@@ -20,6 +20,10 @@ workspaces/
 # ... but keep the tracked source tree of the `workspaces` package.
 !src/n8n_launcher/workspaces/
 !tests/unit/workspaces/
+!rust/n8n-launcher-workspace/n8n-launcher/src/workspaces/
+!rust/n8n-launcher-workspace/n8n-launcher/src/workspaces/**
+!rust/n8n-launcher-workspace/n8n-launcher/tests/workspaces/
+!rust/n8n-launcher-workspace/n8n-launcher/tests/workspaces/**
 
 # Local structural snapshots for the parity test
 artifacts/
