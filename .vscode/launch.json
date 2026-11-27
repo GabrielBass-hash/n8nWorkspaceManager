@@ -2,45 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "lldb",
+      "type": "node-terminal",
       "request": "launch",
       "name": "Run n8n-launcher",
-      "cargo": {
-        "args": [
-          "build",
-          "--manifest-path",
-          "${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml",
-          "--bin=n8n-launcher"
-        ],
-        "filter": {
-          "name": "n8n-launcher",
-          "kind": "bin"
-        }
-      },
-      "args": [],
-      "cwd": "${workspaceFolder}/rust/n8n-launcher-workspace"
+      "command": "cargo run --manifest-path \"${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml\" --bin n8n-launcher",
+      "cwd": "${workspaceFolder}"
     },
     {
-      "type": "lldb",
+      "type": "node-terminal",
       "request": "launch",
       "name": "Self-test n8n-launcher (headless)",
-      "cargo": {
-        "args": [
-          "build",
-          "--manifest-path",
-          "${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml",
-          "--bin=n8n-launcher"
-        ],
-        "filter": {
-          "name": "n8n-launcher",
-          "kind": "bin"
-        }
-      },
-      "args": ["--self-test"],
+      "command": "cargo run --manifest-path \"${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml\" --bin n8n-launcher -- --self-test",
       "env": {
         "QT_QPA_PLATFORM": "offscreen"
       },
-      "cwd": "${workspaceFolder}/rust/n8n-launcher-workspace"
+      "cwd": "${workspaceFolder}"
     }
   ]
 }
