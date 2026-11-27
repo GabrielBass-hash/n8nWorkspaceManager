@@ -202,6 +202,11 @@ the integration target adds **3 Docker tests** (145 in total). The default build
 has the GUI feature enabled, so `--all-features` tests the code a release binary
 actually ships.
 
+In VS Code, the **Run** button uses the first profile in `.vscode/launch.json`
+(*Run n8n-launcher*) and builds the binary through CodeLLDB before launching it;
+a second profile runs `--self-test` headless. The workspace recommends
+`rust-analyzer` and `vadimcn.vscode-lldb`, and `Ctrl+Shift+B` runs `cargo build`.
+
 ## CI and releases
 
 `.github/workflows/rust.yml` runs `cargo test --workspace --all-features` on

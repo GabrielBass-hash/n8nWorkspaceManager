@@ -21,7 +21,7 @@ workspaces/
 *.log
 
 # Local editor / assistant state
-.vscode/
+# .vscode/ is tracked: it holds the Rust Run configuration for the repo.
 .idea/
 .opencode/opencode.json
 .opencode/*.local.json
