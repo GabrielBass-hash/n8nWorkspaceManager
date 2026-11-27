@@ -19,7 +19,9 @@ Les chemins ci-dessous sont relatifs à
 | Module | Responsabilité |
 |---|---|
 | `main.rs` | Entrée. `--self-test` court-circuite config, lock et Docker ; sinon lock mono-instance → résolution Docker → journal → chargement config → interface ou premier lancement → arrêt ordonné. Distingue config absente (wizard) et config illisible (backup `launcher.db.corrupt-<ts>` puis arrêt). Trace `Surveillance active` / `Surveillance terminée`. |
-| `app.rs` | Coquille iced : `run_gui`, `LauncherState`/`Message`/`update`/`view`/`theme`/`subscription`/`window` (1024×640), drapeau de shutdown, tick de 200 ms, handlers `ctrlc`, `close_session`/`stop_all` (via `stop_with_sync`), `prompt_first_launch`, `self_test`. |
+| `app.rs` | Coquille iced : `run_gui`, `LauncherState`/`Message`/`update`/`view`/`theme`/`subscription`/`window` (1180×740, minimum 1024×640), drapeau de shutdown, tick de 200 ms, handlers `ctrlc`, `close_session`/`stop_all` (via `stop_with_sync`), `prompt_first_launch`, `self_test`. Les opérations longues passent par `tokio::task::spawn_blocking` avec un manager reconstructible depuis `ConfigStore` + `DockerManager` (`WorkspaceManager` n'est pas `Send`). |
+| `gui/` | Interface sombre : `theme.rs` (palette, styles, tons), `icons.rs` (SVG embarqués), `widgets.rs` (pastilles, en-têtes, états vides), `pages.rs` (sidebar, cartes, journal, réglages, modales). Consomme `workspaces/status.rs`, ne duplique aucune règle d'action. |
+| `platform/browser.rs` | Ouverture de l'URL d'un workspace par un lanceur natif (`xdg-open` / `open` / `cmd /C start`), sans dépendance supplémentaire. |
 | `core/config.rs` | `ConfigStore` SQLite (`launcher.db`, WAL, busy timeout 10 s, `meta` + `workspaces`, droits `0600`). `load`/`mutate`, migration unique du `config.json` legacy, `backup_unreadable`. `close()` est un no-op (pas de connexion persistante). |
 | `core/filelock.rs` | `FileLock` réentrant sur `flock`/verrou OS, `acquire_single_instance_lock` (`launcher.lock`). |
 | `core/first_launch.rs` | Règles toolkit-free du wizard : `validate_password` (8–64, chiffre, majuscule), `build_initial_config`, `run_first_launch` (refuse sans Docker puis écrit la config). |
@@ -121,28 +123,27 @@ commandes de statut d'exécution générées ; les tests s'auto-ignorent sans da
 Ne pas les présenter comme des fonctionnalités terminées. Elles sont explicitement
 conservées ici pour que la documentation ne promette pas plus que le binaire.
 
-1. **Vue iced minimale.** `app.rs::update` ne fait que poser `state.status`
-   (`"Démarrage de …"`, `"Arrêt de …"`, etc.) et renvoie `Task::none()` : aucun
-   appel à `WorkspaceManager` depuis un bouton. `view` affiche un titre, un
-   bouton *Nouveau*, une liste de boutons workspace et le statut ; pas de cartes,
-   pas de menu contextuel, pas de pilule d'état. `workspaces/status.rs` n'est
-   pas consommé par la vue. `Message::Tick` ne quitte pas réellement la boucle ;
-   `window()` fixe 1024×640 minimum.
-2. **Premier lancement.** `prompt_first_launch()` vérifie l'affichage puis
-   renvoie `Ok(false)` sans rien écrire (`let _ = (store, docker)`). Les règles
-   toolkit-free existent dans `core/first_launch.rs::run_first_launch`, mais
-   aucun appelant ne les utilise.
+1. **Finition de la vue iced.** La vue a désormais une sidebar, des cartes, des
+   pastilles d'état, des badges, une recherche, des filtres, des compteurs, un
+   journal et des réglages ; les actions appellent le manager en tâche
+   asynchrone. Restent des limites de iced : pas de transitions CSS (les micro-
+   interactions sont simulées par l'état au tick de 200 ms) et la grille est à
+   deux colonnes fixes plutôt que responsive.
+2. **Premier lancement.** `prompt_first_launch()` ouvre un wizard iced (email,
+   mot de passe, dossier) qui appelle `core/first_launch.rs::run_first_launch` ;
+   `main.rs` enchaîne ensuite sur `run_gui`. `resolve_github_token` reste un stub
+   (voir lacune 3) : le token est saisi et persisté, jamais découvert.
 3. **Token GitHub.** `github/auth.rs::resolve_github_token` renvoie toujours
    `None`. `git/manager.rs::git_seed_remote` (le seul chemin qui insère un token
    dans une URL jetable, sans `-u`) n'a aucun appelant. Le champ `github_token`
    de `ConfigStore` reste lui persisté dans la table `meta` (héritage du schéma).
 4. **SCP.** `remote/ssh.rs::scp` renvoie `Err("Not implemented")`. Les écritures
    distantes passent par `ssh_run_opts` + `cat > …tmp && mv -f`.
-5. **Journal.** `monitoring/bootstrap.rs::capture_exceptions` est un no-op et
-   aucun layer `tracing_subscriber` n'écrit dans `EventStore`. Les deux
-   événements de session (`Surveillance active` / `Surveillance terminée`) sont
-   émis avec `tracing::info!` uniquement : la paire et l'ordre existent dans le
-   code, mais elle n'est pas consultable via `search_events`.
+5. **Journal.** La page *Journal* lit `latest_events`/`search_events`, et les
+   actions UI ainsi que les deux événements de session sont désormais persistés
+   dans `EventStore`. `monitoring/bootstrap.rs::capture_exceptions` reste un
+   no-op et aucun layer `tracing_subscriber` n'écrit dans le store : les
+   erreurs `tracing` hors actions UI ne sont toujours pas consultables.
 6. **Templates.** `core/templates.rs::read_template` n'est appelé nulle part et
    construit `<CARGO_MANIFEST_DIR>/templates/<package>/<name>`, un dossier qui
    n'existe pas. Les templates réels sont `include_str!` dans `remote/deploy.rs`

@@ -46,6 +46,11 @@ fn main() -> ExitCode {
     let monitor = match bootstrap_logging() {
         Ok(store) => {
             tracing::info!("Surveillance active");
+            let _ = store.append(&n8n_launcher::monitoring::events::Event::new(
+                "session.start".to_string(),
+                "INFO".to_string(),
+                "Surveillance active".to_string(),
+            ));
             Some(Arc::new(store))
         }
         Err(e) => {
@@ -91,13 +96,28 @@ fn main() -> ExitCode {
                 if !launched {
                     return Ok(());
                 }
+                let manager = Arc::new(WorkspaceManager::new(&store, &docker));
+                #[cfg(feature = "gui")]
+                {
+                    n8n_launcher::app::run_gui(store.clone(), manager, monitor.clone())?;
+                }
+                #[cfg(not(feature = "gui"))]
+                {
+                    let _ = manager;
+                    anyhow::bail!("GUI feature not enabled");
+                }
             }
         }
         Ok(())
     })();
 
     // Ordered shutdown — bracketed like the Python `main()` finally block.
-    let _ = n8n_launcher::app::close_session(&*store, &*docker, started);
+    let _ = n8n_launcher::app::close_session(
+        &*store,
+        &*docker,
+        started,
+        monitor.as_deref(),
+    );
     let _ = instance_lock.release();
     if let Some(m) = monitor {
         let _ = m.close();

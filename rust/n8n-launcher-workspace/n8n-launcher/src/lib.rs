@@ -6,6 +6,7 @@ pub mod database;
 pub mod docker;
 pub mod git;
 pub mod github;
+pub mod gui;
 pub mod n8n;
 pub mod monitoring;
 pub mod platform;

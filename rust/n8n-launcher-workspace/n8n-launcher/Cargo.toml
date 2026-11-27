@@ -16,7 +16,7 @@ directories = "6"
 
 # CLI / iced UI
 clap = { version = "4", features = ["derive"] }
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "svg"] }
 
 # Filesystem / process
 walkdir = "2"
@@ -24,6 +24,7 @@ which = "6"
 libc = "0.2"
 tempfile = "3"
 ctrlc = "3.5"
+tokio = { version = "1", features = ["rt"] }
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "blocking"] }

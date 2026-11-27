@@ -107,11 +107,13 @@ Ne jamais committer `state/`, `workspaces/`, `*.env`, tokens ou credentials.
 
 ## Lacunes connues (vérifiées, ne pas présenter comme finies)
 
-La vue iced est minimale (les boutons ne font que poser une chaîne de statut,
-aucun appel au manager) ; `prompt_first_launch` est un no-op ;
-`resolve_github_token` renvoie toujours `None` ; `remote::ssh::scp` renvoie
-`Err("Not implemented")` ; `capture_exceptions` est un no-op et les événements
-de session ne sont pas persistés dans le journal ; `core/templates.rs::read_template`
+La vue iced a désormais cartes, actions branchées au manager en tâche
+asynchrone, recherche, filtres, compteurs, journal, réglages et wizard de
+premier lancement ; il reste l'absence de transitions CSS et une grille à deux
+colonnes fixes. `resolve_github_token` renvoie toujours `None` ;
+`remote::ssh::scp` renvoie `Err("Not implemented")` ; `capture_exceptions` est
+un no-op (les événements de session et les actions UI sont, eux, persistés) ;
+`core/templates.rs::read_template`
 est inutilisé et lit un dossier inexistant ; aucun packaging `.dmg`/AppImage
 (`scripts/build.sh` copie seulement le binaire). Détails dans
 `docs/architecture.md` §Lacunes.
