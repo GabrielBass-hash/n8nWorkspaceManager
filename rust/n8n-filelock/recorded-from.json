@@ -1,0 +1,7 @@
+{
+  "unit": "src/n8n_launcher/core/filelock.py",
+  "files": 1,
+  "fingerprint": "0f5655a73d87997f",
+  "cases": 11,
+  "cases_hash": "a386a7ba335042e1"
+}

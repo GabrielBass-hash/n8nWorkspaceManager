@@ -1,0 +1,46 @@
+[package]
+name = "n8n-launcher"
+description = "Cross-platform launcher for isolated n8n workspaces (Rust rewrite)"
+edition = "2024"
+
+[dependencies]
+# Core
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "unbounded_depth"] }
+thiserror = "1"
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6"
+
+# CLI / iced UI
+clap = { version = "4", features = ["derive"] }
+iced = { version = "0.13", features = ["tokio"] }
+
+# Filesystem / process
+walkdir = "2"
+which = "6"
+libc = "0.2"
+tempfile = "3"
+ctrlc = "3.5"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+urlencoding = "2"
+
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Crypto (bcrypt for owner password)
+bcrypt = "0.16"
+
+# Tracing / logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Regex (secret redaction in monitoring)
+regex = "1"
+lazy_static = "1"
+
+[features]
+gui = []

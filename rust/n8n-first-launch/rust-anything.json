@@ -1,0 +1,112 @@
+{
+  "schema": "rust-anything/bridge@1",
+  "root": "/home/lux/repo/n8nWorkspaceManager",
+  "unit": "src/n8n_launcher/core/first_launch.py",
+  "language": "python",
+  "kind": "pyo3",
+  "crate_name": "n8n-first-launch",
+  "exports": [
+    {
+      "name": "validate_password",
+      "file": "src/n8n_launcher/core/first_launch.py",
+      "line": 29,
+      "params": [
+        {
+          "name": "password",
+          "ts_type": "string",
+          "optional": false,
+          "rest": false
+        }
+      ],
+      "returns": "undefined",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false
+    },
+    {
+      "name": "build_initial_config",
+      "file": "src/n8n_launcher/core/first_launch.py",
+      "line": 43,
+      "params": [
+        {
+          "name": "email",
+          "ts_type": "string",
+          "optional": false,
+          "rest": false
+        },
+        {
+          "name": "password",
+          "ts_type": "string",
+          "optional": false,
+          "rest": false
+        },
+        {
+          "name": "work_dir",
+          "ts_type": "Path",
+          "optional": false,
+          "rest": false
+        }
+      ],
+      "returns": "AppConfig",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false
+    },
+    {
+      "name": "run_first_launch",
+      "file": "src/n8n_launcher/core/first_launch.py",
+      "line": 62,
+      "params": [
+        {
+          "name": "store",
+          "ts_type": "ConfigStore",
+          "optional": false,
+          "rest": false
+        },
+        {
+          "name": "docker",
+          "ts_type": "DockerManager",
+          "optional": false,
+          "rest": false
+        },
+        {
+          "name": "email",
+          "ts_type": "string",
+          "optional": false,
+          "rest": false,
+          "keyword_only": true
+        },
+        {
+          "name": "password",
+          "ts_type": "string",
+          "optional": false,
+          "rest": false,
+          "keyword_only": true
+        },
+        {
+          "name": "work_dir",
+          "ts_type": "Path",
+          "optional": false,
+          "rest": false,
+          "keyword_only": true
+        }
+      ],
+      "returns": "AppConfig",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false
+    }
+  ],
+  "classes": [],
+  "js_only": [
+    {
+      "name": "SetupWizardError",
+      "file": "src/n8n_launcher/core/first_launch.py",
+      "line": 25,
+      "reason": "class: inherits from RuntimeError"
+    }
+  ]
+}

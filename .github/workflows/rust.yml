@@ -1,0 +1,61 @@
+name: Rust
+
+on:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust.yml"
+  push:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust.yml"
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test bridge crates
+        shell: bash
+        run: |
+          for d in rust/n8n-paths rust/n8n-filelock rust/n8n-first-launch; do
+            (cd "$d" && cargo test)
+          done
+      - name: Test launcher
+        working-directory: rust/n8n-launcher-workspace
+        run: cargo test --workspace
+
+  integration:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Docker integration tests
+        working-directory: rust/n8n-launcher-workspace
+        run: cargo test --test docker_integration
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        working-directory: rust/n8n-launcher-workspace
+        run: cargo build --workspace --release

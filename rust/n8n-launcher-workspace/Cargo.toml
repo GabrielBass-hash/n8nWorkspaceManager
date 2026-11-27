@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "n8n-launcher",
+]
+exclude = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace.package]
+version = "6.0.0"
+edition = "2024"
+rust-version = "1.97"
