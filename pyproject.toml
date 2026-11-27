@@ -49,6 +49,7 @@ packaging = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = ["rust/**"]
 
 [tool.ruff.lint]
 # E/W: pycodestyle · F: pyflakes · I: isort · UP: pyupgrade
@@ -117,4 +118,5 @@ typeCheckingMode = "standard"
 exclude = [
     "tests/**",
     "scripts/**",
+    "rust/**",
 ]
