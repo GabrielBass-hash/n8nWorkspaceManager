@@ -50,6 +50,10 @@ fn test_rendered_compose_validates() {
 
 #[test]
 fn test_lifecycle_up_down() {
+    if cfg!(target_os = "windows") {
+        eprintln!("lifecycle test requires a Linux Docker daemon: skipping");
+        return;
+    }
     if !docker_available() {
         eprintln!("docker daemon not reachable: skipping integration test");
         return;
