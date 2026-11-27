@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMessageBox, QPushButton
+from PySide6.QtWidgets import QMessageBox
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
 from n8n_launcher.gui.browser import WebAppLaunchError
@@ -59,15 +59,6 @@ def test_a_populated_board_shows_the_cards(qt_app) -> None:
     assert isinstance(window.board.itemDelegate(), CardDelegate)
 
 
-def test_the_header_does_not_duplicate_contextual_workspace_actions(qt_app) -> None:
-    window = MainWindow(_Manager([_workspace()]))
-
-    assert window.findChild(QPushButton, "new") is not None
-    assert window.findChild(QPushButton, "start") is None
-    assert window.findChild(QPushButton, "stop") is not None
-    assert window.findChild(QPushButton, "stop").isEnabled() is False
-
-
 def test_the_board_selection_reports_the_workspace(qt_app) -> None:
     workspace = _workspace()
     window = MainWindow(_Manager([workspace]))
@@ -82,12 +73,6 @@ def test_the_window_unsubscribes_when_it_closes(qt_app) -> None:
     window.show()
     window.close()
     assert manager.observers == []
-
-
-def _button(window: MainWindow, name: str) -> QPushButton:
-    button = window.findChild(QPushButton, name)
-    assert button is not None
-    return button
 
 
 def test_double_click_opens_a_stopped_workspace(qt_app, monkeypatch) -> None:
@@ -166,17 +151,6 @@ def test_a_failed_open_is_surfaced(qt_app, monkeypatch) -> None:
     window.workspace_actions.ready.emit(Reachable(workspace=_workspace(), started=False))
 
     assert failures == [("Ouverture de n8n impossible", "Aucun navigateur Chromium compatible")]
-
-
-def test_busy_locks_the_actions_then_restores_them(qt_app) -> None:
-    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
-    window.board.setCurrentIndex(window.model.index(0, 0))
-
-    window.workspace_actions.busyChanged.emit(True)
-    assert _button(window, "new").isEnabled() is False
-
-    window.workspace_actions.busyChanged.emit(False)
-    assert _button(window, "new").isEnabled() is True
 
 
 # --- the card's own gestures ------------------------------------------------
@@ -328,50 +302,4 @@ def test_the_card_menu_is_not_offered_while_a_task_runs(qt_app, monkeypatch) -> 
     menu.assert_not_called()
 
 
-# --- the header action must not go stale -----------------------------------
 
-
-def test_the_stop_button_follows_a_state_change_it_did_not_ask_for(qt_app, monkeypatch) -> None:
-    """A reconcile can flip the selected card with no gesture of the user's."""
-    manager = _Manager([_workspace(WorkspaceState.STOPPED)])
-    window = MainWindow(manager)
-    window.board.setCurrentIndex(window.model.index(0, 0))
-    assert _button(window, "stop").isEnabled() is False
-
-    manager._workspaces = [_workspace(WorkspaceState.RUNNING)]
-    window._on_workspace_changed(_workspace(WorkspaceState.RUNNING))
-
-    assert _button(window, "stop").isEnabled() is True
-
-
-def test_the_stop_button_is_re_derived_after_a_full_reload(qt_app) -> None:
-    manager = _Manager([_workspace(WorkspaceState.STOPPED)])
-    window = MainWindow(manager)
-    window.board.setCurrentIndex(window.model.index(0, 0))
-
-    manager._workspaces = [_workspace(WorkspaceState.RUNNING)]
-    window._on_workspaces_changed()
-
-    assert _button(window, "stop").isEnabled() is True
-
-
-def test_the_stop_button_names_the_workspace_it_will_stop(qt_app) -> None:
-    """A greyed button that does not say which card it means reads as broken."""
-    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
-    window.board.setCurrentIndex(window.model.index(0, 0))
-    assert _button(window, "stop").toolTip() == "Arrêter « Mon workspace »"
-
-
-def test_the_stop_button_has_no_target_tooltip_when_inapplicable(qt_app) -> None:
-    window = MainWindow(_Manager([_workspace(WorkspaceState.STOPPED)]))
-    window.board.setCurrentIndex(window.model.index(0, 0))
-    assert _button(window, "stop").toolTip() == ""
-
-
-def test_busy_disables_the_stop_button_even_on_a_running_card(qt_app) -> None:
-    window = MainWindow(_Manager([_workspace(WorkspaceState.RUNNING)]))
-    window.board.setCurrentIndex(window.model.index(0, 0))
-
-    window.workspace_actions.busyChanged.emit(True)
-
-    assert _button(window, "stop").isEnabled() is False

@@ -38,7 +38,7 @@ DANGER = "#ed4245"
 # Geometry.
 RADIUS = 10
 CARD_RADIUS = 12
-SPACING = 12
+SPACING = 30
 CARD_PADDING = 14
 
 #: The stylesheet applied application-wide. Kept as one string so the look is

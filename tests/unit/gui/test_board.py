@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QSize, Qt
 from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from n8n_launcher.core.models import DbConfig, DbMode, Workspace, WorkspaceState
+from n8n_launcher.gui import theme
 from n8n_launcher.gui.board import WorkspaceBoard
 from n8n_launcher.gui.card_delegate import CARD_HEIGHT, CARD_SIZE, CARD_WIDTH, card_rect, pill_rect
 from n8n_launcher.gui.workspace_model import WorkspaceListModel
@@ -114,7 +115,9 @@ def test_the_board_is_still_a_wrapping_icon_grid(qt_app) -> None:
     assert board.flow() == QListView.Flow.LeftToRight
     assert board.isWrapping() is True
     assert board.movement() == QListView.Movement.Static
-    assert board.gridSize() == CARD_SIZE
+    assert board.gridSize() == QSize(
+        CARD_SIZE.width() + theme.SPACING, CARD_SIZE.height() + theme.SPACING
+    )
     assert board.selectionMode() == QAbstractItemView.SelectionMode.SingleSelection
 
 
@@ -122,10 +125,15 @@ def test_the_viewport_tracks_the_mouse_so_hover_can_be_seen(qt_app) -> None:
     assert WorkspaceBoard().viewport().hasMouseTracking() is True
 
 
-def test_the_grid_size_matches_the_delegate_size_hint(qt_app) -> None:
-    """A grid smaller than the card would clip the very pill we hit-test."""
+def test_the_grid_size_exceeds_the_delegate_size_hint(qt_app) -> None:
+    """The grid is larger than the card so a margin is kept around every card."""
     board = WorkspaceBoard()
-    assert board.gridSize() == board.card_delegate().sizeHint(QStyleOptionViewItem(), QModelIndex())
+    hint = board.card_delegate().sizeHint(QStyleOptionViewItem(), QModelIndex())
+    assert board.gridSize().width() > hint.width()
+    assert board.gridSize().height() > hint.height()
+    assert board.gridSize() == QSize(
+        CARD_SIZE.width() + theme.SPACING, CARD_SIZE.height() + theme.SPACING
+    )
 
 
 def test_a_click_on_the_pill_activates_that_card(qt_app) -> None:
@@ -218,7 +226,14 @@ def test_a_right_click_asks_for_the_menu_and_selects_the_card(qt_app) -> None:
     seen: list[QModelIndex] = []
     board.contextRequested.connect(seen.append)
 
-    _click(board, _body_point(board, index), Qt.MouseButton.RightButton)
+    body = _body_point(board, index)
+    board.contextMenuEvent(
+        QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse,
+            body,
+            board.viewport().mapToGlobal(body),
+        )
+    )
 
     assert seen == [index]
     assert board.currentIndex() == index
@@ -231,7 +246,13 @@ def test_a_right_click_on_empty_board_asks_for_nothing(qt_app) -> None:
     seen: list[QModelIndex] = []
     board.contextRequested.connect(seen.append)
 
-    _click(board, QPoint(CARD_WIDTH * 2, 5), Qt.MouseButton.RightButton)
+    board.contextMenuEvent(
+        QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse,
+            QPoint(CARD_WIDTH * 2, 5),
+            board.viewport().mapToGlobal(QPoint(CARD_WIDTH * 2, 5)),
+        )
+    )
 
     assert seen == []
 

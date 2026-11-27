@@ -64,19 +64,7 @@ def test_main_window_remains_contained_across_viewports(qt_app, qtbot, size: QSi
     assert central is not None
     central_bounds = _rect(central)
 
-    header = window.findChild(QWidget, "header")
-    assert header is not None
-    assert_rect_within("MainWindow.header", _rect(header), central_bounds, viewport)
-
-    control = window.findChild(QWidget, "new")
-    assert control is not None
-    assert_rect_within(
-        "MainWindow.new",
-        _rect(control),
-        _rect(header),
-        viewport,
-    )
-
+    # La top bar a été supprimée : le board occupe maintenant tout l'espace central.
     assert_rect_within("MainWindow.board", _rect(window.board), central_bounds, viewport)
     assert window.minimumSize() == QSize(1024, 640)
 
