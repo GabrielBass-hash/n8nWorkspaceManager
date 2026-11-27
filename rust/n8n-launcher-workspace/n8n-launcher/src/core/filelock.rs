@@ -2,7 +2,6 @@
 //! Port de `src/n8n_launcher/core/filelock.py`.
 
 use std::fs::{File, OpenOptions};
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::path::Path;
 
 /// Raised when a non-blocking lock cannot be acquired.
@@ -17,7 +16,7 @@ pub struct LockError(pub String);
 /// process genuinely competes for the OS lock.
 pub struct FileLock {
     path: Box<Path>,
-    fd: Option<RawFd>,
+    file: Option<File>,
     depth: usize,
 }
 
@@ -25,7 +24,7 @@ impl FileLock {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             path: path.as_ref().to_path_buf().into_boxed_path(),
-            fd: None,
+            file: None,
             depth: 0,
         }
     }
@@ -34,8 +33,8 @@ impl FileLock {
         &self.path
     }
 
-    pub fn acquire(&mut self, _shared: bool, blocking: bool) -> Result<(), LockError> {
-        if self.fd.is_some() {
+    pub fn acquire(&mut self, shared: bool, blocking: bool) -> Result<(), LockError> {
+        if self.file.is_some() {
             self.depth += 1;
             return Ok(());
         }
@@ -44,7 +43,7 @@ impl FileLock {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // Ensure file holds at least one byte to lock on Windows.
+        // Ensure the file holds at least one byte to lock on Windows.
         {
             let mut f = OpenOptions::new()
                 .read(true)
@@ -59,51 +58,36 @@ impl FileLock {
             }
         }
 
-        let fd = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&self.path)
-            .map_err(|e| LockError(format!("Impossible d'ouvrir le fichier de verrou : {e}")))?
-            .into_raw_fd();
+            .map_err(|e| LockError(format!("Impossible d'ouvrir le fichier de verrou : {e}")))?;
 
-        #[cfg(unix)]
-        {
-            let result = flock(fd, blocking);
-            if result.is_err() {
-                let _ = unsafe { File::from_raw_fd(fd) };
-                return result.map_err(|e| LockError(e.to_string()));
-            }
-        }
+        let lock_result = match (blocking, shared) {
+            (true, true) => file.lock_shared().map_err(|e| LockError(e.to_string())),
+            (true, false) => file.lock().map_err(|e| LockError(e.to_string())),
+            (false, true) => file.try_lock_shared().map_err(|e| LockError(e.to_string())),
+            (false, false) => file.try_lock().map_err(|e| LockError(e.to_string())),
+        };
+        lock_result?;
 
-        #[cfg(windows)]
-        {
-            let _ = blocking;
-            let result = lock_windows(fd);
-            if result.is_err() {
-                let _ = unsafe { File::from_raw_fd(fd) };
-                return result.map_err(|e| LockError(e.to_string()));
-            }
-        }
-
-        self.fd = Some(fd);
+        self.file = Some(file);
         self.depth = 1;
         Ok(())
     }
 
     pub fn release(&mut self) {
-        if self.fd.is_none() {
+        if self.file.is_none() {
             return;
         }
         self.depth = self.depth.saturating_sub(1);
         if self.depth > 0 {
             return;
         }
-        let fd = self.fd.take().unwrap();
-        #[cfg(unix)]
-        let _ = unlock_flock(fd);
-        #[cfg(windows)]
-        let _ = unlock_windows(fd);
-        let _ = unsafe { File::from_raw_fd(fd) };
+        if let Some(file) = self.file.take() {
+            let _ = file.unlock();
+        }
     }
 }
 
@@ -111,49 +95,6 @@ impl Drop for FileLock {
     fn drop(&mut self) {
         self.release();
     }
-}
-
-#[cfg(unix)]
-fn flock(fd: RawFd, blocking: bool) -> std::io::Result<()> {
-    use std::os::unix::io::AsRawFd as _;
-    let file = unsafe { File::from_raw_fd(fd) };
-    let raw = file.as_raw_fd();
-    // Re-wrap so fd is not closed twice
-    let _ = file.into_raw_fd();
-
-    let flags = if blocking {
-        libc::LOCK_EX
-    } else {
-        libc::LOCK_EX | libc::LOCK_NB
-    };
-    let rc = unsafe { libc::flock(raw, flags) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(unix)]
-fn unlock_flock(fd: RawFd) -> std::io::Result<()> {
-    let rc = unsafe { libc::flock(fd, libc::LOCK_UN) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn lock_windows(_fd: RawFd) -> std::io::Result<()> {
-    // Windows byte-range locking via msvcrt would need `windows-sys`.
-    // For now, treat as acquired on non-Unix platforms.
-    Ok(())
-}
-
-#[cfg(windows)]
-fn unlock_windows(_fd: RawFd) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// Acquire a non-blocking lock proving "the launcher is already running".

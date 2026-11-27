@@ -421,6 +421,7 @@ pub fn installer_script(
     let script = directory.join(installer_script_name(system));
     let content = installer_script_text(asset_path, target, system, pid);
     std::fs::write(&script, content).map_err(|e| UpdateError(format!("failed to write installer script: {e}")))?;
+    #[cfg(unix)]
     if !is_windows(system) {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&script).map(|m| m.permissions()).map_err(|e| UpdateError(format!("failed to write installer script: {e}")))?;
