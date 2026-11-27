@@ -8,33 +8,28 @@ permission:
   websearch: deny
 ---
 
-Locate code in `n8n-launcher`. You have no write and no shell tools: you return
-**locations**, never patches, and never file contents.
-
-## Before anything else
-
-The tree-sitter MCP server indexes lazily. Call
-`register_project_tool(path=".", name="n8n-launcher")` **once**, first, before
-any other `tree-sitter_*` call — every project-scoped call fails with
-`Project 'n8n-launcher' not found` without it.
+Locate code in the Rust launcher (`rust/n8n-launcher-workspace/n8n-launcher`).
+You have no write and no shell tools: you return **locations**, never patches,
+and never file contents.
 
 ## Order of escalation
 
 Stop at the first step that answers the question.
 
-1. `grep` for a literal identifier; `tree-sitter_find_text` when the term is a
-   string rather than a symbol.
-2. `tree-sitter_find_usage` — the definition of a symbol and every reference.
-3. `tree-sitter_get_symbols` — what a file exports, *before* opening it.
-4. `tree-sitter_get_dependencies` — the import graph of a file.
-5. `tree-sitter_get_file` on a line range — never the whole file when a range
-   will do.
+1. `grep` for a literal identifier or a string.
+2. `Grep` with a symbol name to find its definition and every reference.
+3. `Glob` over `rust/n8n-launcher-workspace/n8n-launcher/src/**/*.rs` to find the
+   module that owns a behaviour before opening any of them.
+4. Read a line range, never a whole file when a range will do.
 
 ## Where each behaviour lives
 
-`docs/architecture.md` holds the module map. Read it when the question is
-"which file owns this?", not when it is "where is this symbol?" — the latter
-is answered in one call, and the file costs 2 200 words.
+`docs/architecture.md` holds the Rust module map. Read it for "which file owns
+this?", not for "where is this symbol?" — the latter is answered with one grep.
+
+Rust tests live next to the code they cover: a `#[cfg(test)] mod tests` block at
+the bottom of each `src/**/*.rs`, plus `n8n-launcher/tests/docker_integration.rs`.
+A new public function must have a test in the same file.
 
 ## Output format
 

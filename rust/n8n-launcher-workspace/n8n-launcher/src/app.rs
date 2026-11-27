@@ -136,7 +136,10 @@ pub fn close_session(
     let manager = WorkspaceManager::new(store, docker);
     if let Ok(config) = store.load() {
         for workspace in config.workspaces {
-            let _ = manager.stop(&workspace.id);
+            // A stop the user asked for is a close: export the workflows and
+            // push them before tearing the stack down, exactly like the old
+            // Python shutdown path did.
+            let _ = manager.stop_with_sync(&workspace.id);
         }
     }
     tracing::info!(
@@ -153,7 +156,7 @@ pub fn stop_all(store: &ConfigStore, docker: &DockerManager) {
     let manager = WorkspaceManager::new(store, docker);
     if let Ok(config) = store.load() {
         for workspace in config.workspaces {
-            let _ = manager.stop(&workspace.id);
+            let _ = manager.stop_with_sync(&workspace.id);
         }
     }
 }

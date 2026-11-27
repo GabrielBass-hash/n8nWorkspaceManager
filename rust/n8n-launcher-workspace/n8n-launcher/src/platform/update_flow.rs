@@ -238,7 +238,7 @@ impl UpdateController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     #[test]
@@ -252,7 +252,6 @@ mod tests {
         let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
         let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let closed_c = closed.clone();
         let ctrl = UpdateController::new(
             Box::new({
                 let sc = statuses.clone();

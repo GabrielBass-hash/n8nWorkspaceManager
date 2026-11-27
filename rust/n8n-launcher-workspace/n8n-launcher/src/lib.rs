@@ -14,6 +14,3 @@ pub mod workspaces;
 pub mod app;
 
 pub use core::models::*;
-
-#[cfg(feature = "gui")]
-mod views;

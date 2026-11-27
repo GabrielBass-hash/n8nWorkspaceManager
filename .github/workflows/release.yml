@@ -1,27 +1,14 @@
 name: Release
 
 # Releases are published only from `main`. The version is an explicit
-# developer edit: bump `__version__` in `src/n8n_launcher/__init__.py` as part
-# of a PR. This workflow reads the version out of the single source of truth,
-# compares it with the last git tag, and only tags + builds + publishes when
-# the version actually moved. There is no automatic bump and no reliance on a
-# ``[skip ci]`` convention.
+# developer edit in the Rust workspace manifest — there is no automatic bump.
+# This workflow reads it, compares it with the last git tag, and only builds
+# and publishes when the version actually moved.
 on:
   push:
     branches: [main]
     paths:
-      - "src/**"
-      - "tests/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "scripts/**"
-      - "run.py"
-      - "assets/**"
-      - ".pre-commit-config.yaml"
-      - ".gitignore"
-      - ".python-version"
-      - "README.md"
-      - "AGENTS.md"
+      - "rust/**"
       - ".github/workflows/release.yml"
 
 permissions:
@@ -42,16 +29,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Compare source version with latest tag
+      - name: Compare workspace version with latest tag
         id: check
+        shell: bash
         run: |
-          uv sync --frozen
-          version=$(PYTHONPATH=src uv run python -c "import n8n_launcher; print(n8n_launcher.__version__)")
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/n8n-launcher-workspace/Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then
+            echo "Could not read the workspace version" >&2
+            exit 1
+          fi
           last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ -n "$last_tag" ] && [ "$last_tag" = "v$version" ]; then
@@ -67,85 +53,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            artifact: dist/n8n-launcher-macos.dmg
-            dist_root: dist/n8n-launcher.app
-            name: n8n-launcher-macos.dmg
           - os: ubuntu-latest
-            artifact: dist/n8n-launcher
-            dist_root: dist/n8n-launcher
             name: n8n-launcher-linux
+            binary: n8n-launcher
+          - os: macos-latest
+            name: n8n-launcher-macos
+            binary: n8n-launcher
           - os: windows-latest
-            artifact: dist/n8n-launcher
-            dist_root: dist/n8n-launcher
             name: n8n-launcher-windows
+            binary: n8n-launcher.exe
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust/n8n-launcher-workspace
     steps:
       - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: "3.12"
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --frozen --no-group dev --group packaging
-
-      - name: Build executable
-        run: uv run python scripts/build.py
-
-      # Ship nothing that cannot open a window: the Qt platform plugin is the
-      # one piece a packaging step can silently drop.
-      - name: Verify the Qt bundle
-        run: uv run python scripts/build.py --verify "${{ matrix.dist_root }}"
-
-      - name: Build AppImage (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: bash scripts/build_appimage.sh
-
-      - name: Smoke test the built application (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: dist/n8n-launcher/n8n-launcher --self-test
-
-      - name: Smoke test the AppImage (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: dist/n8n-launcher-linux-x86_64.AppImage --self-test
-
-      - name: Smoke test the built application (macOS)
-        if: matrix.os == 'macos-latest'
-        run: dist/n8n-launcher.app/Contents/MacOS/n8n-launcher --self-test
-
-      # A --windowed build on Windows is a GUI-subsystem binary: PowerShell does
-      # not wait for it and never sees its exit code, hence Start-Process -Wait.
-      - name: Smoke test the built application (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $exe = "dist\n8n-launcher\n8n-launcher.exe"
-          $proc = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { throw "self-test exited with $($proc.ExitCode)" }
-
-      - name: Dry-run the macOS installer
-        if: matrix.os == 'macos-latest'
-        run: bash scripts/install_macos.sh -n -f dist/n8n-launcher-macos.dmg
-
-      - name: Upload artifact
+          workspaces: rust/n8n-launcher-workspace
+      - name: Build release binary
+        run: cargo build --workspace --release
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.artifact }}
-          if-no-files-found: error
-
-      - name: Upload AppImage artifact
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: n8n-launcher-linux-x86_64.AppImage
-          path: dist/n8n-launcher-linux-x86_64.AppImage
+          path: rust/n8n-launcher-workspace/target/release/${{ matrix.binary }}
           if-no-files-found: error
 
   release:

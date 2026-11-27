@@ -140,7 +140,9 @@ fn self_test() -> Result<(), anyhow::Error> {
         )
         .subscription(n8n_launcher::app::subscription)
         .theme(n8n_launcher::app::theme)
-        .window(n8n_launcher::app::window);
+        .window(n8n_launcher::app::window(
+            &n8n_launcher::app::LauncherState::default(),
+        ));
     }
     store.close()?;
     drop(scratch);

@@ -1,208 +1,200 @@
 # n8n-launcher — Product Summary
 
-**n8n-launcher** is a cross-platform application (Python 3.12+, Windows / macOS
-/ Linux) for managing isolated Docker-based n8n workspaces. Each workspace is
-its own Docker Compose project with its own data volume and optional PostgreSQL
-database.
+**n8n-launcher** is a cross-platform application (Rust, Windows / macOS /
+Linux) for managing isolated Docker-based n8n workspaces. Each workspace is its
+own Docker Compose project with its own data volume and optional PostgreSQL
+database. This branch contains **only the Rust rewrite** under
+`rust/n8n-launcher-workspace/`; the former Python implementation has been
+removed.
 
-- **Version**: 5.0.3 — single-source SemVer in `src/n8n_launcher/__init__.py`
-- **Entry point**: console script `n8n-launcher` → `n8n_launcher.__main__:main`
-- **Interface**: none. No GUI toolkit is a dependency; `src/n8n_launcher/gui/`
-  is a seam whose `run_gui()` and `LauncherApp.run()` raise
-  `NotImplementedError("new GUI not yet implemented (phase 2)")`.
-- **Runtime dependencies**: `bcrypt`, `platformdirs`, `PyYAML`, `requests`
-- **Build dependency**: PyInstaller, plus `dmgbuild` on macOS
-- **Configuration**: `platformdirs.user_config_dir("n8n-launcher")/launcher.db`
-  (SQLite, WAL, `0o600` on non-Windows; a legacy `config.json` is migrated in
-  once). The journal lives in `logs_dir()/events.db` with a 30-day retention.
+- **Version**: 6.0.0 — single-source SemVer in the workspace `Cargo.toml`
+  (`[workspace.package] version`), inherited via `version.workspace = true`.
+- **Entry point**: binary `n8n-launcher`, with `--self-test` short-circuiting
+  before the config, the lock or Docker are touched.
+- **Interface**: iced 0.13 shell (`default = ["gui"]`). The current view is a
+  header with a *Nouveau* button and a list of workspace buttons; lifecycle
+  messages only change a status string.
+- **Dependencies**: serde/serde_json, clap 4, iced 0.13 (tokio), reqwest,
+  rusqlite (bundled), bcrypt, tracing, regex, tempfile, ctrlc, plus small
+  helpers (`uuid`, `chrono`, `directories`, `walkdir`, `which`, `libc`).
+- **Configuration**: `platformdirs`-equivalent path from `directories` →
+  `<config_dir>/launcher.db` (SQLite, WAL, `0o600` on non-Windows). The journal
+  lives in `logs_dir()/events.db` with 30-day retention.
 
 ## Architecture
 
 ```
-src/n8n_launcher/
-├── __main__.py            # lock → journal → run_gui() (refuses) → ordered shutdown
-├── core/
-│   ├── models.py          # DbMode, DbConfig, GitConfig, Workspace, AppConfig
-│   ├── config.py          # ConfigStore: SQLite WAL, load/mutate, thread- and process-safe
-│   ├── filelock.py        # FileLock, single-instance lock, reentrant per-workspace git lock
-│   └── paths.py           # platformdirs config/log/runtime paths, compose_file(id)
-├── database/
-│   ├── migrations.py      # MigrationRunner: detect + apply SQL via `compose exec psql`
-│   ├── layout.py          # db/migrations directory layout
-│   └── credentials.py     # auto-create n8n DB credentials, data_db_target()
-├── docker/
-│   ├── compose.py         # write_compose(), render_remote_compose(): per-workspace YAML
-│   └── manager.py         # `docker compose` wrapper, list_project_states(), resolve_docker_command()
-├── git/
-│   └── manager.py         # init/clone/add/commit/push/pull/remotes, workspace_branch(), tokenize_remote_url()
-├── github/
-│   ├── api.py             # GitHubClient: owner, create_repo, runs, jobs, logs, dispatch_workflow()
-│   └── auth.py            # resolve_github_token(): override → gh CLI → git credential
-├── n8n/
-│   ├── api.py             # public REST client (workflows, credentials)
-│   ├── owner.py           # owner bootstrap through the internal /rest/* endpoints, hash_owner_password()
-│   ├── workflows.py       # SyncRunner: import_all(), export_all(mirror=…), background thread
-│   └── scopes.py          # the one API-key scope list shared by owner.py and the generated deploy.py
-├── monitoring/
-│   ├── events.py          # Event record
-│   ├── store.py           # EventStore: SQLite, 30-day retention, search/export
-│   ├── redaction.py       # mask secret-shaped values before they are written
-│   └── bootstrap.py       # bootstrap_logging(), capture_exceptions()
-├── remote/
-│   ├── ssh.py             # ssh_run/scp, atomic write_remote_file, health/logs/marker/status reads
-│   └── deploy.py          # generated post-receive hook + deploy.py (template strings)
-├── platform/
-│   ├── ports.py           # is_port_available(), suggest_port()
-│   ├── updater.py         # GitHub release comparison + download
-│   └── update_flow.py     # UpdateController: check → download → install, questions injected
-├── gui_utils/
-│   └── text.py            # ellipsize, column_widths, fit_budget — toolkit-free sizing rules
-├── gui/
-│   └── app.py             # the seam: run_gui() / LauncherApp.run() raise NotImplementedError
-└── workspaces/
-    ├── manager.py         # WorkspaceManager: CRUD, start/stop, git sync, CI, install_server/publish
-    ├── close.py           # CloseSequence with injected CloseHooks
-    ├── dialogs.py         # the plans a form collects, and the rules that fill them
-    └── ci.py              # CI harness, render_harness(), eligibility, tests.json selection
+rust/n8n-launcher-workspace/
+├── Cargo.toml                 # resolver 2, edition 2024, rust-version 1.97
+└── n8n-launcher/
+    ├── src/
+    │   ├── main.rs            # self-test → lock → journal → config → iced → ordered shutdown
+    │   ├── lib.rs             # public module surface
+    │   ├── app.rs             # iced shell, shutdown flag, signal handlers, session bracketing
+    │   ├── core/
+    │   │   ├── models.rs      # DbMode, WorkspaceState, Workspace, AppConfig, GitConfig, ServerConfig
+    │   │   ├── config.rs      # ConfigStore: SQLite load/save/mutate, file permissions, config backup
+    │   │   ├── filelock.rs    # FileLock (reentrant), single-instance launcher.lock
+    │   │   ├── first_launch.rs# password/config rules, Docker check, initial save
+    │   │   ├── paths.rs       # config/log/runtime directories, compose_file(id)
+    │   │   └── templates.rs   # unused read_template() over a missing directory
+    │   ├── database/
+    │   │   ├── credentials.rs # DB target resolution, n8n credential creation
+    │   │   ├── layout.rs      # db/migrations + db/schema.sql detection
+    │   │   └── migrations.rs  # SQL runner via `compose exec`
+    │   ├── docker/
+    │   │   ├── compose.rs     # render_compose(), render_remote_compose(), write_compose()
+    │   │   └── manager.rs     # `docker compose` wrapper, label parsing, CLI resolution
+    │   ├── git/manager.rs     # init/pull/add/commit/push, workspace_branch(), reentrant lock
+    │   ├── github/
+    │   │   ├── api.rs         # REST client: owner, repos, runs, jobs, logs, dispatch, default branch
+    │   │   └── auth.rs        # resolve_github_token() — stub returning None
+    │   ├── monitoring/
+    │   │   ├── events.rs      # Event record
+    │   │   ├── store.rs       # EventStore: 30-day retention, SQL search/export, close
+    │   │   ├── redaction.rs   # mask secret-shaped values before persistence
+    │   │   └── bootstrap.rs   # journal bootstrap; capture_exceptions() is a no-op
+    │   ├── n8n/
+    │   │   ├── api.rs         # public REST client (workflows, credentials)
+    │   │   ├── owner.rs       # /rest/* owner bootstrap, bcrypt hash, readiness wait
+    │   │   ├── scopes.rs      # local scope list (differs from the remote one — see gaps)
+    │   │   ├── workflows.rs   # import_all(), export_all(mirror)
+    │   │   └── exports.rs     # whitelist payload, export filename/id rules
+    │   ├── platform/
+    │   │   ├── ports.rs       # is_port_available(), suggest_port()
+    │   │   ├── updater.rs     # GitHub release compare, asset selection, download, installer
+    │   │   └── update_flow.rs # UpdateController: check → offer → download → install
+    │   ├── remote/
+    │   │   ├── ssh.rs         # ssh_run, atomic write_remote_file, chmod, probes (scp is a stub)
+    │   │   ├── deploy.rs      # path helpers, rendered hook/deploy script, secrets document
+    │   │   └── templates/     # embedded hook.txt and deploy.txt
+    │   └── workspaces/
+    │       ├── manager.rs     # CRUD, lifecycle, git sync, CI, install_server/publish, status reads
+    │       ├── status.rs      # labels, tones, can_start/can_stop/can_open, card actions
+    │       ├── close.rs       # CloseSequence with injected CloseHooks
+    │       ├── dialogs.rs     # plans a form collects
+    │       └── ci.rs          # harness generation, eligibility, selection
+    └── tests/docker_integration.rs  # 3 Docker lifecycle tests
 ```
-
-`git/__init__.py` and `remote/__init__.py` re-export their package's public
-surface, so consumers import from `n8n_launcher.git` /
-`n8n_launcher.remote` without knowing the file layout.
 
 ## Behaviour
 
+### Entry point and shutdown
+
+- `main()` handles `--self-test` first, then resolves paths, takes the
+  single-instance lock, bootstraps the journal and logs `Surveillance active`.
+- A loaded config opens the iced shell. A config that exists but is unreadable
+  is renamed to `launcher.db.corrupt-<timestamp>` and stops the run. A missing
+  config calls `prompt_first_launch()` (currently a stub).
+- `close_session()` counts workspaces that were not `STOPPED`, stops each one
+  through `stop_with_sync()`, and logs `Surveillance terminée` before the store
+  is closed. The Ctrl-C handler calls `stop_all()` and requests shutdown; the
+  200 ms tick keeps that flag observable while iced waits in its event loop.
+
 ### Workspace lifecycle
 
-- States: `STOPPED`, `STARTING`, `RUNNING`, `STOPPING`, `ERROR`. `docker down`
-  runs between the `STOPPING` and `STOPPED` writes.
-- `start()` writes the Compose file, brings the stack up and applies the managed
-  SQL migrations. `ensure_running()` starts the workspace if it is not already
-  running, invokes `on_ready(port)` for the caller to wait on n8n's health
-  endpoint, bootstraps the owner when the workspace has no API key, creates the
-  DB credentials, and imports the workflows (auto-pull included).
-- `reconcile_all()` syncs persisted states with Docker reality: one
-  `docker ps` batch through `list_project_states()` before taking the config
-  lock, then a single `store.mutate` for the changes. It is called on demand,
-  not on a timer. A workspace whose Compose file is gone keeps its stored state
-  and is never force-stopped.
-- `parse_container_labels()` accepts the three label shapes the Docker CLI
-  produces, including the flat `k=v,k=v` string Compose 2.35 emits on Docker
-  Desktop.
-- Managed DB auto-fills missing parameters (database `data`, user `n8ndata`,
-  random password). `postgres_image` and `postgres_preload_timescaledb` are
-  per-workspace. A port is suggested automatically when the chosen one is taken.
-- Each workspace pins its n8n version (`n8n_version`, default 2.40.0).
+- States: `STOPPED`, `STARTING`, `RUNNING`, `STOPPING`, `ERROR`. `stop()` writes
+  `STOPPING`, runs `docker compose down`, then writes `STOPPED`.
+- `start()` writes the Compose file, brings the stack up, waits on
+  `/healthz/readiness`, bootstraps the owner, saves the API key, ensures DB
+  credentials, pulls git and imports workflows. Those last steps are best
+  effort: they do not fail the start.
+- `ensure_running()` asks Docker (`live_state()`) rather than the persisted
+  state, so a stack started outside the launcher is opened, not started twice.
+  `reconcile_all()` batch-reads `docker ps` and writes state changes in one
+  config transaction; a workspace whose Compose file is gone keeps its state.
 
 ### Docker Compose
 
-- Project name `n8n-ws-<id>`; named volumes `n8ndata-<id>` and, in managed mode,
-  `pgdata-<id>`.
-- `DbMode.NONE` omits the database service entirely. A legacy `"external"` mode
-  loads as `NONE`.
+- Project `n8n-ws-<id>`; named volumes `n8ndata-<id>` and, in managed mode,
+  `pgdata-<id>`. `DbMode::NONE` omits the database service.
+- Managed defaults: database `data`, user `n8ndata`, random password;
+  `postgres_image` defaults to `postgres:16` and n8n to `2.40.0`.
+- `render_remote_compose()` pins a top-level `name: n8n-ws-<id>`, mounts
+  `./:/workflows` and binds the n8n port to loopback only.
 
-### Git
+### Git and workflows
 
-- Branch model: every launcher repo works on `dev`, seeded by
-  `git -c init.defaultBranch=dev init`; a legacy `main`/`n8n/*` branch is
-  renamed to `dev` once on the first `ensure_running()`. `dev` is the work
-  branch and the CI branch; `main` exists only on the server's bare repository,
-  where `publish` pushes `dev:main`.
-- Concurrency: git lifecycle calls take a reentrant per-workspace lock
-  (`.n8n-launcher.git.lock`, gitignored).
-- Auto-pull `--rebase` on start (never blocks), auto-push on close (skipped when
-  there is nothing to commit and no unpushed commit). `git_push` seeds an empty
-  remote with `-u` and retries once on a server-side rejection. Push failures are
-  logged, never raised.
-- GitHub repo creation stores the clean URL and seeds the remote with a one-shot
-  tokenized push, so the token never lands in `.git/config`.
-
-### Workflows
-
-- Import scans `n8nPipelines/` and the workspace root; export writes
-  `n8nPipelines/<name>-<id>.json` and, with `mirror=`, identical copies at the
-  root. Mirror cleanup is restricted to launcher-named files
-  (`EXPORT_NAME_RE = .+-\d+\.json$`).
-- Every consumer of both locations dedups by basename in favour of
-  `n8nPipelines/` (`collect_workflows()`, `collect_workflow_files()`).
-- Create payloads are a whitelist: n8n's public create schema rejects
-  server-only fields with HTTP 400.
+- Every launcher repository works on `dev`; a legacy branch is renamed once.
+  Git calls take the reentrant, best-effort and non-blocking
+  `.n8n-launcher.git.lock`, which is gitignored via `EXCLUDE_BODY`. Auto-pull
+  runs on start; `stop_with_sync()` exports and pushes
+  before stopping. `dev` is the CI branch and `main` exists only on the server's
+  bare repository, where `publish()` pushes `dev:main` with a 300 s timeout.
+- Import scans `*.json` in both `n8nPipelines/` and the workspace root, skips
+  unreadable or non-workflow files and duplicates by id or name, and uses a
+  field whitelist for the create payload. Export refreshes
+  `n8nPipelines/<name>-<id>.json` and optionally mirrors identical copies at the
+  root; cleanup only touches launcher-named files.
 
 ### GitHub Actions CI
 
-- `render_harness()` emits `.github/workflows/n8n-ci.yml` (jobs `validate` +
-  `test`), `.n8n-tests/validate.py` and `.n8n-tests/runner.py`, all
-  marker-commented, with the image pinned through the `__N8N_IMAGE__` token.
-  Triggers: `workflow_dispatch` and pushes on `dev`.
-- `workflow_eligibility(export, credentials)` decides whether a pipeline is
-  testable: a manual, schedule or *pinned* webhook/chat trigger, plus every
-  non-pinned node's credential types covered. It returns a French rationale with
-  the verdict. `save_ci_selection()` does not enforce it — a caller that can tick
-  a pipeline has to ask.
-- Selection is machine-managed (`.n8n-tests/tests.json`).
-- Only `(name, type)` credential metadata is persisted. `ci_credentials_payload(id)`
-  needs a started workspace with an `api_key` and reads the values once to build
-  the `N8N_CI_CREDENTIALS` secret.
-- Runs are read through `github/api.py`; a manual run dispatches
-  `workflow_dispatch` on a chosen ref.
+- `render_harness()` emits `.github/workflows/n8n-ci.yml`,
+  `.n8n-tests/validate.py`, `.n8n-tests/runner.py` and `.n8n-tests/tests.json`,
+  all marker-commented as generated. `enable_ci()` requires a Git repo with a
+  GitHub remote, preserves an existing selection file, commits, pushes and
+  attempts to set the default branch to `dev`.
+- `workflow_eligibility()` returns a verdict plus a French rationale: a manual,
+  schedule or pinned webhook/chat trigger, with every non-pinned node's
+  credential types covered. `save_ci_selection()` does not enforce it.
 
-### Remote deployment and observability
+### Remote deployment and monitoring
 
-- `install_server()` initializes the bare repo before writing the
-  `post-receive` hook, then ships the hook and `deploy.py` atomically.
-- The hook composes the stack with `-p "$PROJECT"` and writes
-  `last-deploy.json` atomically; `deploy.py` recreates credentials, imports
-  workflows with the basename dedup, and never runs `db/migrations/*.sql`.
-- Activation goes through the deploy's owner session (`/rest/workflows/{id}`
-  then `/rest/workflows/{id}/activate`) and is best effort: a refusal is logged.
-- `publish()` pushes `dev:main` with a 300 s timeout, polls the marker until the
-  sha matches HEAD, then records `server_last_error` / `server_last_deploy`.
-- `server_health`, `server_logs`, `server_deploy_status` and
-  `server_execution_status` are read-only, bounded, redacted, and degrade to an
-  empty result instead of raising. `REMOTE_STATUS_CAPABILITY` is the opt-in for
-  the execution-status command: a server whose `deploy.py` predates it reports
-  "unsupported".
-- Execution `finished` is derived from n8n's own vocabulary
-  (`TERMINAL_EXECUTION_STATUSES` ⇒ `True`, `PENDING_EXECUTION_STATUSES` ⇒
-  `False`, else `None`; an explicit boolean wins). Both parsers are asserted to
-  agree by a meta-test, and callers must sort on `startedAt`.
-
-### Monitoring
-
-- Every run is bracketed: `Surveillance active` (store path, retention) and
-  `Surveillance terminée — session de h:mm:ss, N workspace(s) en cours à la
-  fermeture`. The teardown and the closing event are written in `main()`'s
-  `finally`, before the store is closed; the `atexit` hook is the fallback for
-  exits that never unwind `main`.
-- `bootstrap_logging()` degrades to stderr-only when the log directory is not
-  writable, so monitoring can never keep the launcher from starting.
-- Events are structured, redacted before being written, kept 30 days, and
-  reachable through `EventStore.search_events()` (SQL) and `export_events()`.
-  There is no second in-memory filter.
+- `install_server()` initializes the bare repo before writing the hook, and
+  ships the generated hook and `deploy.py` atomically. The hook `flock`s,
+  archives `main`, runs Compose up, then runs `deploy.py`; logs and
+  `last-deploy.json` are written atomically and redacted. Credentials travel as
+  a `secrets.json` uploaded over SSH.
+- `server_health()`, `server_logs()` and `server_deploy_status()` are bounded,
+  read-only SSH reads that degrade to empty output on failure. Terminal and
+  pending execution-status sets and `REMOTE_STATUS_CAPABILITY` live in
+  `remote/deploy.rs` and are injected into the generated script.
+- The session bracket (`Surveillance active` / `Surveillance terminée`) is
+  traced but **not persisted** into `EventStore`. Stored events are redacted
+  before persistence, pruned after 30 days, and filtered only in SQL by
+  `search_events()`. The update flow (`UpdateController`) asks every question
+  through injected callbacks and never blocks startup.
 
 ### First launch
 
-There is no wizard and no automatic configuration: a launcher with no config
-logs that it is unconfigured and stops, rather than fabricating an empty
-workspace list. Creating the first config is manual.
+There is no graphical wizard: `prompt_first_launch()` returns `Ok(false)` without
+writing a config. The rules exist in `core/first_launch.rs`, but a launcher with
+no config simply stops.
 
 ## Quality gates
 
-- `ruff check .` and `ruff format --check .`: clean.
-- `basedpyright` (`typeCheckingMode = "standard"`, `tests/**` and `scripts/**`
-  excluded): 0 errors.
-- `pytest`: 686 unit tests pass; the integration suite (7 tests, Docker
-  required) is deselected by `addopts = "-m 'not integration'"`.
-- Coverage floor `--cov-fail-under=80`, enforced by CI.
+- `cargo test --workspace --all-features`: **142 inline unit tests**;
+  `cargo test --test docker_integration`: **3 tests**, self-skipping without Docker.
+- `cargo build --workspace --release` and `--self-test` on the produced binary
+  on all three operating systems in CI.
+- No Python lint/format/type-check gates remain; the Rust pipeline is
+  `.github/workflows/rust.yml`. Neither `cargo fmt --check` nor `cargo clippy`
+  is configured in CI — a known gap, not an omission in this document.
 
 ## Distribution
 
-| Platform | Artifact | Method |
-|---|---|---|
-| macOS | `dist/n8n-launcher-macos.dmg` | `scripts/build.py`: PyInstaller onedir `.app` → ad-hoc sign → `dmgbuild` |
-| Linux | `dist/n8n-launcher`, `dist/n8n-launcher-linux-x86_64.AppImage` | `scripts/build.py` + `scripts/build_appimage.sh` |
-| Windows | `dist/n8n-launcher.exe` | `scripts/build.py`: PyInstaller one file |
+Releases publish raw binaries (`n8n-launcher` on Linux/macOS,
+`n8n-launcher.exe` on Windows). `scripts/build.sh` copies the release binary to
+`dist/`; there is no PyInstaller bundle, `.dmg` or AppImage in this branch.
 
-CI runs the tests and the build on `ubuntu-latest`, `macos-latest` and
-`windows-latest` (integrations on Linux only). Releases are published from
-`main` only, when the source version differs from the last `v<version>` tag.
+## État de la réécriture / Écarts connus
+
+Verified limits, not finished features:
+
+- The iced view has only a *Nouveau* header button and workspace buttons; all
+  lifecycle messages merely set a status string and do not call the manager.
+  No card gestures, status pill, context menu or browser reuse exist; the
+  decisions in `workspaces/status.rs` are not wired to the view.
+- `prompt_first_launch()` is a no-op (`Ok(false)`); no graphical wizard.
+- `github/auth.rs::resolve_github_token()` always returns `None`;
+  `remote/ssh.rs::scp()` returns `"Not implemented"`.
+- `monitoring/bootstrap.rs::capture_exceptions()` is a no-op and
+  `server_execution_status()` returns an empty string.
+- `core/templates.rs::read_template()` targets a nonexistent directory and is
+  unused; the live templates are the embedded `remote/templates/` files.
+- The local `n8n/scopes.rs` list diverges from the six scopes injected into the
+  generated deploy script by `remote/deploy.rs`, despite a comment saying they
+  must match. `git_seed_remote()` / `tokenize_remote_url()` have no caller and
+  `CloseSequence` is defined but not used by `app.rs`.
+- `disable_ci()` only flips the persisted flag (no generated files deleted);
+  `ci_credentials_payload()` merely serializes its input.

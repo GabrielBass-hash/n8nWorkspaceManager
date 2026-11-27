@@ -1,40 +1,14 @@
-.venv/
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-.basedpyright_cache/
-*.py[cod]
-*.egg-info/
-build/
+# Rust build artifacts
+target/
 dist/
-*.spec
-.coverage
-htmlcov/
+build/
 
-# Local launcher state and secrets
+# Local launcher state and secrets (never source)
 *.env
 *.env.*
 state/
 logs/
 workspaces/
-# ... but keep the tracked source tree of the `workspaces` package.
-!src/n8n_launcher/workspaces/
-!tests/unit/workspaces/
-!rust/n8n-launcher-workspace/n8n-launcher/src/workspaces/
-!rust/n8n-launcher-workspace/n8n-launcher/src/workspaces/**
-!rust/n8n-launcher-workspace/n8n-launcher/tests/workspaces/
-!rust/n8n-launcher-workspace/n8n-launcher/tests/workspaces/**
-
-# Local structural snapshots for the parity test
-artifacts/
-
-# Local opencode config (user-specific, may contain absolute paths)
-.opencode/opencode.json
-.opencode/*.local.json
-
-# Additional virtual environments
-.venv-fast/
-.venv-*/
 
 # SQLite / database files (launcher state, never source)
 *.db
@@ -46,9 +20,12 @@ artifacts/
 # Log files
 *.log
 
-# IDE
+# Local editor / assistant state
 .vscode/
 .idea/
+.opencode/opencode.json
+.opencode/*.local.json
+.opencode/node_modules/
 
-# macOS
+# OS noise
 .DS_Store

@@ -41,7 +41,7 @@ mod tests {
     #[test]
     fn test_create_and_list() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let (store, work) = make_store(tmpdir.path());
+        let (store, _work) = make_store(tmpdir.path());
         let docker = DockerManager::new("docker");
         let manager = WorkspaceManager::new(&store, &docker);
         let wdir = tmpdir.path().join("ws1");

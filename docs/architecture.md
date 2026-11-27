@@ -1,134 +1,163 @@
-# docs/architecture.md — the module map and the measured gotchas
+# docs/architecture.md — carte des modules et faits mesurés (port Rust)
 
-This file exists so that `AGENTS.md` stays short enough to be useful on every
-turn. It holds the two sections of `AGENTS.md` that answer *where does this
-behaviour live* and *what was measured on a real host* — questions you ask
-once per task, not once per edit.
+Ce fichier répond à deux questions qu'on ne pose qu'une fois par tâche : *où vit
+tel comportement* et *quel fait a été mesuré sur un vrai hôte n8n*. Il remplace
+la version Python de ce document et ne conserve que ce qui est vérifiable dans
+le code Rust actuel.
 
-**Read this file when** you are about to touch `n8n/`, `remote/`, `docker/`,
-`git/`, `github/`, `database/`, `monitoring/`, `platform/`, or the three GUI
-modules that own the card gestures — `gui/browser.py`, `gui/window.py` and
-`gui/board.py`. **Do not read it** to answer "how do I run the tests" or "what is
-the packaging story" — that is `AGENTS.md` §Commands, or `README.md`
-§Distribution.
+**Lisez-le** avant de toucher à `n8n/`, `remote/`, `docker/`, `git/`, `github/`,
+`monitoring/`, `database/`, `platform/` ou `app.rs`. **Ne le lisez pas** pour
+savoir lancer les tests — c'est `AGENTS.md` §Commandes.
 
-Nothing here is a summary of the source: both sections moved here verbatim, and
-they are the only place either is maintained. A change to a module's role or to
-a measured fact is edited here first.
+Les chemins ci-dessous sont relatifs à
+`rust/n8n-launcher-workspace/n8n-launcher/src/`.
 
 ---
 
-## Architecture
+## Carte des modules
 
-| Module | Role |
+| Module | Responsabilité |
 |---|---|
-| `__main__.py` | Entry point. `main(argv=None)` short-circuits on `--self-test` before touching the config, the lock or Docker; then single-instance lock → `resolve_docker_command()` → journal → wizard (no config) or `run_gui()` → ordered shutdown. Brackets every run: `_start_monitoring()` logs `Surveillance active`, `_close_session()` logs `Surveillance terminée` (duration + how many workspaces were still up) **before** `monitor.close()`. A config that exists but cannot be read is backed up to `launcher.db.corrupt-<ts>` and the run stops; a config that does not exist opens the wizard. |
-| `gui/app.py` | The shell: `ensure_application`, `display_available`, `GuiUnavailable`, `request_shutdown`/`shutdown_requested`/`clear_shutdown`, `LauncherApp.run()`, `run_gui()`, `SELF_TEST_FLAG`, `self_test()`. `run()` skips `exec()` when a shutdown was already requested; the `SIGNAL_TICK_MS = 200` `QTimer` is what lets a Python signal handler run at all while Qt's loop is parked in C++. `self_test()` returns an exit code — it is what CI runs on a finished artifact. |
-| `gui/window.py` | `MainWindow(manager)`: header (*Nouveau* / *Arrêter*, objectNames `new`/`stop`), `QStackedWidget` board + empty state, the `WorkspaceBoard` and its three gestures (double-click = open, status pill = `primary_action`, right-click = `card_actions`), selection sync restored across a reload, `workspace_actions` (not `actions` — `QWidget.actions` already exists). |
-| `gui/board.py` | `WorkspaceBoard(QListView)`: the wrapping IconMode grid, the pill hover (cursor, tooltip, accent ring) and the pill hit-test. Hit-testing lives here rather than in the window because it must agree with what the delegate painted. Emits `pillActivated` / `contextRequested`; decides nothing. |
-| `gui/card_delegate.py` | `CARD_WIDTH` / `CARD_HEIGHT` / `CARD_SIZE`, `tone_color`, `card_rect`, `pill_rect`, `pill_hit`, `CardDelegate`: paints one card (status pill, port, folder) and the hover ring. Geometry and colours only, no widget state. |
-| `gui/workspace_model.py` | `WorkspaceListModel` (roles `WorkspaceRole` / `StatusRole`, `refresh`, `apply_workspace`, `workspace_at`, `status_at`, `index_of`). Qt annotates `rowCount`/`data` with `QModelIndex \| QPersistentModelIndex`; the overrides must be widened to match or basedpyright fails. |
-| `gui/actions.py` | `WorkspaceActions(manager, executor=…)`: signals `busyChanged` / `failed` / `created`, one `_Task(QRunnable)` per call on the global `QThreadPool`. The executor is injected, so every test runs synchronously. |
-| `gui/browser.py` | Opens a workspace's n8n as a standalone Chromium window, or **raises the window it already has**: `open_web_app(...) -> WebAppOutcome` (`OPENED` / `RAISED`) asks DevTools for a match and never compares URLs. Chromium's stderr is `DEVNULL` on purpose. |
-| `gui/create_panel.py` | `plan_from_fields(name, managed) -> CreatePlan` and `CreateWorkspaceDialog` (objectNames `name` / `directory` / `managed`). It collects; it does not create — the plan goes to the action layer. |
-| `gui/notifier.py` | `WorkspaceNotifier`: turns manager callbacks into Qt signals. |
-| `gui/theme.py` | Palette, metrics, `STYLESHEET`; `dark_palette()`, `apply_theme(app)`. |
-| `gui/first_launch.py` | `FirstLaunchWizard` (objectNames `email` / `password` / `work_dir` / `hint`) and `prompt_first_launch(store, docker, parent=None) -> bool`, which raises `GuiUnavailable` when there is no display. The rules it enforces live in `core/first_launch.py`. |
-| `core/first_launch.py` | Toolkit-free wizard contract: `SetupWizardError`, `validate_password`, `build_initial_config`, `run_first_launch` (refuses unless Docker is available, then writes the config). |
-| `gui_utils/text.py` | The sizing rules, toolkit-free: `ELLIPSIS`, `ellipsize`, `column_widths` (the pure rule) and `fit_budget` (the same rule with a room). `measure` is a **parameter** — `Callable[[str], int]` — not a widget call. |
-| `gui_utils/responsive.py` | The responsive contract, toolkit-free: `MIN_WINDOW_WIDTH` / `MIN_WINDOW_HEIGHT` (1024×640), `PREFERRED_*`, `Viewport`, `Rect`, `initial_window_size`, `assert_rect_within`, `responsive_failure`. Views consume the values; `tests/unit/gui_utils/test_responsive_contract.py` asserts them without Qt. |
-| `workspaces/manager.py` | Central controller: CRUD + start/stop lifecycle and the only `WorkspaceObserver` publisher (`add_observer` / `remove_observer`, emitting *after* each commit). States run RUNNING → **STOPPING** → STOPPED with `docker down` between the two writes. Orchestrates compose rendering, Docker, migrations, owner bootstrap, DB credentials, workflow import and Git sync (auto-pull on start, auto-push on close). CI surface: `enable_ci`, `disable_ci`, `set_ci_credentials`, `ci_credentials_payload`, `save_ci_selection`. Read-only supervision: `server_health`, `server_logs`, `server_deploy_status`, `server_execution_status`. `ensure_serving()` is the "open this instance" path: it asks **Docker** (`live_state`), not the persisted state, and returns `Reachable(workspace, started)`, so a stack started outside the launcher (or before a crash that left `STOPPED` behind) is opened rather than started twice. |
-| `workspaces/status.py` | What a card shows and which actions it offers: `StatusTone`, `WorkspaceAction`, `CardAction`, `WorkspaceStatus`, `status_for`, `state_label`, `summary_line`, `can_start` / `can_stop` / `can_delete` / `can_open`, `primary_action` (what the status pill does) and `card_actions` (the right-click menu). A view renders this; it never re-derives a label, a tone or a rule. |
-| `workspaces/close.py` | `CloseSequence`: the ordered shutdown (reconcile → export → git sync → stop, per workspace) with every decision injected as a `CloseHooks` callback (`on_progress`, `on_sync_failed`, `on_stop_failed`, `on_push_failed`), so it runs headless and is testable without a window. |
-| `workspaces/dialogs.py` | What the forms *collect*, not how they looked: `CreatePlan`, `GitConfigChoice`, `GitClonePlan`, `GitHubCreatePlan`, `GitHubRepoPick`, `GitHubTokenPlan`, plus `fresh_managed_db_config`, `default_creation_db` (managed when `has_db_layout()` — a `db/schema.sql` or a `db/migrations/*.sql`), `int_or` and `repo_name_from`. |
-| `workspaces/ci.py` | The CI harness for a workspace's *own* repo: `github_repo_path` (remote URL → `owner/repo`), workflow discovery (`collect_workflows`: `n8nPipelines/*.json` + root `*.json` minus a blocklist, **deduped by basename in favour of `n8nPipelines/`**), `load_export`, `missing_credentials`, `workflow_eligibility`, `save_ci_selection`, and `render_harness()` which emits the workflow YAML plus a stdlib-only `validate.py` / `runner.py` (`GENERATED_MARKER`-commented, image pinned through the `__N8N_IMAGE__` token). |
-| `docker/compose.py` | Renders Compose YAML. One project per workspace, `n8n-ws-<id>`; named volumes `n8ndata-<id>` and, in managed mode, `pgdata-<id>`. Handles managed Postgres and `DbMode.NONE` (no DB service at all). `render_remote_compose` emits a top-level `name:` so the project is stable on the server. |
-| `docker/manager.py` | Thin subprocess wrapper around `docker compose`, always with `-p <project>` and `-f <file>` for isolation. `list_project_states()` reads `Labels` through `parse_container_labels()`, which accepts the three shapes the CLI produces (object, JSON string, and the flat `k=v,k=v` string Compose 2.35 emits on Docker Desktop). `resolve_docker_command()` probes the macOS install locations before falling back to `PATH`. |
-| `core/config.py` | SQLite config store (`launcher.db`, WAL). `load()` / `mutate(fn)` are safe under threads *and* processes (`BEGIN IMMEDIATE` write serialization + 10 s busy timeout; readers use the WAL). The connection is cached for the process lifetime, so `close()` exists — `__main__`'s `finally` and `gui/app.py::self_test()` both call it, and on Windows an open handle makes `launcher.db` undeletable. A legacy `config.json` is migrated once when the database is missing; the database and its `-wal` / `-shm` sidecars are chmodded `0o600` on non-Windows. |
-| `core/filelock.py` | Cross-platform `FileLock` (fcntl/shared on POSIX, `msvcrt.locking` on Windows) and `acquire_single_instance_lock()`. |
-| `core/models.py` | Dataclasses: `DbMode` (`NONE` / `MANAGED`), `DbConfig`, `GitConfig`, `ServerConfig`, `WorkspaceState`, `Workspace`, `AppConfig`. |
-| `core/paths.py` | `platformdirs` paths for config, logs and runtime under `n8n-launcher`; `compose_file(workspace_id)` and `browser_profile_dir()`. |
-| `n8n/api.py` | Small HTTP client for the n8n **public** API (workflows, credentials). |
-| `n8n/owner.py` | Owner bootstrap through the internal REST endpoints (`/rest/owner/setup`, `/rest/login`, `/rest/api-keys`), retrying through the transient HTML n8n serves while starting. `wait_for_n8n()` polls readiness. Also `hash_owner_password()` (bcrypt). |
-| `n8n/scopes.py` | `REQUIRED_WORKFLOW_SCOPES` — the one scope list, shared by the local bootstrap and by the generated remote `deploy.py` through the `__API_KEY_SCOPES__` token. It is a contract with the n8n version; never duplicate it. |
-| `n8n/workflows.py` | `SyncRunner`: `import_all()` creates in n8n every workflow JSON found in the workspace folder; `export_all(mirror=…)` refreshes `n8nPipelines/` exports and optionally mirrors identical copies at the workspace root; optional background sync thread. |
-| `git/manager.py` | Git operations for a workspace's workflow synchronization, in the `workflows_dir`. `WORKSPACE_BRANCH = "dev"` and `workspace_branch(id)`; `git_init` seeds that branch. `workspace_git_lock(path)` is the reentrant per-workspace lock. `git_push` (`-u origin <branch>`, one retry on a server-side rejection). `git_seed_remote` + `tokenize_remote_url` build the one-shot tokenized GitHub push URL. |
-| `github/api.py` | GitHub REST client: `github_owner()`, `create_repo()`, `list_workflow_runs()`, `list_run_jobs()`, `fetch_job_logs()`, `dispatch_workflow()`; typed `GitHubError` with `status_code`. Repo paths keep a **literal** slash (`repos/owner/repo/...`) because URL-encoding it makes every Actions endpoint 404. |
-| `github/auth.py` | `resolve_github_token(configured=None)`: the persisted override, then `gh auth token`, then `git credential fill` for `github.com` (the same credential `git push` uses), 10 s timeout, prompts disabled. Returns `None` when nothing is available; never logs or persists on its own. |
-| `database/credentials.py` | Auto-creates n8n DB credentials; `data_db_target()` resolves the per-workspace DB target. |
-| `database/layout.py` / `database/migrations.py` | `has_db_layout()` and the migration detection + runner (executes SQL via `docker compose exec psql`). Launcher-local: the generated remote `deploy.py` never runs them. |
-| `monitoring/` | Structured event journal: `events.py` (`Event`), `store.py` (`EventStore`, SQLite `logs_dir()/events.db`, `RETENTION_DAYS = 30`, `latest_events` / `search_events` / `export_events`), `redaction.py` (secret-shaped values masked *before* they are persisted) and `bootstrap.py` (`bootstrap_logging`, `capture_exceptions`, `sys` / `threading` excepthooks). |
-| `platform/ports.py` | `is_port_available` and `suggest_port`. |
-| `platform/update_flow.py` | `UpdateController`: the release check → download → install order, with every question injected as a constructor callback (`set_status`, `on_offer`, `on_error`, `on_status_link`, `schedule`, `is_closed`, `finish_close`) and queue results routed back through `events`. All the network and filesystem work is `platform/updater.py`, which also compares `__version__`. |
-| `remote/ssh.py` / `remote/deploy.py` | Remote server deployment and bounded observability: `ssh_run` / `scp` plumbing, atomic `write_remote_file`, the generated `post-receive` hook + `deploy.py` (template strings), and the read-only health / logs / marker / execution-status reads. `REMOTE_STATUS_CAPABILITY` and the execution-status sets live here. |
+| `main.rs` | Entrée. `--self-test` court-circuite config, lock et Docker ; sinon lock mono-instance → résolution Docker → journal → chargement config → interface ou premier lancement → arrêt ordonné. Distingue config absente (wizard) et config illisible (backup `launcher.db.corrupt-<ts>` puis arrêt). Trace `Surveillance active` / `Surveillance terminée`. |
+| `app.rs` | Coquille iced : `run_gui`, `LauncherState`/`Message`/`update`/`view`/`theme`/`subscription`/`window` (1024×640), drapeau de shutdown, tick de 200 ms, handlers `ctrlc`, `close_session`/`stop_all` (via `stop_with_sync`), `prompt_first_launch`, `self_test`. |
+| `core/config.rs` | `ConfigStore` SQLite (`launcher.db`, WAL, busy timeout 10 s, `meta` + `workspaces`, droits `0600`). `load`/`mutate`, migration unique du `config.json` legacy, `backup_unreadable`. `close()` est un no-op (pas de connexion persistante). |
+| `core/filelock.rs` | `FileLock` réentrant sur `flock`/verrou OS, `acquire_single_instance_lock` (`launcher.lock`). |
+| `core/first_launch.rs` | Règles toolkit-free du wizard : `validate_password` (8–64, chiffre, majuscule), `build_initial_config`, `run_first_launch` (refuse sans Docker puis écrit la config). |
+| `core/models.rs` | Dataclasses sérialisables : `DbMode`, `WorkspaceState` (STOPPED/STARTING/RUNNING/STOPPING/ERROR), `DbConfig`, `GitConfig`, `ServerConfig`, `Workspace`, `AppConfig`. |
+| `core/paths.rs` | Répertoires `platformdirs` (`directories::ProjectDirs`) : config, logs, runtime, `compose_file(workspace_id)`, `browser_profile_dir`, `updates_dir`. |
+| `core/templates.rs` | `read_template` — loader inutilisé, voir lacunes. Les vrais templates sont embarqués par `include_str!` dans `remote/deploy.rs`. |
+| `database/credentials.rs` | Création du credential n8n pour la base de données ; `data_db_target`. |
+| `database/layout.rs` / `migrations.rs` | `has_db_layout` (`db/schema.sql` ou `db/migrations/*.sql`), détection et exécution SQL via `docker compose exec … psql`. |
+| `docker/compose.rs` | Rendu du Compose YAML, un projet par workspace (`n8n-ws-<id>`), volumes `n8ndata-<id>` / `pgdata-<id>`, `DbMode::NONE` sans service DB, `render_remote_compose` avec `name:` stable. |
+| `docker/manager.rs` | Wrapper subprocess `docker compose` (`-p`, `-f`), parsing des états et des labels, `resolve_docker_command` (sonde les emplacements macOS avant `PATH`). |
+| `git/manager.rs` | Opérations git du dossier de workflows. `WORKSPACE_BRANCH = "dev"`, `workspace_git_lock`, `git_push`, `git_push_ref` (300 s à la publication), `git_seed_remote` + `tokenize_remote_url`, `ensure_workspace_branch`, `EXCLUDE_BODY`. |
+| `github/api.rs` / `auth.rs` | Client REST GitHub (owner, repos, runs, jobs, logs, dispatch). `resolve_github_token` est un stub — voir lacunes. Les chemins de repo gardent un `/` littéral (`repos/owner/repo/...`). |
+| `monitoring/events.rs` / `store.rs` | Événement structuré et `EventStore` (SQLite dans `logs_dir()/events.db`, rétention 30 j, `latest_events`/`search_events`/`export_events`). Le filtrage est unique et en SQL. |
+| `monitoring/redaction.rs` | Masquage des secrets avant persistance (regex sur clés, assignments, Bearer, tokens, mots de passe d'URL). |
+| `monitoring/bootstrap.rs` | `bootstrap_logging` crée le store ; `capture_exceptions` est un no-op. |
+| `n8n/api.rs` | Client de l'API **publique** (`X-N8N-API-KEY`) : workflows et credentials, erreurs typées avec code HTTP. |
+| `n8n/exports.rs` | Contrat d'import/export : `CANONICAL_DIRNAME = "n8nPipelines"`, `WORKFLOW_KEYS` (whitelist du POST), noms de fichiers `<name>-<id>.json`. Le helper `export_path` n'est pas appelé : `workflows.rs::export_all` écrit dans le dossier que lui passe l'appelant (les appelants passent `n8nPipelines/` et la racine en miroir). |
+| `n8n/owner.rs` | Bootstrap propriétaire via `/rest/*`, `wait_for_n8n` sur `/healthz/readiness`, bcrypt, création de clé API avec scopes. |
+| `n8n/scopes.rs` | Liste de scopes locale — attention : diverge de celle du script distant (voir lacunes). |
+| `n8n/workflows.rs` | `SyncRunner`, `import_all`, `export_all(mirror)` : écrit dans `n8nPipelines/` et reflète une copie à la racine. |
+| `platform/ports.rs` | `is_port_available`, `suggest_port`. |
+| `platform/updater.rs` / `update_flow.rs` | Vérification GitHub Releases, comparaison avec `CARGO_PKG_VERSION`, téléchargement, script d'auto-installation ; `UpdateController` injecte chaque question à l'appelant (callbacks, file d'événements). |
+| `remote/ssh.rs` | `ssh_run`/`ssh_run_opts`, `mkdir_remote`, `write_remote_file` atomique, `chmod_remote`, `test_connection`, `sh_quote`. `scp` est un stub. |
+| `remote/deploy.rs` + `remote/templates/{deploy,hook}.txt` | Génération du hook `post-receive` et de `deploy.py` par substitution de jetons (`include_str!` + `.replace`). Constantes `TERMINAL_EXECUTION_STATUSES` / `PENDING_EXECUTION_STATUSES`, `REMOTE_STATUS_CAPABILITY`, `GENERATED_MARKER`. |
+| `workspaces/manager.rs` | Contrôleur central : CRUD, cycle `start`/`stop`/`stop_with_sync`, réconciliation, états, import/export, sync git, CI, `publish`, supervision read-only (`server_health`, `server_logs`, `server_deploy_status`, `server_execution_status`), `ensure_running` qui interroge Docker (`live_state`). |
+| `workspaces/status.rs` | Ce qu'une carte affiche et les actions offertes : `StatusTone`, `WorkspaceAction`, `CardAction`, `WorkspaceStatus`, `status_for`, `can_*`, `primary_action`, `card_actions`, `summary_line`. Aucun widget. |
+| `workspaces/close.rs` | `CloseSequence` : fermeture ordonnée (réconcile → export → sync git → stop) avec chaque décision injectée dans `CloseHooks`. Définie mais non appelée aujourd'hui. |
+| `workspaces/dialogs.rs` | Ce que les formulaires collectent (`CreatePlan`) et `fresh_managed_db_config`. |
+| `workspaces/ci.rs` | CI du repo du workspace : `github_repo_path`, `collect_workflows`, `load_export`, `missing_credentials`, `workflow_eligibility`, `save_ci_selection`, `render_harness()` (YAML + `validate.py`/`runner.py` générés). |
 
-`git/__init__.py` and `remote/__init__.py` re-export their package's public
-surface; import managers through them.
+`tests/docker_integration.rs` couvre le daemon Docker, le rendu Compose et les
+commandes de statut d'exécution générées ; les tests s'auto-ignorent sans daemon.
 
 ---
 
-## Measured gotchas
+## Faits mesurés sur un vrai hôte (ne pas re-dériver par approximation)
 
-Facts verified against a real n8n 2.x / Docker Desktop / Chromium host. Do not
-re-derive them by guessing.
-
-- **`/healthz` is liveness, not readiness.** On n8n 2.40, `/healthz` answers 200
-  at ~2.8 s while `GET /` still returns 404 `Cannot GET /`; only at ~4.7 s does
-  `/healthz/readiness` go 200 — the moment the frontend handler is mounted.
-  Anything that opens the UI or calls the API gates on
-  `/healthz/readiness`, which is what `n8n/owner.py::wait_for_n8n` polls. An n8n
-  without that route answers 404 and the wait falls back to the UI root.
-- **Public API is schema-strict**: `POST /api/v1/workflows` validates with
-  `additionalProperties: false`, so a server-only field in the body is HTTP 400
-  "must NOT have additional properties". Only `_create_payload`'s whitelist
-  survives.
-- **`/rest/*` authenticates with the `n8n-auth` session cookie** from
-  `POST /rest/login`; n8n returns no body token and `Authorization: Bearer <JWT>`
-  is rejected with 401. Because urllib / requests refuse to replay a `Secure`
-  cookie over plain HTTP, the generated CI runner starts its disposable container
-  with `N8N_SECURE_COOKIE=false` (same as the managed Compose containers) —
-  without it `POST /rest/api-keys` 401s on every version. Listing credentials
-  through the public API additionally needs the `credential:list` scope, or
-  `GET /api/v1/credentials` is 403 « Forbidden ». `trigger_run` must accept both
-  `{"executionId": …}` and `{"data": {"executionId": …}}`.
-- **Owner bootstrap uses the internal REST endpoints**, not the
-  `N8N_INSTANCE_OWNER_*` env vars; API keys need a `scopes` array and a numeric
-  `expiresAt`; n8n serves transient HTML while starting, so the bootstrap retries
-  until it gets JSON.
-- **Reopening a browser window is not a URL problem.** n8n routes client-side (a
-  fresh window on `/` lands on `/signin?redirect=%252F` with no HTTP redirect), so
-  `--app=<same URL>` twice leaves two windows. `gui/browser.py` opens windows in a
-  launcher-owned profile (`browser_profile_dir`), reads the port Chromium published
-  in `DevToolsActivePort` (`--remote-debugging-port=0`), matches the instance's
-  **origin** in `/json/list` and calls `/json/activate/<id>`. Two races (the port
-  file appears before the endpoint accepts; a crashed browser leaves the file
-  behind) fall back to launching a window. Security delta: the DevTools endpoint
-  binds loopback only, over a profile already readable in the user's own config
-  directory.
-- **A missing Qt platform plugin fails silently** — the one packaging failure a
-  user sees as « the app does nothing ». `verify_qt_bundle()` runs at the end of
-  every build (and as `scripts/build.py --verify <root>` in CI), and
-  `n8n-launcher --self-test` runs on the finished artifact on all three OS.
-- **`docker ps` labels are not always a map** (see `docker/manager.py`).
-- **macOS bundle-launched apps get a minimal `PATH`**, so `docker` is located by
-  probing the standard install locations, never by bare name.
-- **First launch and the unreadable config are two different branches.**
-  `store.load()` raising `ConfigError` means either « absent » (wizard) or
-  « present and broken » (back up and stop). The discriminator is
-  `store.path.exists()`: a wizard may never run on top of a config it could not
-  read.
-- **`validate_password` is a mirror, not the source of truth** (8–64 chars, one
-  digit, one uppercase, per n8n 2.40). It only saves the user a round trip; if n8n
-  changes, both move together.
-- **Activation on the server is best effort, through the owner session**: the
-  public activate endpoint is refused by n8n 2.x for a workflow the key's user
-  cannot activate. Creating the API key revokes the deploy session, so the
-  `versionId` lookup re-logs in and retries. A refusal is logged, never raised —
-  the import has already succeeded.
-- **`finished` is derived, never sent.** `GET /rest/executions` returns no
-  `finished` flag, so it comes from n8n's own vocabulary:
+- **`/healthz` est liveness, pas readiness.** Sur n8n 2.40, la liveness passe au
+  vert ~2 s avant que le gestionnaire d'interface soit monté ; dans cette
+  fenêtre `GET /` répond `Cannot GET /`. `n8n/owner.rs::wait_for_n8n` sonde donc
+  `/healthz/readiness` et retombe sur la racine de l'UI si la route répond 404
+  (versions antérieures).
+- **L'API publique est schema-strict.** `POST /api/v1/workflows` valide avec
+  `additionalProperties: false` : un champ réservé au serveur présent dans un
+  export (`description`, `active`, `triggerCount`, `shared`, …) donne HTTP 400.
+  Seule la whitelist `n8n/exports.rs::WORKFLOW_KEYS` (et son équivalent dans le
+  `deploy.py` généré) survit à l'envoi.
+- **Les `/rest/*` s'authentifient par le cookie de session `n8n-auth`** issu de
+  `POST /rest/login` ; n8n 2.33+ ne renvoie plus de token dans le corps et
+  `Authorization: Bearer <JWT>` est refusé. `owner.rs` documente explicitement
+  ce contrat et s'appuie sur le `Client` reqwest pour conserver le cookie (voir
+  lacune : le feature `cookies` n'est pas activé dans `Cargo.toml`).
+- **Bootstrap du propriétaire par les endpoints internes**, pas par les variables
+  `N8N_INSTANCE_OWNER_*` : `/rest/owner/setup`, `/rest/login`, `/rest/api-keys`
+  (avec un tableau `scopes` et un `expiresAt` numérique). n8n sert du HTML
+  transitoire au démarrage, d'où les retries de `_ensure_owner`.
+- **Pas de réutilisation de fenêtre navigateur dans le port Rust.** Il existe un
+  `browser_profile_dir()` dans `core/paths.rs`, mais aucun module `gui/browser.rs`
+  n'interroge DevTools `/json/list` ni n'appelle `/json/activate/<id>`. Ouvrir
+  deux fois le même workspace ouvrira deux fenêtres.
+- **Les labels `docker ps` ne sont pas toujours une map.**
+  `docker/manager.rs::parse_container_labels` accepte trois formes : objet JSON,
+  chaîne JSON, et chaîne plate `k=v,k=v` émise par Compose 2.35 sur Docker
+  Desktop. `list_project_states()` s'en sert pour retrouver projet/service.
+- **macOS : les apps lancées par bundle reçoivent un `PATH` minimal.**
+  `resolve_docker_command()` sonde `/opt/homebrew/bin`, `/opt/homebrew/sbin`,
+  `/usr/local/bin`, `/usr/local/sbin` et
+  `/Applications/Docker.app/Contents/Resources/bin` avant de parcourir `PATH`.
+- **Config absente et config illisible sont deux branches distinctes.**
+  `ConfigStore::load()` renvoie `NotFound` si le fichier n'existe pas ; sinon une
+  erreur `Invalid` déclenche `backup_unreadable` dans `main.rs` et l'arrêt. Le
+  discriminateur est `store.path().exists()` : un wizard ne doit jamais
+  s'ouvrir sur une config qu'on n'a pas pu lire. Un `config.json` legacy est
+  migré une seule fois quand la base est absente. La base et ses sidecars
+  `-wal`/`-shm` sont chmoddés `0600`.
+- **Activation best effort, via la session owner.** L'API publique est refusée
+  par n8n 2.x pour un workflow que le propriétaire de la clé ne peut pas
+  activer, et `/rest/workflows/<id>/activate` exige le `versionId` courant.
+  `deploy.py` relogin après la création de clé (qui révoque la session), réessaie
+  la lookup, retombe sur l'API publique, et ne journalise qu'un refus —
+  l'import a déjà réussi.
+- **`finished` est dérivé, jamais envoyé.** `/rest/executions` n'expose pas ce
+  drapeau sur n8n 2.40. `_execution_finished()` dans `templates/deploy.txt`
+  privilégie un booléen explicite, puis
   `TERMINAL_EXECUTION_STATUSES` ⇒ `True`, `PENDING_EXECUTION_STATUSES` ⇒ `False`,
-  anything else ⇒ `None`, an explicit boolean always winning. Both sets live in
-  `remote/deploy.py` and are injected into the generated script; a meta-test
-  asserts both parsers agree for every status. Callers sort on `startedAt`
-  (newest first) — the remote order is not a contract.
+  sinon `None`. Les deux jeux vivent dans `remote/deploy.rs` et sont injectés
+  dans le script par `__TERMINAL_STATUSES__` / `__PENDING_STATUSES__`. Les
+  appels trient sur `startedAt` (plus récent d'abord) ; l'ordre distant n'est
+  pas un contrat.
+- **Publication = `dev → main` avec un hook synchrone.** `publish()` pousse avec
+  un timeout de 300 s (tous les autres appels git ont 30 s) parce que le
+  `post-receive` fait `docker compose up` et l'import dans la foulée. Le hook
+  débute par `cd "$HOME"` et écrit `last-deploy.json` atomiquement.
+
+---
+
+## Lacunes connues et vérifiées
+
+Ne pas les présenter comme des fonctionnalités terminées. Elles sont explicitement
+conservées ici pour que la documentation ne promette pas plus que le binaire.
+
+1. **Vue iced minimale.** `app.rs::update` ne fait que poser `state.status`
+   (`"Démarrage de …"`, `"Arrêt de …"`, etc.) et renvoie `Task::none()` : aucun
+   appel à `WorkspaceManager` depuis un bouton. `view` affiche un titre, un
+   bouton *Nouveau*, une liste de boutons workspace et le statut ; pas de cartes,
+   pas de menu contextuel, pas de pilule d'état. `workspaces/status.rs` n'est
+   pas consommé par la vue. `Message::Tick` ne quitte pas réellement la boucle ;
+   `window()` fixe 1024×640 minimum.
+2. **Premier lancement.** `prompt_first_launch()` vérifie l'affichage puis
+   renvoie `Ok(false)` sans rien écrire (`let _ = (store, docker)`). Les règles
+   toolkit-free existent dans `core/first_launch.rs::run_first_launch`, mais
+   aucun appelant ne les utilise.
+3. **Token GitHub.** `github/auth.rs::resolve_github_token` renvoie toujours
+   `None`. `git/manager.rs::git_seed_remote` (le seul chemin qui insère un token
+   dans une URL jetable, sans `-u`) n'a aucun appelant. Le champ `github_token`
+   de `ConfigStore` reste lui persisté dans la table `meta` (héritage du schéma).
+4. **SCP.** `remote/ssh.rs::scp` renvoie `Err("Not implemented")`. Les écritures
+   distantes passent par `ssh_run_opts` + `cat > …tmp && mv -f`.
+5. **Journal.** `monitoring/bootstrap.rs::capture_exceptions` est un no-op et
+   aucun layer `tracing_subscriber` n'écrit dans `EventStore`. Les deux
+   événements de session (`Surveillance active` / `Surveillance terminée`) sont
+   émis avec `tracing::info!` uniquement : la paire et l'ordre existent dans le
+   code, mais elle n'est pas consultable via `search_events`.
+6. **Templates.** `core/templates.rs::read_template` n'est appelé nulle part et
+   construit `<CARGO_MANIFEST_DIR>/templates/<package>/<name>`, un dossier qui
+   n'existe pas. Les templates réels sont `include_str!` dans `remote/deploy.rs`
+   et les chaînes brutes de `workspaces/ci.rs`.
+7. **Scopes divergents.** `n8n/scopes.rs` porte encore 11 scopes legacy
+   (`workflow:list`, `workflow:create`, …) alors que `remote/deploy.rs` en porte
+   6 autres (`workflow:read`, `workflow:write`, `workflow:execute`, …) injectés
+   dans `deploy.py`. Le commentaire de `n8n/scopes.rs` affirme qu'ils doivent
+   être identiques : ce n'est pas le cas.
+8. **Divers.** `database/mod.rs::has_db_layout` est un stub qui renvoie toujours
+   `false` (la vraie détection est dans `database/layout.rs`) ; `CloseSequence`
+   n'a pas d'appelant (`app.rs` utilise directement `stop_with_sync`) ;
+   `ConfigStore::close()` est un no-op.
+9. **Distribution.** `scripts/build.sh` fait `cargo build --release` puis copie
+   le binaire dans `dist/`. Il n'y a ni `.dmg`, ni `.AppImage`, ni signature,
+   ni `--onefile`/onedir à gérer. Le smoke test `--self-test` est le seul garde-
+   fou de l'artefact. Aucun gate `cargo fmt --check` / `cargo clippy` n'est
+   configuré en CI.
