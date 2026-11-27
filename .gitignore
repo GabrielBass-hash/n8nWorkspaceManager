@@ -24,6 +24,24 @@ workspaces/
 # Local structural snapshots for the parity test
 artifacts/
 
+# Local opencode config (user-specific, may contain absolute paths)
+.opencode/opencode.json
+.opencode/*.local.json
+
+# Additional virtual environments
+.venv-fast/
+.venv-*/
+
+# SQLite / database files (launcher state, never source)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+
 # IDE
 .vscode/
 .idea/
