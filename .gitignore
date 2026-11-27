@@ -1,32 +1,31 @@
-.venv/
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-.basedpyright_cache/
-*.py[cod]
-*.egg-info/
-build/
+# Rust build artifacts
+target/
 dist/
-*.spec
-.coverage
-htmlcov/
+build/
 
-# Local launcher state and secrets
+# Local launcher state and secrets (never source)
 *.env
 *.env.*
 state/
 logs/
 workspaces/
-# ... but keep the tracked source tree of the `workspaces` package.
-!src/n8n_launcher/workspaces/
-!tests/unit/workspaces/
 
-# Local structural snapshots for the parity test
-artifacts/
+# SQLite / database files (launcher state, never source)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 
-# IDE
-.vscode/
+# Log files
+*.log
+
+# Local editor / assistant state
+# .vscode/ is tracked: it holds the Rust Run configuration for the repo.
 .idea/
+.opencode/opencode.json
+.opencode/*.local.json
+.opencode/node_modules/
 
-# macOS
+# OS noise
 .DS_Store

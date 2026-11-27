@@ -1,0 +1,120 @@
+name: Rust
+
+# Single source of truth for CI. Every shipped Rust module is compiled and
+# exercised here; there is no second, Python-language pipeline any more.
+on:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "rust/**"
+      - ".github/workflows/**"
+      - "AGENTS.md"
+      - "README.md"
+  push:
+    branches: [dev, main]
+    paths:
+      - "rust/**"
+      - ".github/workflows/**"
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  hygiene:
+    # The migration is finished: nothing may reintroduce a Python source tree
+    # behind the Rust implementation.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust-only repository
+        run: |
+          if find . -path ./.git -prune -o -path '*/target' -prune -o \
+               \( -name '*.py' -o -name 'pyproject.toml' -o -name 'uv.lock' -o -name 'run.py' \) -print | grep -q .; then
+            echo "::error::Python sources are not allowed in this repository"
+            exit 1
+          fi
+
+  test:
+    needs: hygiene
+    # The default build has the iced shell enabled, so `--all-features` tests
+    # exactly the code a release binary ships (a GUI that cannot compile is a
+    # product that cannot start).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust/n8n-launcher-workspace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/n8n-launcher-workspace
+      - name: Unit and contract tests
+        run: cargo test --workspace --all-features
+
+  integration:
+    # Docker-dependent lifecycle tests self-skip when no daemon is present,
+    # so they are meaningful on the Ubuntu runner and harmless elsewhere.
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust/n8n-launcher-workspace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/n8n-launcher-workspace
+      - name: Docker integration tests
+        run: cargo test --test docker_integration
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust/n8n-launcher-workspace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/n8n-launcher-workspace
+      - name: Build release binary
+        run: cargo build --workspace --release
+      # The one failure a user sees as « the app does nothing » is a binary
+      # that cannot initialise its window. Prove the artifact can start before
+      # it is ever uploaded or released.
+      - name: Smoke test the release binary (Linux)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./target/release/n8n-launcher --self-test
+      - name: Smoke test the release binary (macOS)
+        if: runner.os == 'macOS'
+        run: ./target/release/n8n-launcher --self-test
+      - name: Smoke test the release binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\target\release\n8n-launcher.exe --self-test
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: n8n-launcher-${{ runner.os }}
+          path: |
+            rust/n8n-launcher-workspace/target/release/n8n-launcher
+            rust/n8n-launcher-workspace/target/release/n8n-launcher.exe
+          if-no-files-found: error

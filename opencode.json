@@ -1,39 +1,16 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  "instructions": ["AGENTS.md"],
-
-  "lsp": {
-    "pyright": { "disabled": true },
-    "basedpyright": {
-      "command": ["uv", "run", "--frozen", "--no-sync", "basedpyright-langserver", "--stdio"],
-      "extensions": [".py"]
-    }
-  },
-
-  "mcp": {
-    "tree-sitter": {
-      "type": "local",
-      "command": ["uvx", "--with", "mcp<2", "mcp-server-tree-sitter"],
-      "cwd": ".",
-      "enabled": true,
-      "timeout": 20000
-    }
-  },
+  "instructions": ["AGENTS.md", "docs/architecture.md"],
 
   "plugin": ["opencode-notify@0.3.1"],
 
   "watcher": {
     "ignore": [
-      ".venv/**",
-      ".venv-fast/**",
+      "target/**",
       "dist/**",
-      "build/**",
-      "artifacts/**",
-      "htmlcov/**",
-      ".pytest_cache/**",
-      ".ruff_cache/**",
-      ".mypy_cache/**",
+      ".git/**",
+      ".opencode/node_modules/**",
       "state/**",
       "logs/**"
     ]

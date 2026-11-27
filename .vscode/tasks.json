@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo build",
+      "type": "shell",
+      "command": "cargo build",
+      "args": [
+        "--manifest-path",
+        "${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml",
+        "--bin=n8n-launcher"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo test",
+      "type": "shell",
+      "command": "cargo test",
+      "args": [
+        "--manifest-path",
+        "${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml",
+        "--workspace",
+        "--all-features"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo build release",
+      "type": "shell",
+      "command": "cargo build",
+      "args": [
+        "--manifest-path",
+        "${workspaceFolder}/rust/n8n-launcher-workspace/Cargo.toml",
+        "--workspace",
+        "--release"
+      ],
+      "problemMatcher": ["$rustc"]
+    }
+  ]
+}
