@@ -22,7 +22,7 @@ to the actions layer.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPoint, QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtWidgets import QAbstractItemView, QListView, QWidget
 
@@ -57,6 +57,8 @@ class WorkspaceBoard(QListView):
     contextRequested = Signal(QModelIndex)
     #: Emitted when a double-click lands on the workspace name text.
     nameEditRequested = Signal(QModelIndex)
+    #: Emitted when the user left-clicks on empty board space (no card under it).
+    createRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Build the grid; nothing is read until a model is attached."""
@@ -69,7 +71,7 @@ class WorkspaceBoard(QListView):
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setUniformItemSizes(True)
         self.setSpacing(theme.SPACING)
-        self.setGridSize(CARD_SIZE)
+        self.setGridSize(QSize(CARD_SIZE.width() + theme.SPACING, CARD_SIZE.height() + theme.SPACING))
         self._delegate = CardDelegate(self)
         self.setItemDelegate(self._delegate)
         # Without mouse tracking the view is never told the cursor moved, and a
@@ -139,15 +141,25 @@ class WorkspaceBoard(QListView):
         position = event.position().toPoint()
         pill = self._pill_at(position)
         if event.button() == Qt.MouseButton.RightButton:
+            # Le menu contextuel est géré par contextMenuEvent (le handler Qt
+            # standard) pour éviter d'émettre contextRequested deux fois sur un
+            # seul clic droit, ce qui faisait réapparaître le menu après un clic
+            # gauche. Ici on se contente de sélectionner la carte sous le curseur.
             index = self.indexAt(position)
             if index.isValid():
                 self.setCurrentIndex(index)
-                self.contextRequested.emit(index)
             event.accept()
             return
         super().mousePressEvent(event)
-        if pill.isValid() and event.button() == Qt.MouseButton.LeftButton:
-            self.pillActivated.emit(pill)
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self.indexAt(position)
+            if not index.isValid():
+                # Clic sur du vide : on demande la création d'un workspace.
+                self.createRequested.emit()
+            elif pill.isValid():
+                self.pillActivated.emit(pill)
+            # Toujours accepter le clic gauche pour qu'il ne se propage pas
+            # et ne fasse pas réapparaître un menu contextuel fermé juste avant.
             event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:

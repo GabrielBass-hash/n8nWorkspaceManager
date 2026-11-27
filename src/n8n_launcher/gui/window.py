@@ -24,12 +24,10 @@ from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -51,7 +49,6 @@ from ..workspaces.status import (
     primary_action,
     status_for,
 )
-from . import theme
 from .actions import WorkspaceActions
 from .board import WorkspaceBoard
 from .browser import WebAppLaunchError, open_web_app, workspace_url
@@ -63,8 +60,7 @@ from .workspace_model import WorkspaceListModel
 class MainWindow(QMainWindow):
     """Show every workspace as a card and keep the board in step with the manager."""
 
-    #: Filled by :meth:`_build_header` during construction.
-    _header_row: QHBoxLayout
+
 
     def __init__(self, manager: WorkspaceManager, parent: QWidget | None = None) -> None:
         """Build the window over *manager* and subscribe to its changes."""
@@ -96,7 +92,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._build_header(central))
 
         self._board = WorkspaceBoard(central)
         self._board.setModel(self._model)
@@ -128,6 +123,7 @@ class MainWindow(QMainWindow):
         self._board.nameEditRequested.connect(self._on_name_edit_requested)
         self._board.pillActivated.connect(self._on_pill_activated)
         self._board.contextRequested.connect(self._on_context_requested)
+        self._board.createRequested.connect(self._on_new)
         self._actions.failed.connect(self._on_failed)
         self._actions.ready.connect(self._on_ready)
         self._actions.busyChanged.connect(self._on_busy)
@@ -157,28 +153,7 @@ class MainWindow(QMainWindow):
         self._model.apply_workspace(workspace)
         self._sync_actions()
 
-    def _build_header(self, parent: QWidget) -> QWidget:
-        """Return the top bar; the actions layer fills it after construction."""
-        header = QWidget(parent)
-        header.setObjectName("header")
-        row = QHBoxLayout(header)
-        row.setContentsMargins(
-            theme.CARD_PADDING, theme.CARD_PADDING, theme.CARD_PADDING, theme.CARD_PADDING
-        )
-        title = QLabel("Workspaces", header)
-        title.setObjectName("title")
-        row.addWidget(title)
-        row.addStretch(1)
-        self._new_button = QPushButton("Nouveau", header)
-        self._new_button.setObjectName("new")
-        self._stop_button = QPushButton("Arrêter", header)
-        self._stop_button.setObjectName("stop")
-        self._new_button.clicked.connect(self._on_new)
-        self._stop_button.clicked.connect(self._on_stop)
-        row.addWidget(self._new_button)
-        row.addWidget(self._stop_button)
-        self._header_row = row
-        return header
+
 
     def _sync_empty_state(self) -> None:
         """Show the empty page exactly when there is no workspace."""
@@ -193,11 +168,6 @@ class MainWindow(QMainWindow):
     def board(self) -> WorkspaceBoard:
         """Return the card view (used by the actions layer to read selection)."""
         return self._board
-
-    @property
-    def header_row(self) -> QHBoxLayout:
-        """Return the header layout an actions layer appends its buttons to."""
-        return self._header_row
 
     @property
     def shows_empty_state(self) -> bool:
@@ -339,24 +309,17 @@ class MainWindow(QMainWindow):
             self._actions.delete(workspace)
 
     def _sync_actions(self) -> None:
-        """Enable the header stop button for the selected card, and name its target.
+        """Kept for callers that expect an actions refresh after a state change.
 
-        The tooltip exists because a greyed button says *that* it cannot be used
-        but not *which* card it means; a single disabled control in an otherwise
-        empty header reads as a broken app rather than as an inapplicable one.
+        The header buttons were removed with the top bar, so there is nothing
+        to enable/disable here anymore. The selection still drives the pill
+        and context menu through the board signals.
         """
-        workspace = self.selected_workspace()
-        status = status_for(workspace.state) if workspace is not None else None
-        can_stop = bool(status and status.can_stop) and not self._busy
-        self._stop_button.setEnabled(can_stop)
-        self._stop_button.setToolTip(
-            f"Arrêter « {workspace.name} »" if can_stop and workspace is not None else ""
-        )
+        self.selected_workspace()
 
     def _on_busy(self, busy: bool) -> None:
         """Lock the actions while a task runs, then re-derive them."""
         self._busy = busy
-        self._new_button.setEnabled(not busy)
         self._sync_actions()
 
     def _on_ready(self, reachable: Reachable) -> None:
