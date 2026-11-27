@@ -412,7 +412,16 @@ pub fn installer_script(
     target: &Path,
     script_dir: Option<&Path>,
 ) -> Result<PathBuf, UpdateError> {
-    let system = platform_system();
+    installer_script_with_system(asset_path, target, script_dir, platform_system())
+}
+
+/// Variante injectable : écrit le script pour une plateforme explicite.
+pub fn installer_script_with_system(
+    asset_path: &Path,
+    target: &Path,
+    script_dir: Option<&Path>,
+    system: &str,
+) -> Result<PathBuf, UpdateError> {
     let pid = std::process::id();
     let directory = script_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         crate::core::paths::updates_dir().map(|d| d.join("updates")).unwrap_or_else(|_| std::path::PathBuf::from("~/.local/share/n8n-launcher/updates"))
@@ -626,7 +635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let asset = dir.path().join("n8n-launcher.new");
         let target = dir.path().join("n8n-launcher");
-        let script = installer_script(&asset, &target, Some(dir.path())).unwrap();
+        let script = installer_script_with_system(&asset, &target, Some(dir.path()), "Linux").unwrap();
         assert_eq!(
             script.file_name().unwrap().to_string_lossy().to_string(),
             "apply_update.sh"
