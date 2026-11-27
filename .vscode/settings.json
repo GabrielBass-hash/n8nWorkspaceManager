@@ -1,0 +1,12 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "rust/n8n-launcher-workspace/Cargo.toml"
+  ],
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "files.watcherExclude": {
+    "**/rust/**/target/**": true
+  },
+  "search.exclude": {
+    "**/rust/**/target/**": true
+  }
+}

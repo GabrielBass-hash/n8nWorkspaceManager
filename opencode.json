@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "instructions": ["AGENTS.md", "docs/architecture.md"],
+
+  "plugin": ["opencode-notify@0.3.1"],
+
+  "watcher": {
+    "ignore": [
+      "target/**",
+      "dist/**",
+      ".git/**",
+      ".opencode/node_modules/**",
+      "state/**",
+      "logs/**"
+    ]
+  },
+
+  "tool_output": {
+    "max_lines": 400
+  }
+}
